@@ -1,11 +1,13 @@
+cat > railway.json << 'EOF'
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python bot/bot.py",
+    "startCommand": "python dashboard/server.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
 }
+EOF
