@@ -1,6 +1,7 @@
 """
 Discord AI Bot - Powered by Groq (free, fast cloud AI)
-Supports full personality customization, persistent memory, and chime-in mode.
+Full personality customization, persistent memory, chime-in mode,
+passive watching, emoji reactions, silence check-ins, rotating status.
 """
 
 import discord
@@ -10,6 +11,8 @@ import aiohttp
 import asyncio
 import logging
 import random
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict, deque
 
@@ -30,20 +33,36 @@ MEMORY_DIR.mkdir(exist_ok=True)
 DEFAULT_PERSONALITY = {
     "name": "Aria",
     "model": "llama-3.3-70b-versatile",
-    "system_prompt": (
-        "You are Aria, a friendly and helpful Discord community assistant. "
-        "You are witty, concise, and genuinely care about helping community members. "
-        "Keep responses conversational and under 300 words unless detail is truly needed."
-    ),
-    "temperature": 0.7,
-    "max_memory_messages": 20,
+    "system_prompt": "You are a friendly Discord community assistant.",
+    "temperature": 0.9,
+    "max_memory_messages": 30,
     "respond_to_bots": False,
     "trigger_mode": "mention_or_reply",
     "allowed_channels": [],
     "blocked_users": [],
+    # Chime-in (spontaneous messages)
     "chime_in_enabled": False,
-    "chime_in_min": 10,
-    "chime_in_max": 20,
+    "chime_in_min": 40,
+    "chime_in_max": 80,
+    # Passive watching (log all messages for context even if not replying)
+    "watch_mode_enabled": True,
+    # Emoji reactions
+    "reaction_enabled": True,
+    "reaction_chance": 0.05,   # 5% chance per message to react
+    # Silence check-in
+    "silence_checkin_enabled": True,
+    "silence_minutes": 45,     # trigger if no bot activity for this long AND channel has activity
+    # Rotating status
+    "status_messages": [
+        "watching",
+        "judging quietly",
+        "peaked",
+        "counting typos",
+        "3am thoughts",
+        "making bad decisions",
+        "up way too late"
+    ],
+    "status_rotation_minutes": 10,
 }
 
 
@@ -62,9 +81,17 @@ def get_chime_threshold(cfg: dict) -> int:
     return random.randint(cfg["chime_in_min"], cfg["chime_in_max"])
 
 
+# ── Per-channel last-activity tracking (for silence check-in) ────────────────
+last_bot_activity: dict[str, float] = {}
+last_channel_activity: dict[str, float] = {}
+last_channel_id_used: dict[str, int] = {}  # channel_id -> guild_id
+
+
 # ── Memory ────────────────────────────────────────────────────────────────────
 class MemoryStore:
-    def __init__(self, max_messages: int = 20):
+    """Stores last N messages per channel as a passive log.
+    Keeps user+assistant turns, plus 'watched' user messages that weren't replied to."""
+    def __init__(self, max_messages: int = 30):
         self.max_messages = max_messages
         self._cache: dict[str, deque] = {}
 
@@ -141,6 +168,13 @@ async def ask_groq(system_prompt, messages, model, temperature, api_key) -> str:
         return f"⚠️ Unexpected error: {e}"
 
 
+# ── Common emojis for reactions ───────────────────────────────────────────────
+REACTION_POOL = [
+    "💀", "👀", "🔥", "😂", "🤡", "😒", "🤨", "😮‍💨",
+    "🙄", "💅", "🧠", "⚡", "💯", "🫠", "🫡", "🤌"
+]
+
+
 # ── Send helper ───────────────────────────────────────────────────────────────
 async def send_reply(message: discord.Message, reply: str, chimed_in: bool = False):
     if len(reply) <= 2000:
@@ -166,6 +200,10 @@ GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 
 
+def channel_allowed(channel_id: str, cfg: dict) -> bool:
+    return not cfg["allowed_channels"] or channel_id in cfg["allowed_channels"]
+
+
 def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
     if message.author == client.user:
         return False
@@ -173,7 +211,7 @@ def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
         return False
     if str(message.author.id) in cfg["blocked_users"]:
         return False
-    if cfg["allowed_channels"] and str(message.channel.id) not in cfg["allowed_channels"]:
+    if not channel_allowed(str(message.channel.id), cfg):
         return False
     if cfg["trigger_mode"] == "all_messages":
         return True
@@ -187,19 +225,99 @@ def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
     return mentioned or is_reply
 
 
+def get_time_context() -> str:
+    """Returns natural time context like 'it's 3am' for the AI to optionally reference."""
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    if 0 <= hour < 5:
+        return f"(It is currently {hour}:{now.minute:02d} UTC — late night / early morning)"
+    if 5 <= hour < 12:
+        return f"(It is currently {hour}:{now.minute:02d} UTC — morning)"
+    if 12 <= hour < 18:
+        return f"(It is currently {hour}:{now.minute:02d} UTC — afternoon)"
+    return f"(It is currently {hour}:{now.minute:02d} UTC — evening/night)"
+
+
+# ── Background tasks: status rotation + silence check-in ──────────────────────
+async def rotate_status():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        cfg = load_config()
+        statuses = cfg.get("status_messages") or ["online"]
+        status = random.choice(statuses)
+        try:
+            await client.change_presence(activity=discord.CustomActivity(name=status))
+        except Exception as e:
+            log.warning("Status change failed: %s", e)
+        await asyncio.sleep(max(cfg.get("status_rotation_minutes", 10), 2) * 60)
+
+
+async def silence_checker():
+    """Checks every few minutes if a channel has been quiet and drops a message."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(180)  # check every 3 min
+        cfg = load_config()
+        if not cfg.get("silence_checkin_enabled"):
+            continue
+        if not GROQ_API_KEY:
+            continue
+        silence_seconds = cfg["silence_minutes"] * 60
+
+        for channel_id, ch_last in list(last_channel_activity.items()):
+            if not channel_allowed(channel_id, cfg):
+                continue
+            bot_last = last_bot_activity.get(channel_id, 0)
+            now = time.time()
+            # Channel had activity recently (within 2h) but bot has been quiet for threshold
+            if (now - ch_last) < 7200 and (now - bot_last) > silence_seconds:
+                try:
+                    channel = client.get_channel(int(channel_id))
+                    if channel is None:
+                        continue
+                    history = memory.get_messages(channel_id)
+                    system = cfg["system_prompt"] + (
+                        "\n\nThe channel has been quiet for a while but people were active recently. "
+                        "Drop a short, spontaneous message — 1 sentence max — like you're lurking and decided to say something. "
+                        "Don't greet anyone. Don't ask 'is anyone here'. Just say something in-character. "
+                        + get_time_context()
+                    )
+                    reply = await ask_groq(
+                        system_prompt=system,
+                        messages=history if history else [{"role":"user","content":"..."}],
+                        model=cfg["model"],
+                        temperature=min(cfg["temperature"] + 0.15, 1.0),
+                        api_key=GROQ_API_KEY,
+                    )
+                    if not reply.startswith("⚠️"):
+                        await channel.send(reply)
+                        last_bot_activity[channel_id] = time.time()
+                        memory.append(channel_id, "assistant", reply)
+                        log.info("Silence check-in on #%s", channel.name if hasattr(channel,'name') else channel_id)
+                except Exception as e:
+                    log.warning("Silence check-in failed: %s", e)
+
+
 @client.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
+    client.loop.create_task(rotate_status())
+    client.loop.create_task(silence_checker())
 
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
+    if message.author.bot and message.author != client.user:
+        # track other bots' activity for channel-alive detection but don't respond
+        last_channel_activity[str(message.channel.id)] = time.time()
+        return
+    if message.author == client.user:
         return
 
     cfg = load_config()
     memory.update_maxlen(cfg["max_memory_messages"])
     channel_id = str(message.channel.id)
+    last_channel_activity[channel_id] = time.time()
 
     # ── Commands ──────────────────────────────────────────────────────────────
     if message.content.strip() == "!clearhistory":
@@ -214,21 +332,39 @@ async def on_message(message: discord.Message):
         embed.add_field(name="Memory", value=f"{cfg['max_memory_messages']} msgs", inline=True)
         chime = f"Every {cfg['chime_in_min']}–{cfg['chime_in_max']} msgs" if cfg.get("chime_in_enabled") else "Off"
         embed.add_field(name="Chime-in", value=chime, inline=True)
+        embed.add_field(name="Watch mode", value="On" if cfg.get("watch_mode_enabled") else "Off", inline=True)
+        embed.add_field(name="Reactions", value=f"{int(cfg.get('reaction_chance',0)*100)}% chance" if cfg.get("reaction_enabled") else "Off", inline=True)
         await message.reply(embed=embed)
         return
+
+    # Skip blocked users and disallowed channels for ALL features
+    if str(message.author.id) in cfg["blocked_users"]:
+        return
+    if not channel_allowed(channel_id, cfg):
+        return
+
+    # ── Passive watch mode: log every message so bot sees context later ──────
+    if cfg.get("watch_mode_enabled", True):
+        watch_line = f"[{message.author.display_name}]: {message.content}"
+        memory.append(channel_id, "user", watch_line)
+
+    # ── Emoji reaction chance ────────────────────────────────────────────────
+    if cfg.get("reaction_enabled") and random.random() < cfg.get("reaction_chance", 0.05):
+        try:
+            await message.add_reaction(random.choice(REACTION_POOL))
+        except Exception as e:
+            log.debug("Reaction failed: %s", e)
 
     # ── Chime-in counter ──────────────────────────────────────────────────────
     chime_triggered = False
     if cfg.get("chime_in_enabled"):
-        channel_allowed = not cfg["allowed_channels"] or channel_id in cfg["allowed_channels"]
-        if channel_allowed:
-            message_counters[channel_id] += 1
-            if channel_id not in chime_thresholds:
-                chime_thresholds[channel_id] = get_chime_threshold(cfg)
-            if message_counters[channel_id] >= chime_thresholds[channel_id]:
-                message_counters[channel_id] = 0
-                chime_thresholds[channel_id] = get_chime_threshold(cfg)
-                chime_triggered = True
+        message_counters[channel_id] += 1
+        if channel_id not in chime_thresholds:
+            chime_thresholds[channel_id] = get_chime_threshold(cfg)
+        if message_counters[channel_id] >= chime_thresholds[channel_id]:
+            message_counters[channel_id] = 0
+            chime_thresholds[channel_id] = get_chime_threshold(cfg)
+            chime_triggered = True
 
     direct = is_direct_trigger(message, cfg)
 
@@ -244,10 +380,12 @@ async def on_message(message: discord.Message):
         history = memory.get_messages(channel_id)
         chime_system = (
             cfg["system_prompt"] +
-            "\n\nYou are chiming into an ongoing conversation naturally. "
-            "React to what's been said, add something fun or interesting, or ask a question. "
-            "Keep it short — 1 to 3 sentences max. "
-            "Don't announce that you're joining the conversation."
+            "\n\nYou are chiming into an ongoing conversation uninvited. "
+            "You've been silently reading every message. Reference specific things people said, "
+            "call users out by name if relevant (you can see their display names in [brackets] before each message). "
+            "Arrive like you've been listening the whole time and have already formed a verdict. "
+            "Keep it short — 1 to 3 sentences max. Do NOT announce that you're joining. "
+            + get_time_context()
         )
         async with message.channel.typing():
             reply = await ask_groq(
@@ -257,9 +395,11 @@ async def on_message(message: discord.Message):
                 temperature=min(cfg["temperature"] + 0.1, 1.0),
                 api_key=GROQ_API_KEY,
             )
-        memory.append(channel_id, "assistant", reply)
-        await send_reply(message, reply, chimed_in=True)
-        log.info("Chimed in on #%s", message.channel)
+        if not reply.startswith("⚠️"):
+            memory.append(channel_id, "assistant", reply)
+            last_bot_activity[channel_id] = time.time()
+            await send_reply(message, reply, chimed_in=True)
+            log.info("Chimed in on #%s", message.channel)
         return
 
     # ── Direct reply ──────────────────────────────────────────────────────────
@@ -268,22 +408,26 @@ async def on_message(message: discord.Message):
         content = content.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "").strip()
 
     if not content:
-        await message.reply("Hey! How can I help? 😊")
+        await message.reply("what")
         return
 
-    memory.append(channel_id, "user", f"[{message.author.display_name}]: {content}")
+    # Watch mode already logged the message, but if off we still need to log for context
+    if not cfg.get("watch_mode_enabled", True):
+        memory.append(channel_id, "user", f"[{message.author.display_name}]: {content}")
 
     async with message.channel.typing():
         history = memory.get_messages(channel_id)
         reply = await ask_groq(
-            system_prompt=cfg["system_prompt"],
+            system_prompt=cfg["system_prompt"] + "\n\n" + get_time_context(),
             messages=history,
             model=cfg["model"],
             temperature=cfg["temperature"],
             api_key=GROQ_API_KEY,
         )
 
-    memory.append(channel_id, "assistant", reply)
+    if not reply.startswith("⚠️"):
+        memory.append(channel_id, "assistant", reply)
+        last_bot_activity[channel_id] = time.time()
     await send_reply(message, reply)
     log.info("Replied to %s in #%s", message.author, message.channel)
 

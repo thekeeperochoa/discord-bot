@@ -10,5 +10,12 @@
   "blocked_users": [],
   "chime_in_enabled": true,
   "chime_in_min": 10,
-  "chime_in_max": 20
+  "chime_in_max": 20,
+  "watch_mode_enabled": true,
+"reaction_enabled": true,
+"reaction_chance": 0.05,
+"silence_checkin_enabled": true,
+"silence_minutes": 45,
+"status_messages": ["watching", "judging quietly", "peaked", "counting typos", "3am thoughts", "making bad decisions"],
+"status_rotation_minutes": 10
 }
