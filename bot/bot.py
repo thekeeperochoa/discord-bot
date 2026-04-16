@@ -38,6 +38,7 @@ DEFAULT_PERSONALITY = {
     "max_memory_messages": 30,
     "respond_to_bots": False,
     "trigger_mode": "mention_or_reply",
+    "trigger_keywords": [],
     "allowed_channels": [],
     "blocked_users": [],
     # Chime-in (spontaneous messages)
@@ -222,7 +223,18 @@ def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
         and isinstance(message.reference.resolved, discord.Message)
         and message.reference.resolved.author == client.user
     )
-    return mentioned or is_reply
+    # Keyword triggers — respond if any name in trigger_keywords appears as a whole word
+    keyword_hit = False
+    keywords = cfg.get("trigger_keywords", [])
+    if keywords:
+        import re
+        text = message.content.lower()
+        for kw in keywords:
+            # match whole word, case insensitive
+            if re.search(r'\b' + re.escape(kw.lower()) + r'\b', text):
+                keyword_hit = True
+                break
+    return mentioned or is_reply or keyword_hit
 
 
 def get_time_context() -> str:

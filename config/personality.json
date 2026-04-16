@@ -6,6 +6,7 @@
   "max_memory_messages": 20,
   "respond_to_bots": false,
   "trigger_mode": "mention_or_reply",
+  "trigger_keywords": ["jb", "jordan", "jordan belfort"],
   "allowed_channels": [],
   "blocked_users": [],
   "chime_in_enabled": true,
