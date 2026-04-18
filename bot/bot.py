@@ -57,7 +57,7 @@ DEFAULT_PERSONALITY = {
     "status_rotation_minutes": 10,
     # Provider models — one per provider, used when that provider is the fallback in use
     "groq_model":     "llama-3.3-70b-versatile",
-    "cerebras_model": "gpt-oss-120b",
+    "cerebras_model": "llama3.1-8b",
     "gemini_model":   "gemini-2.5-flash-lite",
     # Preferred provider order
     "provider_order": ["groq", "cerebras", "gemini"],
