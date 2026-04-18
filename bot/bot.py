@@ -1,5 +1,5 @@
 """
-Discord AI Bot - Powered by Groq (free, fast cloud AI)
+Discord AI Bot - Multi-provider fallback (Groq → Cerebras → Gemini)
 Full personality customization, persistent memory, chime-in mode,
 passive watching, emoji reactions, silence check-ins, rotating status.
 """
@@ -12,6 +12,7 @@ import asyncio
 import logging
 import random
 import time
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict, deque
@@ -32,7 +33,7 @@ MEMORY_DIR.mkdir(exist_ok=True)
 
 DEFAULT_PERSONALITY = {
     "name": "Aria",
-    "model": "llama-3.3-70b-versatile",
+    # "model" is now interpreted per-provider; we pick the right model for whoever isn't rate-limited
     "system_prompt": "You are a friendly Discord community assistant.",
     "temperature": 0.9,
     "max_memory_messages": 30,
@@ -41,29 +42,25 @@ DEFAULT_PERSONALITY = {
     "trigger_keywords": [],
     "allowed_channels": [],
     "blocked_users": [],
-    # Chime-in (spontaneous messages)
     "chime_in_enabled": False,
     "chime_in_min": 40,
     "chime_in_max": 80,
-    # Passive watching (log all messages for context even if not replying)
     "watch_mode_enabled": True,
-    # Emoji reactions
     "reaction_enabled": True,
-    "reaction_chance": 0.05,   # 5% chance per message to react
-    # Silence check-in
+    "reaction_chance": 0.05,
     "silence_checkin_enabled": True,
-    "silence_minutes": 45,     # trigger if no bot activity for this long AND channel has activity
-    # Rotating status
+    "silence_minutes": 45,
     "status_messages": [
-        "watching",
-        "judging quietly",
-        "peaked",
-        "counting typos",
-        "3am thoughts",
-        "making bad decisions",
-        "up way too late"
+        "watching", "judging quietly", "peaked", "counting typos",
+        "3am thoughts", "making bad decisions", "up way too late"
     ],
     "status_rotation_minutes": 10,
+    # Provider models — one per provider, used when that provider is the fallback in use
+    "groq_model":     "llama-3.3-70b-versatile",
+    "cerebras_model": "llama-3.3-70b",
+    "gemini_model":   "gemini-2.5-flash",
+    # Preferred provider order
+    "provider_order": ["groq", "cerebras", "gemini"],
 }
 
 
@@ -74,24 +71,18 @@ def load_config() -> dict:
     return DEFAULT_PERSONALITY.copy()
 
 
-# ── Chime-in counters ─────────────────────────────────────────────────────────
+# ── Chime-in counters & silence tracking ─────────────────────────────────────
 message_counters: dict[str, int] = defaultdict(int)
 chime_thresholds: dict[str, int] = {}
+last_bot_activity: dict[str, float] = {}
+last_channel_activity: dict[str, float] = {}
 
 def get_chime_threshold(cfg: dict) -> int:
     return random.randint(cfg["chime_in_min"], cfg["chime_in_max"])
 
 
-# ── Per-channel last-activity tracking (for silence check-in) ────────────────
-last_bot_activity: dict[str, float] = {}
-last_channel_activity: dict[str, float] = {}
-last_channel_id_used: dict[str, int] = {}  # channel_id -> guild_id
-
-
 # ── Memory ────────────────────────────────────────────────────────────────────
 class MemoryStore:
-    """Stores last N messages per channel as a passive log.
-    Keeps user+assistant turns, plus 'watched' user messages that weren't replied to."""
     def __init__(self, max_messages: int = 30):
         self.max_messages = max_messages
         self._cache: dict[str, deque] = {}
@@ -136,8 +127,15 @@ class MemoryStore:
 memory = MemoryStore()
 
 
-# ── Groq API ──────────────────────────────────────────────────────────────────
-async def ask_groq(system_prompt, messages, model, temperature, api_key) -> str:
+# ── Provider implementations ─────────────────────────────────────────────────
+class RateLimitError(Exception):
+    pass
+
+class ProviderError(Exception):
+    pass
+
+
+async def call_groq(system_prompt, messages, model, temperature, api_key):
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + messages,
@@ -145,38 +143,139 @@ async def ask_groq(system_prompt, messages, model, temperature, api_key) -> str:
         "max_tokens": 1024,
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 401:
-                    return "⚠️ Invalid Groq API key."
-                if resp.status == 429:
-                    return "⚠️ Groq rate limit hit. Try again in a moment."
-                if resp.status != 200:
-                    text = await resp.text()
-                    log.error("Groq error %s: %s", resp.status, text)
-                    return "⚠️ AI error. Please try again."
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-    except asyncio.TimeoutError:
-        return "⚠️ The AI took too long to respond."
-    except Exception as e:
-        log.exception("Unexpected Groq error")
-        return f"⚠️ Unexpected error: {e}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            json=payload, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 429:
+                raise RateLimitError("groq rate limited")
+            if resp.status == 401:
+                raise ProviderError("groq invalid key")
+            if resp.status != 200:
+                text = await resp.text()
+                raise ProviderError(f"groq {resp.status}: {text[:200]}")
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"].strip()
 
 
-# ── Common emojis for reactions ───────────────────────────────────────────────
+async def call_cerebras(system_prompt, messages, model, temperature, api_key):
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system_prompt}] + messages,
+        "temperature": temperature,
+        "max_tokens": 1024,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.cerebras.ai/v1/chat/completions",
+            json=payload, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 429:
+                raise RateLimitError("cerebras rate limited")
+            if resp.status == 401:
+                raise ProviderError("cerebras invalid key")
+            if resp.status != 200:
+                text = await resp.text()
+                raise ProviderError(f"cerebras {resp.status}: {text[:200]}")
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+
+
+async def call_gemini(system_prompt, messages, model, temperature, api_key):
+    # Gemini has a different request shape
+    contents = []
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+    payload = {
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 429:
+                raise RateLimitError("gemini rate limited")
+            if resp.status in (401, 403):
+                raise ProviderError("gemini invalid key")
+            if resp.status != 200:
+                text = await resp.text()
+                raise ProviderError(f"gemini {resp.status}: {text[:200]}")
+            data = await resp.json()
+            try:
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except (KeyError, IndexError):
+                raise ProviderError(f"gemini malformed response: {str(data)[:200]}")
+
+
+# Cooldowns so we don't hammer a rate-limited provider
+PROVIDER_COOLDOWN: dict[str, float] = {}
+
+async def ask_ai(system_prompt, messages, cfg) -> str:
+    """Try each provider in order until one succeeds."""
+    providers = cfg.get("provider_order", ["groq", "cerebras", "gemini"])
+    temperature = cfg["temperature"]
+    errors = []
+    now = time.time()
+
+    for provider in providers:
+        # Respect per-provider cooldown (60s after a rate limit hit)
+        if PROVIDER_COOLDOWN.get(provider, 0) > now:
+            continue
+
+        key_env = f"{provider.upper()}_API_KEY"
+        api_key = os.environ.get(key_env, "")
+        if not api_key:
+            continue
+
+        try:
+            if provider == "groq":
+                reply = await call_groq(system_prompt, messages, cfg["groq_model"], temperature, api_key)
+            elif provider == "cerebras":
+                reply = await call_cerebras(system_prompt, messages, cfg["cerebras_model"], temperature, api_key)
+            elif provider == "gemini":
+                reply = await call_gemini(system_prompt, messages, cfg["gemini_model"], temperature, api_key)
+            else:
+                continue
+            log.info("✓ Used provider: %s", provider)
+            return reply
+
+        except RateLimitError:
+            log.warning("%s rate limited, cooling down 60s", provider)
+            PROVIDER_COOLDOWN[provider] = time.time() + 60
+            errors.append(f"{provider}: rate limit")
+            continue
+        except ProviderError as e:
+            log.warning("%s failed: %s", provider, e)
+            errors.append(f"{provider}: {e}")
+            continue
+        except asyncio.TimeoutError:
+            log.warning("%s timed out", provider)
+            errors.append(f"{provider}: timeout")
+            continue
+        except Exception as e:
+            log.exception("Unexpected error from %s", provider)
+            errors.append(f"{provider}: {e}")
+            continue
+
+    log.error("All providers failed: %s", errors)
+    return "⚠️ All AI providers are busy right now. Try again in a moment."
+
+
+# ── Common emoji reactions ────────────────────────────────────────────────────
 REACTION_POOL = [
     "💀", "👀", "🔥", "😂", "🤡", "😒", "🤨", "😮‍💨",
     "🙄", "💅", "🧠", "⚡", "💯", "🫠", "🫡", "🤌"
 ]
 
 
-# ── Send helper ───────────────────────────────────────────────────────────────
 async def send_reply(message: discord.Message, reply: str, chimed_in: bool = False):
     if len(reply) <= 2000:
         if chimed_in:
@@ -197,7 +296,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 
 
@@ -223,22 +321,15 @@ def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
         and isinstance(message.reference.resolved, discord.Message)
         and message.reference.resolved.author == client.user
     )
-    # Keyword triggers — respond if any name in trigger_keywords appears as a whole word
     keyword_hit = False
-    keywords = cfg.get("trigger_keywords", [])
-    if keywords:
-        import re
-        text = message.content.lower()
-        for kw in keywords:
-            # match whole word, case insensitive
-            if re.search(r'\b' + re.escape(kw.lower()) + r'\b', text):
-                keyword_hit = True
-                break
+    for kw in cfg.get("trigger_keywords", []):
+        if re.search(r'\b' + re.escape(kw.lower()) + r'\b', message.content.lower()):
+            keyword_hit = True
+            break
     return mentioned or is_reply or keyword_hit
 
 
 def get_time_context() -> str:
-    """Returns natural time context like 'it's 3am' for the AI to optionally reference."""
     now = datetime.now(timezone.utc)
     hour = now.hour
     if 0 <= hour < 5:
@@ -250,7 +341,6 @@ def get_time_context() -> str:
     return f"(It is currently {hour}:{now.minute:02d} UTC — evening/night)"
 
 
-# ── Background tasks: status rotation + silence check-in ──────────────────────
 async def rotate_status():
     await client.wait_until_ready()
     while not client.is_closed():
@@ -265,23 +355,18 @@ async def rotate_status():
 
 
 async def silence_checker():
-    """Checks every few minutes if a channel has been quiet and drops a message."""
     await client.wait_until_ready()
     while not client.is_closed():
-        await asyncio.sleep(180)  # check every 3 min
+        await asyncio.sleep(180)
         cfg = load_config()
         if not cfg.get("silence_checkin_enabled"):
             continue
-        if not GROQ_API_KEY:
-            continue
         silence_seconds = cfg["silence_minutes"] * 60
-
         for channel_id, ch_last in list(last_channel_activity.items()):
             if not channel_allowed(channel_id, cfg):
                 continue
             bot_last = last_bot_activity.get(channel_id, 0)
             now = time.time()
-            # Channel had activity recently (within 2h) but bot has been quiet for threshold
             if (now - ch_last) < 7200 and (now - bot_last) > silence_seconds:
                 try:
                     channel = client.get_channel(int(channel_id))
@@ -294,18 +379,15 @@ async def silence_checker():
                         "Don't greet anyone. Don't ask 'is anyone here'. Just say something in-character. "
                         + get_time_context()
                     )
-                    reply = await ask_groq(
-                        system_prompt=system,
-                        messages=history if history else [{"role":"user","content":"..."}],
-                        model=cfg["model"],
-                        temperature=min(cfg["temperature"] + 0.15, 1.0),
-                        api_key=GROQ_API_KEY,
+                    reply = await ask_ai(
+                        system, history if history else [{"role":"user","content":"..."}],
+                        {**cfg, "temperature": min(cfg["temperature"] + 0.15, 1.0)},
                     )
                     if not reply.startswith("⚠️"):
                         await channel.send(reply)
                         last_bot_activity[channel_id] = time.time()
                         memory.append(channel_id, "assistant", reply)
-                        log.info("Silence check-in on #%s", channel.name if hasattr(channel,'name') else channel_id)
+                        log.info("Silence check-in on #%s", getattr(channel, "name", channel_id))
                 except Exception as e:
                     log.warning("Silence check-in failed: %s", e)
 
@@ -313,6 +395,9 @@ async def silence_checker():
 @client.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
+    # Report which providers are configured
+    available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
+    log.info("Available AI providers: %s", available or "NONE")
     client.loop.create_task(rotate_status())
     client.loop.create_task(silence_checker())
 
@@ -320,7 +405,6 @@ async def on_ready():
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot and message.author != client.user:
-        # track other bots' activity for channel-alive detection but don't respond
         last_channel_activity[str(message.channel.id)] = time.time()
         return
     if message.author == client.user:
@@ -331,7 +415,7 @@ async def on_message(message: discord.Message):
     channel_id = str(message.channel.id)
     last_channel_activity[channel_id] = time.time()
 
-    # ── Commands ──────────────────────────────────────────────────────────────
+    # Commands
     if message.content.strip() == "!clearhistory":
         memory.clear(channel_id)
         await message.reply("🧹 Conversation history cleared for this channel.")
@@ -339,35 +423,35 @@ async def on_message(message: discord.Message):
 
     if message.content.strip() == "!botinfo":
         embed = discord.Embed(title=f"🤖 {cfg['name']}", color=discord.Color.blurple())
-        embed.add_field(name="Model", value=cfg["model"], inline=True)
+        embed.add_field(name="Providers", value=", ".join(cfg.get("provider_order", [])), inline=False)
         embed.add_field(name="Trigger", value=cfg["trigger_mode"], inline=True)
         embed.add_field(name="Memory", value=f"{cfg['max_memory_messages']} msgs", inline=True)
         chime = f"Every {cfg['chime_in_min']}–{cfg['chime_in_max']} msgs" if cfg.get("chime_in_enabled") else "Off"
         embed.add_field(name="Chime-in", value=chime, inline=True)
         embed.add_field(name="Watch mode", value="On" if cfg.get("watch_mode_enabled") else "Off", inline=True)
-        embed.add_field(name="Reactions", value=f"{int(cfg.get('reaction_chance',0)*100)}% chance" if cfg.get("reaction_enabled") else "Off", inline=True)
+        available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
+        embed.add_field(name="Keys loaded", value=", ".join(available) or "none", inline=True)
         await message.reply(embed=embed)
         return
 
-    # Skip blocked users and disallowed channels for ALL features
     if str(message.author.id) in cfg["blocked_users"]:
         return
     if not channel_allowed(channel_id, cfg):
         return
 
-    # ── Passive watch mode: log every message so bot sees context later ──────
+    # Passive watching — log every message
     if cfg.get("watch_mode_enabled", True):
         watch_line = f"[{message.author.display_name}]: {message.content}"
         memory.append(channel_id, "user", watch_line)
 
-    # ── Emoji reaction chance ────────────────────────────────────────────────
+    # Emoji reaction chance
     if cfg.get("reaction_enabled") and random.random() < cfg.get("reaction_chance", 0.05):
         try:
             await message.add_reaction(random.choice(REACTION_POOL))
         except Exception as e:
             log.debug("Reaction failed: %s", e)
 
-    # ── Chime-in counter ──────────────────────────────────────────────────────
+    # Chime-in counter
     chime_triggered = False
     if cfg.get("chime_in_enabled"):
         message_counters[channel_id] += 1
@@ -383,11 +467,7 @@ async def on_message(message: discord.Message):
     if not direct and not chime_triggered:
         return
 
-    if not GROQ_API_KEY:
-        await message.reply("⚠️ GROQ_API_KEY is not set.")
-        return
-
-    # ── Chime-in response ─────────────────────────────────────────────────────
+    # Chime-in response
     if chime_triggered and not direct:
         history = memory.get_messages(channel_id)
         chime_system = (
@@ -400,12 +480,10 @@ async def on_message(message: discord.Message):
             + get_time_context()
         )
         async with message.channel.typing():
-            reply = await ask_groq(
-                system_prompt=chime_system,
-                messages=history if history else [{"role": "user", "content": message.content}],
-                model=cfg["model"],
-                temperature=min(cfg["temperature"] + 0.1, 1.0),
-                api_key=GROQ_API_KEY,
+            reply = await ask_ai(
+                chime_system,
+                history if history else [{"role": "user", "content": message.content}],
+                {**cfg, "temperature": min(cfg["temperature"] + 0.1, 1.0)},
             )
         if not reply.startswith("⚠️"):
             memory.append(channel_id, "assistant", reply)
@@ -414,7 +492,7 @@ async def on_message(message: discord.Message):
             log.info("Chimed in on #%s", message.channel)
         return
 
-    # ── Direct reply ──────────────────────────────────────────────────────────
+    # Direct reply
     content = message.content
     if client.user.mentioned_in(message):
         content = content.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "").strip()
@@ -423,18 +501,14 @@ async def on_message(message: discord.Message):
         await message.reply("what")
         return
 
-    # Watch mode already logged the message, but if off we still need to log for context
     if not cfg.get("watch_mode_enabled", True):
         memory.append(channel_id, "user", f"[{message.author.display_name}]: {content}")
 
     async with message.channel.typing():
         history = memory.get_messages(channel_id)
-        reply = await ask_groq(
-            system_prompt=cfg["system_prompt"] + "\n\n" + get_time_context(),
-            messages=history,
-            model=cfg["model"],
-            temperature=cfg["temperature"],
-            api_key=GROQ_API_KEY,
+        reply = await ask_ai(
+            cfg["system_prompt"] + "\n\n" + get_time_context(),
+            history, cfg,
         )
 
     if not reply.startswith("⚠️"):
@@ -444,10 +518,10 @@ async def on_message(message: discord.Message):
     log.info("Replied to %s in #%s", message.author, message.channel)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable is not set.")
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY environment variable is not set.")
+    # At least one provider must be configured
+    if not any(os.environ.get(f"{p.upper()}_API_KEY") for p in ["groq","cerebras","gemini"]):
+        raise RuntimeError("No AI provider keys set. Add at least GROQ_API_KEY, CEREBRAS_API_KEY, or GEMINI_API_KEY.")
     client.run(DISCORD_TOKEN, log_handler=None)
