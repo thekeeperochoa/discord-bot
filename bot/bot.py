@@ -57,7 +57,7 @@ DEFAULT_PERSONALITY = {
     "status_rotation_minutes": 10,
     # Provider models — one per provider, used when that provider is the fallback in use
     "groq_model":     "llama-3.3-70b-versatile",
-    "cerebras_model": "llama-3.3-70b",
+    "cerebras_model": "llama3.1-70b",
     "gemini_model":   "gemini-2.5-flash",
     # Preferred provider order
     "provider_order": ["groq", "cerebras", "gemini"],
@@ -186,11 +186,16 @@ async def call_cerebras(system_prompt, messages, model, temperature, api_key):
 
 
 async def call_gemini(system_prompt, messages, model, temperature, api_key):
-    # Gemini has a different request shape
+    # Gemini requires conversation to end with a user turn
     contents = []
     for m in messages:
         role = "user" if m["role"] == "user" else "model"
         contents.append({"role": role, "parts": [{"text": m["content"]}]})
+    # If conversation ends on assistant/model, append a nudge so Gemini responds
+    if contents and contents[-1]["role"] == "model":
+        contents.append({"role": "user", "parts": [{"text": "(continue the conversation)"}]})
+    if not contents:
+        contents = [{"role": "user", "parts": [{"text": "hello"}]}]
     payload = {
         "contents": contents,
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -365,6 +370,15 @@ async def silence_checker():
         for channel_id, ch_last in list(last_channel_activity.items()):
             if not channel_allowed(channel_id, cfg):
                 continue
+            # Skip channels with log/admin/backend in the name
+            try:
+                channel = client.get_channel(int(channel_id))
+                if channel and hasattr(channel, "name"):
+                    cname = channel.name.lower()
+                    if any(x in cname for x in ["log", "admin", "backend", "audit", "welcome", "invite"]):
+                        continue
+            except Exception:
+                pass
             bot_last = last_bot_activity.get(channel_id, 0)
             now = time.time()
             if (now - ch_last) < 7200 and (now - bot_last) > silence_seconds:
@@ -383,7 +397,7 @@ async def silence_checker():
                         system, history if history else [{"role":"user","content":"..."}],
                         {**cfg, "temperature": min(cfg["temperature"] + 0.15, 1.0)},
                     )
-                    if not reply.startswith("⚠️"):
+                    if not reply.startswith("⚠️") and reply.strip():
                         await channel.send(reply)
                         last_bot_activity[channel_id] = time.time()
                         memory.append(channel_id, "assistant", reply)
