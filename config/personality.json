@@ -18,5 +18,11 @@
 "silence_checkin_enabled": true,
 "silence_minutes": 45,
 "status_messages": ["watching", "judging quietly", "peaked", "counting typos", "3am thoughts", "making bad decisions"],
-"status_rotation_minutes": 10
+"status_rotation_minutes": 10,
+"vision_enabled": true,
+"vision_model": "gemini-2.5-flash",
+"daily_recap_enabled": true,
+"daily_recap_hour_utc": 4,
+"daily_recap_channel": "1422952400649719858",
+"daily_recap_max_tokens": 500
 }
