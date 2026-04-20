@@ -368,21 +368,87 @@ async def ask_ai(system_prompt, messages, cfg, images=None) -> str:
 
 
 # ── Image downloader ──────────────────────────────────────────────────────────
+async def _fetch_url_as_image(url: str, session: aiohttp.ClientSession) -> tuple | None:
+    """Download a URL and return (mime, base64). Returns None on failure."""
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return None
+            ctype = resp.headers.get("Content-Type", "image/png").split(";")[0].strip().lower()
+            # Normalize mime
+            if ctype not in {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}:
+                # Guess from URL if header is useless
+                lower = url.lower()
+                if lower.endswith(".png"):    ctype = "image/png"
+                elif lower.endswith(".jpg") or lower.endswith(".jpeg"): ctype = "image/jpeg"
+                elif lower.endswith(".webp"): ctype = "image/webp"
+                elif lower.endswith(".gif"):  ctype = "image/gif"
+                else:
+                    return None
+            data = await resp.read()
+            if len(data) > 4 * 1024 * 1024:  # 4MB cap
+                return None
+            return (ctype, base64.b64encode(data).decode("utf-8"))
+    except Exception as e:
+        log.warning("Failed to fetch %s: %s", url, e)
+        return None
+
+
 async def download_images(message: discord.Message) -> list:
-    """Return a list of (mime, base64) for all image attachments on a message."""
+    """Return (mime, base64) for every visual: attachments, stickers,
+    Tenor/Giphy GIFs, and custom emojis."""
     images = []
     allowed_mimes = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+
+    # 1) Direct attachments
     for att in message.attachments:
         if att.content_type and att.content_type.lower() in allowed_mimes:
-            # Skip huge files
-            if att.size > 4 * 1024 * 1024:  # 4MB cap
+            if att.size > 4 * 1024 * 1024:
                 continue
             try:
                 data = await att.read()
                 images.append((att.content_type, base64.b64encode(data).decode("utf-8")))
             except Exception as e:
                 log.warning("Failed to download %s: %s", att.filename, e)
-    return images
+
+    async with aiohttp.ClientSession() as session:
+        # 2) Discord stickers (message.stickers is a list of StickerItem)
+        for sticker in getattr(message, "stickers", []):
+            try:
+                url = sticker.url  # always returns a usable CDN URL
+                result = await _fetch_url_as_image(url, session)
+                if result:
+                    images.append(result)
+            except Exception as e:
+                log.warning("Sticker fetch failed: %s", e)
+
+        # 3) Embeds — Discord auto-generates embeds for Tenor/Giphy/link previews
+        for embed in message.embeds:
+            # Prefer embed.image, fall back to embed.thumbnail
+            candidate_url = None
+            if embed.image and embed.image.url:
+                candidate_url = embed.image.url
+            elif embed.thumbnail and embed.thumbnail.url:
+                candidate_url = embed.thumbnail.url
+            if candidate_url:
+                # Tenor often serves a .gif via a dynamic URL; try to append .gif if missing
+                result = await _fetch_url_as_image(candidate_url, session)
+                if result:
+                    images.append(result)
+
+        # 4) Custom Discord emojis in message content — format <a?:name:id>
+        # Limit to first 3 to avoid spam
+        emoji_pattern = re.compile(r"<(a?):(\w+):(\d+)>")
+        emoji_matches = emoji_pattern.findall(message.content)[:3]
+        for animated, _name, eid in emoji_matches:
+            ext = "gif" if animated == "a" else "png"
+            url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}"
+            result = await _fetch_url_as_image(url, session)
+            if result:
+                images.append(result)
+
+    # Cap total images sent to Gemini to avoid oversized payloads
+    return images[:5]
 
 
 # ── Reactions ─────────────────────────────────────────────────────────────────
