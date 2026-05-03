@@ -706,6 +706,9 @@ async def race_command(
         await interaction.response.send_message("🏁 A race is already running here!", ephemeral=True)
         return
 
+    # Defer immediately so we don't time out
+    await interaction.response.defer()
+
     active_races.add(channel_id)
     try:
         # Build the racer list — start with the command runner, then add tagged racers
@@ -761,11 +764,10 @@ async def race_command(
         silent = discord.AllowedMentions.none()
 
         # Initial frame
-        await interaction.response.send_message(
-            f"🏁 **RACE START!**\n\n{draw(positions, finished)}",
+        await interaction.edit_original_response(
+            content=f"🏁 **RACE START!**\n\n{draw(positions, finished)}",
             allowed_mentions=silent,
         )
-        msg = await interaction.original_response()
 
         # Race animation loop — each tick everyone moves 0-2 spaces
         for _tick in range(40):  # max 40 ticks
@@ -791,7 +793,7 @@ async def race_command(
             content = header + draw(positions, finished)
 
             try:
-                await msg.edit(content=content, allowed_mentions=silent)
+                await interaction.edit_original_response(content=content, allowed_mentions=silent)
             except discord.HTTPException:
                 pass
 
@@ -813,13 +815,12 @@ async def race_command(
         )
         # Allow only the winner to be pinged on the final message
         if winner_mention:
-            allowed_winner = discord.AllowedMentions(users=[interaction.guild.get_member(int(re.sub(r'\D', '', winner_mention)))] if interaction.guild else False)
             try:
-                await msg.edit(content=final, allowed_mentions=allowed_winner)
+                await interaction.edit_original_response(content=final)
             except Exception:
-                await msg.edit(content=final, allowed_mentions=silent)
+                await interaction.edit_original_response(content=final, allowed_mentions=silent)
         else:
-            await msg.edit(content=final, allowed_mentions=silent)
+            await interaction.edit_original_response(content=final, allowed_mentions=silent)
 
     finally:
         active_races.discard(channel_id)
