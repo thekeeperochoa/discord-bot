@@ -776,12 +776,16 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
     # Defer because gathering messages + AI call takes longer than 3 seconds
     await interaction.response.defer()
 
-    # Animate progress while we work
-    msg = await interaction.followup.send(
-        f"🔥 Loading ammunition on {user.mention}...",
-        allowed_mentions=discord.AllowedMentions.none(),
-        wait=True,
-    )
+    async def edit(content: str):
+        try:
+            await interaction.edit_original_response(
+                content=content,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as e:
+            log.warning("edit failed: %s", e)
+
+    await edit(f"🔥 Loading ammunition on {user.mention}...")
 
     # Gather their recent messages from the daily logs (last 7 days)
     user_messages: list[str] = []
@@ -838,20 +842,11 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
 
     # Animation while AI generates
     await asyncio.sleep(0.6)
-    await msg.edit(
-        content=f"🔍 Found {len(user_messages)} messages from {user.mention}...",
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    await edit(f"🔍 Found {len(user_messages)} messages from {user.mention}...")
     await asyncio.sleep(0.8)
-    await msg.edit(
-        content=f"⚙️ Analyzing patterns, typos, and bad takes...",
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    await edit(f"⚙️ Analyzing patterns, typos, and bad takes...")
     await asyncio.sleep(0.8)
-    await msg.edit(
-        content=f"🎯 Selecting weakest moments...",
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    await edit(f"🎯 Selecting weakest moments...")
 
     # Build the prompt
     transcript = "\n".join(f"- {m}" for m in user_messages)
@@ -877,11 +872,11 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
         )
     except Exception as e:
         log.exception("Roast failed")
-        await msg.edit(content=f"⚠️ Couldn't generate roast: {e}")
+        await edit(f"⚠️ Couldn't generate roast: {e}")
         return
 
     if roast.startswith("⚠️"):
-        await msg.edit(content=roast)
+        await edit(roast)
         return
 
     final = (
@@ -889,11 +884,17 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
         f"_{len(user_messages)} messages analyzed_\n\n"
         f"{roast}"
     )
-    # Final message can be long; if so, send a follow-up instead of editing
+    # Final message — needs to ping the target so they see the roast
     if len(final) <= 2000:
-        await msg.edit(content=final)
+        try:
+            await interaction.edit_original_response(content=final)
+        except Exception as e:
+            log.warning("Final edit failed: %s", e)
     else:
-        await msg.edit(content=f"🔥 **ROAST OF {user.mention}** 🔥")
+        try:
+            await interaction.edit_original_response(content=f"🔥 **ROAST OF {user.mention}** 🔥")
+        except Exception:
+            pass
         for i in range(0, len(roast), 1990):
             await interaction.followup.send(roast[i:i+1990])
 
