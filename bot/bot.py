@@ -477,6 +477,7 @@ async def send_reply(message: discord.Message, reply: str, chimed_in: bool = Fal
 # ── Bot ───────────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
@@ -833,18 +834,35 @@ async def rate_command(interaction: discord.Interaction, thing: str):
 
 
 @tree.command(name="ship", description="Ship two users together. See compatibility %.")
-@discord.app_commands.describe(user1="First person", user2="Second person")
-async def ship_command(interaction: discord.Interaction, user1: discord.Member, user2: discord.Member):
-    # Deterministic based on IDs so results are stable
-    seed = int(user1.id) ^ int(user2.id)
+@discord.app_commands.describe(user1="First person (mention or name)", user2="Second person (mention or name)")
+async def ship_command(interaction: discord.Interaction, user1: str, user2: str):
+    # Try to resolve as Discord members first, fall back to plain text
+    def resolve(s: str):
+        s = s.strip()
+        # Mention format <@123> or <@!123>
+        m = re.match(r"<@!?(\d+)>", s)
+        if m and interaction.guild:
+            member = interaction.guild.get_member(int(m.group(1)))
+            if member:
+                return member.display_name, member.id
+        # Try by name in guild
+        if interaction.guild:
+            for member in interaction.guild.members:
+                if s.lower() in (member.display_name.lower(), member.name.lower()):
+                    return member.display_name, member.id
+        # Fallback: just use the string
+        return s, hash(s.lower())
+
+    name1, id1 = resolve(user1)
+    name2, id2 = resolve(user2)
+
+    seed = int(id1) ^ int(id2)
     rng = random.Random(seed)
     score = rng.randint(0, 100)
     bar_len = 20
     filled = round(score / 100 * bar_len)
     bar = "💗" * filled + "🖤" * (bar_len - filled)
-    name1 = user1.display_name
-    name2 = user2.display_name
-    ship_name = name1[:len(name1)//2] + name2[len(name2)//2:]
+    ship_name = name1[:max(1, len(name1)//2)] + name2[len(name2)//2:]
     if score < 20:    verdict = "💀 disaster"
     elif score < 40:  verdict = "😬 awkward"
     elif score < 60:  verdict = "🤔 mid"
