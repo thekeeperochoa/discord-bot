@@ -844,33 +844,80 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
         if m and interaction.guild:
             member = interaction.guild.get_member(int(m.group(1)))
             if member:
-                return member.display_name, member.id
+                return member.display_name, member.id, member.mention
         # Try by name in guild
         if interaction.guild:
             for member in interaction.guild.members:
                 if s.lower() in (member.display_name.lower(), member.name.lower()):
-                    return member.display_name, member.id
-        # Fallback: just use the string
-        return s, hash(s.lower())
+                    return member.display_name, member.id, member.mention
+        # Fallback: just use the string, no mention
+        return s, hash(s.lower()), s
 
-    name1, id1 = resolve(user1)
-    name2, id2 = resolve(user2)
+    name1, id1, mention1 = resolve(user1)
+    name2, id2, mention2 = resolve(user2)
 
     seed = int(id1) ^ int(id2)
     rng = random.Random(seed)
     score = rng.randint(0, 100)
     bar_len = 20
     filled = round(score / 100 * bar_len)
-    bar = "💗" * filled + "🖤" * (bar_len - filled)
     ship_name = name1[:max(1, len(name1)//2)] + name2[len(name2)//2:]
     if score < 20:    verdict = "💀 disaster"
     elif score < 40:  verdict = "😬 awkward"
     elif score < 60:  verdict = "🤔 mid"
     elif score < 80:  verdict = "😍 promising"
     else:             verdict = "💍 soulmates"
+
+    header = f"💞 {mention1} + {mention2}\n*Calculating compatibility...*"
+    # Suppress mention pings on the animation frames so we don't ping users repeatedly
+    silent = discord.AllowedMentions.none()
+
     await interaction.response.send_message(
-        f"💞 **{name1}** + **{name2}** = **{ship_name}**\n{bar} **{score}%** — _{verdict}_"
+        f"💞 {mention1} + {mention2}\n\n🔍 *analyzing chemistry...*",
+        allowed_mentions=silent,
     )
+    msg = await interaction.original_response()
+    await asyncio.sleep(1.0)
+
+    # Loading bar fills up
+    for i in range(1, bar_len + 1):
+        bar = "💗" * i + "⬜" * (bar_len - i)
+        await msg.edit(
+            content=f"💞 {mention1} + {mention2}\n{bar}",
+            allowed_mentions=silent,
+        )
+        await asyncio.sleep(0.12)
+
+    await asyncio.sleep(0.4)
+    # Brief suspense
+    await msg.edit(
+        content=f"💞 {mention1} + {mention2}\n{'💗' * bar_len}\n*results incoming...*",
+        allowed_mentions=silent,
+    )
+    await asyncio.sleep(1.0)
+
+    # Number rolls up to final score (last frame pings nobody to avoid double-ping)
+    steps = max(score, 1)
+    increments = list(range(0, score + 1, max(1, score // 12))) or [0]
+    if increments[-1] != score:
+        increments.append(score)
+    for s in increments:
+        f = round(s / 100 * bar_len)
+        bar = "💗" * f + "🖤" * (bar_len - f)
+        await msg.edit(
+            content=f"💞 {mention1} + {mention2}\n{bar}  **{s}%**",
+            allowed_mentions=silent,
+        )
+        await asyncio.sleep(0.18)
+
+    # Final reveal — this one pings the actual users
+    final_bar = "💗" * filled + "🖤" * (bar_len - filled)
+    final = (
+        f"## 💞 {mention1} + {mention2} = **{ship_name}**\n"
+        f"{final_bar}\n"
+        f"### **{score}%** — _{verdict}_"
+    )
+    await msg.edit(content=final)
 
 
 @tree.command(name="commands", description="List all available bot commands.")
