@@ -1118,19 +1118,530 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
     await msg.edit(content=final)
 
 
+# ── 🔫 /duel ─────────────────────────────────────────────────────────────────
+@tree.command(name="duel", description="Pistol duel between two users at dawn.")
+@discord.app_commands.describe(opponent="Who do you challenge?")
+async def duel_command(interaction: discord.Interaction, opponent: discord.Member):
+    if opponent.id == interaction.user.id:
+        await interaction.response.send_message("🤔 You can't duel yourself.", ephemeral=True)
+        return
+    if opponent.bot:
+        await interaction.response.send_message("🤖 You can't duel a bot.", ephemeral=True)
+        return
+
+    silent = discord.AllowedMentions.none()
+    challenger = interaction.user
+
+    await interaction.response.defer()
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit(f"🎩 **DUEL AT DAWN**\n{challenger.mention} has challenged {opponent.mention}!")
+    await asyncio.sleep(1.5)
+    await edit(f"🚶 {challenger.mention} and {opponent.mention} take 10 paces...")
+    await asyncio.sleep(1.5)
+    for i in range(10, 0, -2):
+        await edit(f"🚶 ...{i} paces...")
+        await asyncio.sleep(0.6)
+    await edit(f"⏸️ ...they turn...")
+    await asyncio.sleep(1.5)
+    for n in [3, 2, 1]:
+        await edit(f"# **{n}**")
+        await asyncio.sleep(0.8)
+    await edit("# 🔫 **DRAW!**")
+    await asyncio.sleep(1.0)
+    await edit("💥 **BANG!**\n💥 **BANG!**")
+    await asyncio.sleep(1.5)
+
+    winner, loser = random.sample([challenger, opponent], 2)
+    flavors = [
+        f"{loser.mention} fired wide. {winner.mention} did not.",
+        f"{winner.mention}'s aim was true. {loser.mention} hits the dirt.",
+        f"{loser.mention}'s gun jammed. {winner.mention} took the shot.",
+        f"{winner.mention} was faster on the draw.",
+        f"{loser.mention} blinked. That was all {winner.mention} needed.",
+    ]
+    final = (
+        f"🎩 **DUEL RESULT** 🎩\n\n"
+        f"{random.choice(flavors)}\n\n"
+        f"## 🏆 {winner.mention} stands victorious.\n"
+        f"💀 {loser.mention} lies in the dust."
+    )
+    # Final message can ping both users — they earned it
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+# ── 🎯 /gun (Russian roulette) ───────────────────────────────────────────────
+@tree.command(name="gun", description="Russian roulette. 1 in 6 chance per pull. Last person standing wins.")
+@discord.app_commands.describe(player2="Player 2", player3="Player 3 (optional)", player4="Player 4 (optional)")
+async def gun_command(
+    interaction: discord.Interaction,
+    player2: discord.Member,
+    player3: discord.Member = None,
+    player4: discord.Member = None,
+):
+    silent = discord.AllowedMentions.none()
+    starter = interaction.user
+    candidates = [starter, player2, player3, player4]
+    seen = set()
+    players = []
+    for u in candidates:
+        if u and u.id not in seen and not u.bot:
+            seen.add(u.id)
+            players.append(u)
+    if len(players) < 2:
+        await interaction.response.send_message("Need at least 2 unique humans.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    alive = list(players)
+    chamber = random.randint(1, 6)  # bullet position
+    pulls = 0
+    log_lines = []
+
+    await edit(
+        "🎯 **RUSSIAN ROULETTE**\n\n"
+        "One bullet. Six chambers. Take turns.\n\n"
+        f"Players: {', '.join(p.mention for p in alive)}"
+    )
+    await asyncio.sleep(2.0)
+
+    turn_idx = 0
+    while len(alive) > 1:
+        player = alive[turn_idx % len(alive)]
+        pulls += 1
+        # Suspense
+        await edit(
+            f"🎯 **{player.mention} picks up the gun...**\n\n"
+            + "\n".join(log_lines[-5:])
+        )
+        await asyncio.sleep(1.4)
+        await edit(
+            f"🎯 {player.mention} spins the cylinder...\n"
+            f"*click click click...*\n\n"
+            + "\n".join(log_lines[-5:])
+        )
+        await asyncio.sleep(1.4)
+        await edit(
+            f"🎯 {player.mention} pulls the trigger...\n\n"
+            + "\n".join(log_lines[-5:])
+        )
+        await asyncio.sleep(1.6)
+
+        if pulls == chamber:
+            # BANG
+            log_lines.append(f"💥 **BANG!** {player.mention} is **OUT**.")
+            alive.remove(player)
+            await edit(
+                f"# 💥 **BANG!**\n\n{player.mention} is out.\n\n"
+                + "\n".join(log_lines[-5:])
+            )
+            await asyncio.sleep(2.0)
+            # Reload — new bullet position, reset pulls
+            chamber = random.randint(1, 6)
+            pulls = 0
+            # Don't increment turn_idx because we removed someone
+            if turn_idx >= len(alive):
+                turn_idx = 0
+        else:
+            log_lines.append(f"🔘 *click* — {player.mention} survives.")
+            await edit(
+                f"🔘 *click*\n\n{player.mention} survives.\n\n"
+                + "\n".join(log_lines[-5:])
+            )
+            await asyncio.sleep(1.5)
+            turn_idx += 1
+
+    winner = alive[0]
+    final = (
+        f"🎯 **GAME OVER**\n\n"
+        + "\n".join(log_lines[-8:])
+        + f"\n\n## 🏆 {winner.mention} is the last one standing!"
+    )
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+# ── 💰 /heist ────────────────────────────────────────────────────────────────
+HEIST_LOOT = [
+    ("💎", "diamond"), ("💵", "stack of bills"), ("💰", "money bag"),
+    ("🏆", "golden trophy"), ("👑", "crown"), ("💍", "ring"),
+    ("📿", "pearl necklace"), ("🪙", "gold coin"),
+]
+
+@tree.command(name="heist", description="Pull off a bank heist with your crew.")
+@discord.app_commands.describe(crew1="Crew member", crew2="Crew member", crew3="Crew member", crew4="Crew member")
+async def heist_command(
+    interaction: discord.Interaction,
+    crew1: discord.Member,
+    crew2: discord.Member = None,
+    crew3: discord.Member = None,
+    crew4: discord.Member = None,
+):
+    silent = discord.AllowedMentions.none()
+    starter = interaction.user
+    candidates = [starter, crew1, crew2, crew3, crew4]
+    seen = set()
+    crew = []
+    for u in candidates:
+        if u and u.id not in seen and not u.bot:
+            seen.add(u.id)
+            crew.append(u)
+    if len(crew) < 2:
+        await interaction.response.send_message("Need at least 2 unique crew members.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    crew_str = ", ".join(p.mention for p in crew)
+    await edit(f"🚐 **THE HEIST BEGINS**\n\n{crew_str} pull up to the bank...")
+    await asyncio.sleep(2.0)
+
+    stages = [
+        "🔍 Scoping the perimeter...",
+        "💣 Planting the explosives...",
+        "🚨 ALARMS TRIGGERED!",
+        "🏃 Crew runs into the vault!",
+        "💰 Cracking the safe...",
+    ]
+    for stage in stages:
+        await edit(f"🚐 **HEIST IN PROGRESS**\n\n{crew_str}\n\n{stage}")
+        await asyncio.sleep(1.6)
+
+    # 15% chance the heist fails
+    if random.random() < 0.15:
+        caught = random.choice(crew)
+        final = (
+            f"🚔 **HEIST FAILED!**\n\n"
+            f"The cops showed up. {caught.mention} got pinned to the wall.\n"
+            f"The rest of the crew escaped with **NOTHING**.\n\n"
+            f"💀 The crew: {crew_str}"
+        )
+        try:
+            await interaction.edit_original_response(content=final)
+        except Exception:
+            pass
+        return
+
+    # Otherwise everyone gets a random share
+    payouts = []
+    total = 0
+    for p in crew:
+        amount = random.randint(5_000, 250_000)
+        loot_emoji, loot_name = random.choice(HEIST_LOOT)
+        payouts.append((p, amount, loot_emoji, loot_name))
+        total += amount
+
+    # Sort by haul descending
+    payouts.sort(key=lambda x: x[1], reverse=True)
+    biggest = payouts[0]
+
+    payout_lines = "\n".join(
+        f"{['👑','🥈','🥉','🎖️','🎖️'][i] if i < 5 else '•'} {p.mention} — **${amt:,}** {emoji} _{name}_"
+        for i, (p, amt, emoji, name) in enumerate(payouts)
+    )
+
+    final = (
+        f"💰 **HEIST SUCCESSFUL!** 💰\n\n"
+        f"The crew got out clean with **${total:,}** in loot!\n\n"
+        f"**Cuts:**\n{payout_lines}\n\n"
+        f"🏆 {biggest[0].mention} took the biggest haul."
+    )
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+# ── 💻 /hack ─────────────────────────────────────────────────────────────────
+HACK_FAKE_FINDINGS = [
+    "browser history: 7,432 pages of *cat videos*",
+    "Spotify wrapped: 'Mr. Brightside' (843 plays)",
+    "screen time average: 11h 47m daily 💀",
+    "Twitter drafts folder: 23 unsent posts",
+    "Photos folder: 89% screenshots",
+    "search history: 'how to talk to women'",
+    "deleted texts to ex: 47",
+    "$3,800 spent on Uber Eats this month",
+    "DoorDash account: 'extra ranch' on every order",
+    "Notes app: 'business ideas' (empty since 2021)",
+    "TikTok For You Page: BRAINROT detected",
+    "Apple Wallet: 1 punch card to a closed café",
+    "draft text to mom: 'pls send money'",
+    "Google search: 'is it normal to-' x 200",
+    "iCloud full of blurry concert videos",
+    "Steam library: 487 games, 2 played",
+    "screenshot of an email from 2019 still saved",
+    "$0.32 in checking, $4,200 on a credit card",
+]
+
+@tree.command(name="hack", description="Hack into a user's most embarrassing data.")
+@discord.app_commands.describe(target="Who to hack")
+async def hack_command(interaction: discord.Interaction, target: discord.Member):
+    silent = discord.AllowedMentions.none()
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit(f"```\n> initiating hack on {target.display_name}...\n```")
+    await asyncio.sleep(0.8)
+
+    log_lines = [f"> initiating hack on {target.display_name}..."]
+    stages = [
+        "> bypassing firewall...",
+        "> spoofing IP address...",
+        "> connecting to mainframe...",
+        "> [████░░░░░░] 40%",
+        "> [████████░░] 80%",
+        "> [██████████] 100%",
+        "> ACCESS GRANTED",
+        "> decrypting data...",
+    ]
+    for s in stages:
+        log_lines.append(s)
+        terminal = "```\n" + "\n".join(log_lines[-8:]) + "\n```"
+        await edit(terminal)
+        await asyncio.sleep(0.5)
+
+    findings = random.sample(HACK_FAKE_FINDINGS, 4)
+    final_terminal = (
+        "```\n"
+        + "\n".join(log_lines[-4:])
+        + "\n\n"
+        + "=== CONFIDENTIAL FILE ===\n"
+        + f"target: {target.display_name}\n\n"
+        + "\n".join(f"  - {f}" for f in findings)
+        + "\n\n=== END OF FILE ===\n"
+        + "```"
+    )
+    final = f"💻 **HACK SUCCESSFUL** on {target.mention}\n\n{final_terminal}"
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+# ── 🥊 /rps-tournament ───────────────────────────────────────────────────────
+@tree.command(name="rps-tournament", description="4-player rock paper scissors bracket.")
+@discord.app_commands.describe(p2="Player 2", p3="Player 3", p4="Player 4")
+async def rps_tournament_command(
+    interaction: discord.Interaction,
+    p2: discord.Member,
+    p3: discord.Member,
+    p4: discord.Member,
+):
+    silent = discord.AllowedMentions.none()
+    starter = interaction.user
+    candidates = [starter, p2, p3, p4]
+    seen = set()
+    players = []
+    for u in candidates:
+        if u and u.id not in seen and not u.bot:
+            seen.add(u.id)
+            players.append(u)
+    if len(players) != 4:
+        await interaction.response.send_message("Need exactly 4 unique players.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    moves = ["rock", "paper", "scissors"]
+    emoji = {"rock":"🪨","paper":"📄","scissors":"✂️"}
+
+    def battle(a, b):
+        # Returns (winner, loser, a_move, b_move)
+        while True:
+            ma = random.choice(moves)
+            mb = random.choice(moves)
+            if ma == mb:
+                continue  # ties replay
+            if (ma == "rock" and mb == "scissors") or \
+               (ma == "paper" and mb == "rock") or \
+               (ma == "scissors" and mb == "paper"):
+                return a, b, ma, mb
+            return b, a, ma, mb
+
+    bracket_lines = []
+    bracket_lines.append("🥊 **RPS TOURNAMENT** 🥊\n")
+    bracket_lines.append(f"Players: {' • '.join(p.mention for p in players)}\n")
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(2.0)
+
+    # Semis
+    bracket_lines.append("**━━ SEMIFINALS ━━**")
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(1.0)
+
+    bracket_lines.append(f"⚔️ {players[0].mention} vs {players[1].mention}...")
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(1.5)
+    w1, l1, mw1, ml1 = battle(players[0], players[1])
+    bracket_lines[-1] = f"⚔️ {players[0].mention} {emoji[mw1 if w1 == players[0] else ml1]} vs {emoji[mw1 if w1 == players[1] else ml1]} {players[1].mention} → **{w1.mention} wins**"
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(1.5)
+
+    bracket_lines.append(f"⚔️ {players[2].mention} vs {players[3].mention}...")
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(1.5)
+    w2, l2, mw2, ml2 = battle(players[2], players[3])
+    bracket_lines[-1] = f"⚔️ {players[2].mention} {emoji[mw2 if w2 == players[2] else ml2]} vs {emoji[mw2 if w2 == players[3] else ml2]} {players[3].mention} → **{w2.mention} wins**"
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(2.0)
+
+    # Final
+    bracket_lines.append("\n**━━ FINAL ━━**")
+    bracket_lines.append(f"🏆 {w1.mention} vs {w2.mention}...")
+    await edit("\n".join(bracket_lines))
+    await asyncio.sleep(2.0)
+    champ, runner, mc, mr = battle(w1, w2)
+    bracket_lines[-1] = f"🏆 {w1.mention} {emoji[mc if champ == w1 else mr]} vs {emoji[mc if champ == w2 else mr]} {w2.mention}"
+    bracket_lines.append(f"\n## 🏆 **{champ.mention} IS THE CHAMPION!**")
+    try:
+        await interaction.edit_original_response(content="\n".join(bracket_lines))
+    except Exception:
+        pass
+
+
+# ── 🎰 /slots ────────────────────────────────────────────────────────────────
+SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "💎", "7️⃣", "🍀", "⭐"]
+SLOT_PAYOUT = {
+    "💎": 1000, "7️⃣": 500, "⭐": 250, "🔔": 100,
+    "🍀": 75, "🍇": 50, "🍒": 25, "🍋": 10,
+}
+
+@tree.command(name="slots", description="Pull the lever on the slot machine!")
+async def slots_command(interaction: discord.Interaction):
+    silent = discord.AllowedMentions.none()
+    user = interaction.user
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Determine final result first (~12% jackpot, 25% pair, rest no-match)
+    roll = random.random()
+    if roll < 0.12:
+        # Jackpot — three of a kind
+        s = random.choice(SLOT_SYMBOLS)
+        final_reels = [s, s, s]
+    elif roll < 0.37:
+        # Pair somewhere
+        s = random.choice(SLOT_SYMBOLS)
+        odd = random.choice([x for x in SLOT_SYMBOLS if x != s])
+        positions = [0, 1, 2]
+        random.shuffle(positions)
+        final_reels = ["", "", ""]
+        final_reels[positions[0]] = s
+        final_reels[positions[1]] = s
+        final_reels[positions[2]] = odd
+    else:
+        # All different
+        final_reels = random.sample(SLOT_SYMBOLS, 3)
+
+    def render(reels, header="🎰 SLOT MACHINE 🎰"):
+        return (
+            f"## {header}\n\n"
+            f"┏━━━━━━━━━━━━━━━┓\n"
+            f"┃   {reels[0]}   {reels[1]}   {reels[2]}   ┃\n"
+            f"┗━━━━━━━━━━━━━━━┛\n"
+            f"      ⬆ ⬆ ⬆\n"
+            f"   {user.mention}"
+        )
+
+    await edit(render(["🎰","🎰","🎰"], "🎰 SLOT MACHINE 🎰"))
+    await asyncio.sleep(0.8)
+
+    # Spin all three
+    for _ in range(8):
+        spinning = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+        await edit(render(spinning, "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.18)
+
+    # Stop reel 1
+    for _ in range(5):
+        await edit(render([final_reels[0], random.choice(SLOT_SYMBOLS), random.choice(SLOT_SYMBOLS)], "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.18)
+    # Stop reel 2
+    for _ in range(5):
+        await edit(render([final_reels[0], final_reels[1], random.choice(SLOT_SYMBOLS)], "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.18)
+    # Stop reel 3
+    await edit(render(final_reels, "🎰 SPINNING 🎰"))
+    await asyncio.sleep(0.6)
+
+    # Result
+    if final_reels[0] == final_reels[1] == final_reels[2]:
+        symbol = final_reels[0]
+        winnings = SLOT_PAYOUT.get(symbol, 50) * 3
+        result = f"## 🎉 JACKPOT! 🎉\n\n{user.mention} hit **3x {symbol}** and won **${winnings:,}**!"
+    elif final_reels[0] == final_reels[1] or final_reels[1] == final_reels[2] or final_reels[0] == final_reels[2]:
+        # Find the pair
+        pair_symbol = max(set(final_reels), key=final_reels.count)
+        winnings = SLOT_PAYOUT.get(pair_symbol, 25)
+        result = f"## ✨ PAIR! ✨\n\n{user.mention} hit **2x {pair_symbol}** and won **${winnings}**."
+    else:
+        result = f"## 💸 NO MATCH 💸\n\nBetter luck next time, {user.mention}."
+
+    final_display = render(final_reels, "🎰 RESULT 🎰") + "\n\n" + result
+    try:
+        await interaction.edit_original_response(content=final_display)
+    except Exception:
+        pass
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
-    embed.add_field(name="🏎️ /rs", value="Start an animated race!", inline=False)
+    embed.add_field(name="🏎️ /rs", value="Animated race (tag up to 3 racers)", inline=False)
     embed.add_field(name="🔥 /roast", value="AI-roast a user using their messages", inline=False)
+    embed.add_field(name="🔫 /duel", value="Pistol duel between 2 users", inline=True)
+    embed.add_field(name="🎯 /gun", value="Russian roulette (2-4 players)", inline=True)
+    embed.add_field(name="💰 /heist", value="Group bank heist (2-5 crew)", inline=True)
+    embed.add_field(name="💻 /hack", value="Hack a user's data", inline=True)
+    embed.add_field(name="🥊 /rps-tournament", value="4-player RPS bracket", inline=True)
+    embed.add_field(name="🎰 /slots", value="Pull the lever", inline=True)
     embed.add_field(name="🎲 /roll", value="Roll a dice", inline=True)
     embed.add_field(name="🪙 /flip", value="Flip a coin", inline=True)
-    embed.add_field(name="🎱 /8ball", value="Ask the magic 8-ball", inline=True)
-    embed.add_field(name="✂️ /rps", value="Rock paper scissors", inline=True)
+    embed.add_field(name="🎱 /8ball", value="Magic 8-ball", inline=True)
+    embed.add_field(name="✂️ /rps", value="RPS vs the bot", inline=True)
     embed.add_field(name="⭐ /rate", value="Rate something /10", inline=True)
     embed.add_field(name="💞 /ship", value="Ship two users", inline=True)
     embed.add_field(name="💬 Chat",
-        value=f"Mention me, reply, or say my name to chat\n`!recap` for a daily recap\n`!clearhistory` to wipe channel memory\n`!botinfo` for info",
+        value="Mention me, reply, or say my name to chat\n`!recap` for a daily recap\n`!clearhistory` to wipe channel memory\n`!botinfo` for info",
         inline=False)
     await interaction.response.send_message(embed=embed)
 
