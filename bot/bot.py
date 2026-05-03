@@ -758,7 +758,123 @@ async def race_command(interaction: discord.Interaction):
         active_races.discard(channel_id)
 
 
-@tree.command(name="roll", description="Roll a dice (1-100 by default).")
+@tree.command(name="roast", description="Generate a brutal personalized roast based on a user's recent messages.")
+@discord.app_commands.describe(user="Who to roast")
+async def roast_command(interaction: discord.Interaction, user: discord.Member):
+    cfg = load_config()
+    target_id = str(user.id)
+    target_name = user.display_name
+
+    # Don't roast the boss
+    if target_id in cfg.get("respected_users", []):
+        await interaction.response.send_message(
+            f"❌ {user.mention} is the boss. I don't roast the boss.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    # Defer because gathering messages + AI call takes longer than 3 seconds
+    await interaction.response.defer()
+
+    # Animate progress while we work
+    msg = await interaction.followup.send(
+        f"🔥 Loading ammunition on {user.mention}...",
+        allowed_mentions=discord.AllowedMentions.none(),
+        wait=True,
+    )
+
+    # Gather their recent messages from the daily logs (last 7 days)
+    user_messages: list[str] = []
+    today = datetime.now(timezone.utc)
+    for days_back in range(7):
+        date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        # Search across all channels for this date
+        for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("author") == target_name and entry.get("content"):
+                                user_messages.append(entry["content"])
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+    # Cap to most recent 80 messages (avoid huge payloads)
+    user_messages = user_messages[-80:]
+
+    if len(user_messages) < 3:
+        await msg.edit(
+            content=f"🔍 Not enough ammunition on {user.mention} yet. They need to talk more before I can do real damage.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    # Animation while AI generates
+    await asyncio.sleep(0.6)
+    await msg.edit(
+        content=f"🔍 Found {len(user_messages)} messages from {user.mention}...",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    await asyncio.sleep(0.8)
+    await msg.edit(
+        content=f"⚙️ Analyzing patterns, typos, and bad takes...",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    await asyncio.sleep(0.8)
+    await msg.edit(
+        content=f"🎯 Selecting weakest moments...",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    # Build the prompt
+    transcript = "\n".join(f"- {m}" for m in user_messages)
+    roast_system = (
+        cfg["system_prompt"] +
+        "\n\n=== ROAST MODE ===\n"
+        f"You are about to roast {target_name}. Below are their actual recent messages from the server. "
+        "Use SPECIFIC details from these messages — quote bad takes, mock typos, point out repeated phrases, "
+        "expose contradictions, mock their patterns. Reference real things they actually said. "
+        "Be ruthless, witty, and devastating. 4 to 6 sentences max. "
+        "Format as a clean paragraph. No bullet points. No 'here's your roast' preamble — just deliver. "
+        "Stay completely in character."
+    )
+    user_prompt = (
+        f"Roast {target_name} based on these recent messages of theirs:\n\n{transcript}"
+    )
+
+    try:
+        roast = await ask_ai(
+            roast_system,
+            [{"role": "user", "content": user_prompt}],
+            {**cfg, "max_tokens": 350, "temperature": min(cfg["temperature"] + 0.1, 1.0)},
+        )
+    except Exception as e:
+        log.exception("Roast failed")
+        await msg.edit(content=f"⚠️ Couldn't generate roast: {e}")
+        return
+
+    if roast.startswith("⚠️"):
+        await msg.edit(content=roast)
+        return
+
+    final = (
+        f"🔥 **ROAST OF {user.mention}** 🔥\n"
+        f"_{len(user_messages)} messages analyzed_\n\n"
+        f"{roast}"
+    )
+    # Final message can be long; if so, send a follow-up instead of editing
+    if len(final) <= 2000:
+        await msg.edit(content=final)
+    else:
+        await msg.edit(content=f"🔥 **ROAST OF {user.mention}** 🔥")
+        for i in range(0, len(roast), 1990):
+            await interaction.followup.send(roast[i:i+1990])
+
+
+
 @discord.app_commands.describe(sides="Number of sides on the dice (default 100)")
 async def roll_command(interaction: discord.Interaction, sides: int = 100):
     if sides < 2 or sides > 1_000_000:
@@ -924,6 +1040,7 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
     embed.add_field(name="🏎️ /rs", value="Start an animated race!", inline=False)
+    embed.add_field(name="🔥 /roast", value="AI-roast a user using their messages", inline=False)
     embed.add_field(name="🎲 /roll", value="Roll a dice", inline=True)
     embed.add_field(name="🪙 /flip", value="Flip a coin", inline=True)
     embed.add_field(name="🎱 /8ball", value="Ask the magic 8-ball", inline=True)
