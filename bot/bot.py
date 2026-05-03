@@ -802,15 +802,39 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
             except Exception:
                 continue
 
+    # Also pull from channel memory files (covers messages from before daily logging)
+    for mem_file in MEMORY_DIR.glob("*.json"):
+        try:
+            with open(mem_file) as f:
+                history = json.load(f)
+            for entry in history:
+                content = entry.get("content", "")
+                # Memory format: [BOSS  display_name]: message  OR  [display_name]: message
+                m = re.match(r"^\[(?:⭐BOSS⭐\s+)?([^\]]+)\]:\s*(.+)$", content, re.DOTALL)
+                if m:
+                    author = m.group(1).strip()
+                    msg = m.group(2).strip()
+                    if author.lower() == target_name.lower() and msg:
+                        if msg not in user_messages:
+                            user_messages.append(msg)
+        except Exception:
+            continue
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for m in user_messages:
+        if m not in seen:
+            seen.add(m)
+            deduped.append(m)
+    user_messages = deduped
+
     # Cap to most recent 80 messages (avoid huge payloads)
     user_messages = user_messages[-80:]
 
-    if len(user_messages) < 3:
-        await msg.edit(
-            content=f"🔍 Not enough ammunition on {user.mention} yet. They need to talk more before I can do real damage.",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return
+    if len(user_messages) < 1:
+        # Still allow a roast based purely on display name + reputation
+        user_messages = [f"({target_name} barely talks)"]
 
     # Animation while AI generates
     await asyncio.sleep(0.6)
@@ -835,9 +859,9 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
         cfg["system_prompt"] +
         "\n\n=== ROAST MODE ===\n"
         f"You are about to roast {target_name}. Below are their actual recent messages from the server. "
-        "Use SPECIFIC details from these messages — quote bad takes, mock typos, point out repeated phrases, "
-        "expose contradictions, mock their patterns. Reference real things they actually said. "
-        "Be ruthless, witty, and devastating. 4 to 6 sentences max. "
+        "If there's plenty of material, use SPECIFIC details — quote bad takes, mock typos, point out repeated phrases, "
+        "expose contradictions. If they barely talk, roast them for being a lurker / NPC / silent observer instead. "
+        "Either way be ruthless, witty, and devastating. 4 to 6 sentences max. "
         "Format as a clean paragraph. No bullet points. No 'here's your roast' preamble — just deliver. "
         "Stay completely in character."
     )
