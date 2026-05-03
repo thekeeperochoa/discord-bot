@@ -689,8 +689,18 @@ def _draw_track(positions: list[tuple], track_len: int = 20, finished: list = No
     return "\n".join(lines)
 
 
-@tree.command(name="rs", description="Start a race! Watch random racers battle to the finish.")
-async def race_command(interaction: discord.Interaction):
+@tree.command(name="rs", description="Start a race! Optionally tag up to 3 other racers.")
+@discord.app_commands.describe(
+    racer1="Tag a user to race against (optional)",
+    racer2="Tag another user (optional)",
+    racer3="Tag another user (optional)",
+)
+async def race_command(
+    interaction: discord.Interaction,
+    racer1: discord.Member = None,
+    racer2: discord.Member = None,
+    racer3: discord.Member = None,
+):
     channel_id = str(interaction.channel_id)
     if channel_id in active_races:
         await interaction.response.send_message("🏁 A race is already running here!", ephemeral=True)
@@ -698,15 +708,62 @@ async def race_command(interaction: discord.Interaction):
 
     active_races.add(channel_id)
     try:
-        # Pick 4 random racers
-        racers = random.sample(RACE_RACERS, 4)
+        # Build the racer list — start with the command runner, then add tagged racers
+        # Each user gets a random vehicle from the pool
+        starter = interaction.user
+        tagged_users = [u for u in [racer1, racer2, racer3] if u is not None]
+        # Deduplicate (in case someone tags themselves or duplicates)
+        seen_ids = {starter.id}
+        unique_tagged = []
+        for u in tagged_users:
+            if u.id not in seen_ids:
+                seen_ids.add(u.id)
+                unique_tagged.append(u)
+
+        all_users = [starter] + unique_tagged
+
+        # Assign each user a random vehicle (no duplicates)
+        vehicles = random.sample(RACE_RACERS, min(len(RACE_RACERS), 8))
+        racers = []  # [(emoji, name, mention)]
+        for i, u in enumerate(all_users):
+            emoji, _vehicle = vehicles[i]
+            racers.append((emoji, u.display_name, u.mention))
+
+        # If only the starter raced, fill in to 4 racers with NPCs
+        if len(racers) == 1:
+            npc_pool = [v for v in vehicles[1:] if v not in [(r[0], None) for r in racers]]
+            for i in range(3):
+                emoji, npc_name = vehicles[i + 1]
+                racers.append((emoji, npc_name, None))
+
         track_len = 20
-        positions = [(emoji, name, 0) for emoji, name in racers]
-        finished: list = []  # [(emoji, name)] in finishing order
+        # positions: [(emoji, name, mention, pos)]
+        positions = [(e, n, m, 0) for (e, n, m) in racers]
+        finished: list = []  # [(emoji, name, mention)] in finishing order
+
+        def draw(positions, finished):
+            lines = []
+            finished_names = [f[1] for f in finished]
+            for emoji, name, mention, pos in positions:
+                bar = "─" * track_len
+                p = min(pos, track_len)
+                line = bar[:p] + emoji + bar[p:] + "🏁"
+                suffix = ""
+                if name in finished_names:
+                    place = finished_names.index(name) + 1
+                    medal = ["🥇","🥈","🥉"][place-1] if place <= 3 else f"#{place}"
+                    suffix = f"  {medal}"
+                # Use mention if it's a real user, plain bold name for NPCs
+                label = mention if mention else f"**{name}**"
+                lines.append(f"`{line}` {label}{suffix}")
+            return "\n".join(lines)
+
+        silent = discord.AllowedMentions.none()
 
         # Initial frame
         await interaction.response.send_message(
-            f"🏁 **RACE START!**\n\n{_draw_track(positions, track_len)}"
+            f"🏁 **RACE START!**\n\n{draw(positions, finished)}",
+            allowed_mentions=silent,
         )
         msg = await interaction.original_response()
 
@@ -714,45 +771,55 @@ async def race_command(interaction: discord.Interaction):
         for _tick in range(40):  # max 40 ticks
             await asyncio.sleep(1.2)
             new_positions = []
-            for emoji, name, pos in positions:
-                if name in [f[1] for f in finished]:
-                    new_positions.append((emoji, name, track_len))
+            finished_names = [f[1] for f in finished]
+            for emoji, name, mention, pos in positions:
+                if name in finished_names:
+                    new_positions.append((emoji, name, mention, track_len))
                     continue
                 step = random.choices([0, 1, 2], weights=[1, 2, 1])[0]
                 new_pos = pos + step
-                if new_pos >= track_len and name not in [f[1] for f in finished]:
-                    finished.append((emoji, name))
+                if new_pos >= track_len and name not in finished_names:
+                    finished.append((emoji, name, mention))
+                    finished_names = [f[1] for f in finished]
                     new_pos = track_len
-                new_positions.append((emoji, name, new_pos))
+                new_positions.append((emoji, name, mention, new_pos))
             positions = new_positions
 
-            # Build display
             header = "🏁 **RACE IN PROGRESS!**\n\n"
             if len(finished) == len(racers):
                 header = "🏁 **RACE FINISHED!**\n\n"
-            content = header + _draw_track(positions, track_len, finished)
+            content = header + draw(positions, finished)
 
             try:
-                await msg.edit(content=content)
+                await msg.edit(content=content, allowed_mentions=silent)
             except discord.HTTPException:
                 pass
 
             if len(finished) == len(racers):
                 break
 
-        # Final result
-        winner_emoji, winner_name = finished[0]
+        # Final result — only ping the winner
+        winner_emoji, winner_name, winner_mention = finished[0]
+        winner_label = winner_mention if winner_mention else f"**{winner_name}**"
         results = "\n".join(
-            f"{['🥇','🥈','🥉','4️⃣'][i] if i < 4 else f'#{i+1}'} {e} **{n}**"
-            for i, (e, n) in enumerate(finished)
+            f"{['🥇','🥈','🥉','4️⃣'][i] if i < 4 else f'#{i+1}'} {e} {(m if m else f'**{n}**')}"
+            for i, (e, n, m) in enumerate(finished)
         )
         final = (
             f"🏁 **RACE FINISHED!**\n\n"
-            f"{_draw_track(positions, track_len, finished)}\n\n"
-            f"## 🏆 {winner_emoji} {winner_name} WINS!\n\n"
+            f"{draw(positions, finished)}\n\n"
+            f"## 🏆 {winner_emoji} {winner_label} WINS!\n\n"
             f"**Final standings:**\n{results}"
         )
-        await msg.edit(content=final)
+        # Allow only the winner to be pinged on the final message
+        if winner_mention:
+            allowed_winner = discord.AllowedMentions(users=[interaction.guild.get_member(int(re.sub(r'\D', '', winner_mention)))] if interaction.guild else False)
+            try:
+                await msg.edit(content=final, allowed_mentions=allowed_winner)
+            except Exception:
+                await msg.edit(content=final, allowed_mentions=silent)
+        else:
+            await msg.edit(content=final, allowed_mentions=silent)
 
     finally:
         active_races.discard(channel_id)
