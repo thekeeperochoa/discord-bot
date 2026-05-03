@@ -53,6 +53,7 @@ DEFAULT_PERSONALITY = {
     "trigger_keywords": [],
     "allowed_channels": [],
     "blocked_users": [],
+    "respected_users": [],
     "chime_in_enabled": False,
     "chime_in_min": 40,
     "chime_in_max": 80,
@@ -477,6 +478,7 @@ async def send_reply(message: discord.Message, reply: str, chimed_in: bool = Fal
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+tree = discord.app_commands.CommandTree(client)
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 
@@ -651,11 +653,234 @@ async def daily_recap_scheduler():
         daily_log.cleanup_old(days_to_keep=7)
 
 
+# ── Slash commands: entertainment ────────────────────────────────────────────
+RACE_RACERS = [
+    ("🏎️", "Lambo"),
+    ("🚗", "Civic"),
+    ("🚙", "Minivan"),
+    ("🛺", "Tuk-tuk"),
+    ("🚜", "Tractor"),
+    ("🏍️", "Bike"),
+    ("🛴", "Scooter"),
+    ("🚲", "Tricycle"),
+]
+
+# Track per-channel race lock so two people don't start one at the same time
+active_races: set[str] = set()
+
+
+def _draw_track(positions: list[tuple], track_len: int = 20, finished: list = None) -> str:
+    """Draw the race state. positions: [(emoji, name, pos)]"""
+    finished = finished or []
+    lines = []
+    for emoji, name, pos in positions:
+        bar = "─" * track_len
+        # Place racer
+        p = min(pos, track_len)
+        line = bar[:p] + emoji + bar[p:] + "🏁"
+        # Add name + position indicator
+        suffix = ""
+        if name in [f[1] for f in finished]:
+            place = [f[1] for f in finished].index(name) + 1
+            medal = ["🥇","🥈","🥉"][place-1] if place <= 3 else f"#{place}"
+            suffix = f"  {medal}"
+        lines.append(f"`{line}` **{name}**{suffix}")
+    return "\n".join(lines)
+
+
+@tree.command(name="rs", description="Start a race! Watch random racers battle to the finish.")
+async def race_command(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id)
+    if channel_id in active_races:
+        await interaction.response.send_message("🏁 A race is already running here!", ephemeral=True)
+        return
+
+    active_races.add(channel_id)
+    try:
+        # Pick 4 random racers
+        racers = random.sample(RACE_RACERS, 4)
+        track_len = 20
+        positions = [(emoji, name, 0) for emoji, name in racers]
+        finished: list = []  # [(emoji, name)] in finishing order
+
+        # Initial frame
+        await interaction.response.send_message(
+            f"🏁 **RACE START!**\n\n{_draw_track(positions, track_len)}"
+        )
+        msg = await interaction.original_response()
+
+        # Race animation loop — each tick everyone moves 0-2 spaces
+        for _tick in range(40):  # max 40 ticks
+            await asyncio.sleep(1.2)
+            new_positions = []
+            for emoji, name, pos in positions:
+                if name in [f[1] for f in finished]:
+                    new_positions.append((emoji, name, track_len))
+                    continue
+                step = random.choices([0, 1, 2], weights=[1, 2, 1])[0]
+                new_pos = pos + step
+                if new_pos >= track_len and name not in [f[1] for f in finished]:
+                    finished.append((emoji, name))
+                    new_pos = track_len
+                new_positions.append((emoji, name, new_pos))
+            positions = new_positions
+
+            # Build display
+            header = "🏁 **RACE IN PROGRESS!**\n\n"
+            if len(finished) == len(racers):
+                header = "🏁 **RACE FINISHED!**\n\n"
+            content = header + _draw_track(positions, track_len, finished)
+
+            try:
+                await msg.edit(content=content)
+            except discord.HTTPException:
+                pass
+
+            if len(finished) == len(racers):
+                break
+
+        # Final result
+        winner_emoji, winner_name = finished[0]
+        results = "\n".join(
+            f"{['🥇','🥈','🥉','4️⃣'][i] if i < 4 else f'#{i+1}'} {e} **{n}**"
+            for i, (e, n) in enumerate(finished)
+        )
+        final = (
+            f"🏁 **RACE FINISHED!**\n\n"
+            f"{_draw_track(positions, track_len, finished)}\n\n"
+            f"## 🏆 {winner_emoji} {winner_name} WINS!\n\n"
+            f"**Final standings:**\n{results}"
+        )
+        await msg.edit(content=final)
+
+    finally:
+        active_races.discard(channel_id)
+
+
+@tree.command(name="roll", description="Roll a dice (1-100 by default).")
+@discord.app_commands.describe(sides="Number of sides on the dice (default 100)")
+async def roll_command(interaction: discord.Interaction, sides: int = 100):
+    if sides < 2 or sides > 1_000_000:
+        await interaction.response.send_message("Pick a sides count between 2 and 1,000,000.", ephemeral=True)
+        return
+    result = random.randint(1, sides)
+    await interaction.response.send_message(f"🎲 **{result}** _(d{sides})_")
+
+
+@tree.command(name="flip", description="Flip a coin.")
+async def flip_command(interaction: discord.Interaction):
+    result = random.choice(["🪙 **Heads**", "🪙 **Tails**"])
+    # Animate
+    await interaction.response.send_message("🪙 *flipping...*")
+    msg = await interaction.original_response()
+    await asyncio.sleep(1)
+    await msg.edit(content="🪙 *spinning...*")
+    await asyncio.sleep(1)
+    await msg.edit(content=result)
+
+
+@tree.command(name="8ball", description="Ask the magic 8-ball a question.")
+@discord.app_commands.describe(question="Your yes/no question")
+async def eightball_command(interaction: discord.Interaction, question: str):
+    answers = [
+        "Absolutely.", "No chance.", "Without a doubt.", "Definitely not.",
+        "Ask again later.", "My sources say yes.", "Very doubtful.",
+        "Outlook good.", "It is certain.", "Don't count on it.",
+        "Signs point to yes.", "Reply hazy, try again.", "Cannot predict now.",
+        "Better not tell you now.", "Concentrate and ask again.",
+    ]
+    answer = random.choice(answers)
+    await interaction.response.send_message(f"🎱 **Q:** {question}\n**A:** {answer}")
+
+
+@tree.command(name="rps", description="Play rock paper scissors against the bot.")
+@discord.app_commands.describe(choice="rock, paper, or scissors")
+@discord.app_commands.choices(choice=[
+    discord.app_commands.Choice(name="🪨 Rock", value="rock"),
+    discord.app_commands.Choice(name="📄 Paper", value="paper"),
+    discord.app_commands.Choice(name="✂️ Scissors", value="scissors"),
+])
+async def rps_command(interaction: discord.Interaction, choice: discord.app_commands.Choice[str]):
+    user = choice.value
+    bot = random.choice(["rock", "paper", "scissors"])
+    emoji = {"rock":"🪨","paper":"📄","scissors":"✂️"}
+    if user == bot:
+        result = "It's a tie!"
+    elif (user == "rock" and bot == "scissors") or \
+         (user == "paper" and bot == "rock") or \
+         (user == "scissors" and bot == "paper"):
+        result = "**You win!** 🎉"
+    else:
+        result = "**I win!** 😎"
+    await interaction.response.send_message(
+        f"{emoji[user]} vs {emoji[bot]}\n{result}"
+    )
+
+
+@tree.command(name="rate", description="Rate something out of 10.")
+@discord.app_commands.describe(thing="What should I rate?")
+async def rate_command(interaction: discord.Interaction, thing: str):
+    score = random.randint(0, 10)
+    bar = "🟩" * score + "⬜" * (10 - score)
+    comments = {
+        0:"absolute trash", 1:"barely registers", 2:"yikes", 3:"questionable",
+        4:"meh", 5:"average", 6:"not bad", 7:"solid", 8:"impressive",
+        9:"elite", 10:"perfection"
+    }
+    await interaction.response.send_message(
+        f"**{thing}**\n{bar} **{score}/10** — _{comments[score]}_"
+    )
+
+
+@tree.command(name="ship", description="Ship two users together. See compatibility %.")
+@discord.app_commands.describe(user1="First person", user2="Second person")
+async def ship_command(interaction: discord.Interaction, user1: discord.Member, user2: discord.Member):
+    # Deterministic based on IDs so results are stable
+    seed = int(user1.id) ^ int(user2.id)
+    rng = random.Random(seed)
+    score = rng.randint(0, 100)
+    bar_len = 20
+    filled = round(score / 100 * bar_len)
+    bar = "💗" * filled + "🖤" * (bar_len - filled)
+    name1 = user1.display_name
+    name2 = user2.display_name
+    ship_name = name1[:len(name1)//2] + name2[len(name2)//2:]
+    if score < 20:    verdict = "💀 disaster"
+    elif score < 40:  verdict = "😬 awkward"
+    elif score < 60:  verdict = "🤔 mid"
+    elif score < 80:  verdict = "😍 promising"
+    else:             verdict = "💍 soulmates"
+    await interaction.response.send_message(
+        f"💞 **{name1}** + **{name2}** = **{ship_name}**\n{bar} **{score}%** — _{verdict}_"
+    )
+
+
+@tree.command(name="commands", description="List all available bot commands.")
+async def commands_command(interaction: discord.Interaction):
+    embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
+    embed.add_field(name="🏎️ /rs", value="Start an animated race!", inline=False)
+    embed.add_field(name="🎲 /roll", value="Roll a dice", inline=True)
+    embed.add_field(name="🪙 /flip", value="Flip a coin", inline=True)
+    embed.add_field(name="🎱 /8ball", value="Ask the magic 8-ball", inline=True)
+    embed.add_field(name="✂️ /rps", value="Rock paper scissors", inline=True)
+    embed.add_field(name="⭐ /rate", value="Rate something /10", inline=True)
+    embed.add_field(name="💞 /ship", value="Ship two users", inline=True)
+    embed.add_field(name="💬 Chat",
+        value=f"Mention me, reply, or say my name to chat\n`!recap` for a daily recap\n`!clearhistory` to wipe channel memory\n`!botinfo` for info",
+        inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
 @client.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
+    try:
+        synced = await tree.sync()
+        log.info("Synced %d slash commands", len(synced))
+    except Exception as e:
+        log.error("Slash command sync failed: %s", e)
     client.loop.create_task(rotate_status())
     client.loop.create_task(silence_checker())
     client.loop.create_task(daily_recap_scheduler())
@@ -728,7 +953,9 @@ async def on_message(message: discord.Message):
 
     # Passive watching — log every message
     if cfg.get("watch_mode_enabled", True):
-        watch_line = f"[{message.author.display_name}]: {message.content}"
+        is_respected = str(message.author.id) in cfg.get("respected_users", [])
+        tag = "⭐BOSS⭐ " if is_respected else ""
+        watch_line = f"[{tag}{message.author.display_name}]: {message.content}"
         memory.append(channel_id, "user", watch_line)
 
     # Emoji reaction chance
@@ -794,7 +1021,9 @@ async def on_message(message: discord.Message):
         return
 
     if not cfg.get("watch_mode_enabled", True):
-        memory.append(channel_id, "user", f"[{message.author.display_name}]: {content}")
+        is_respected = str(message.author.id) in cfg.get("respected_users", [])
+        tag = "⭐BOSS⭐ " if is_respected else ""
+        memory.append(channel_id, "user", f"[{tag}{message.author.display_name}]: {content}")
 
     async with message.channel.typing():
         history = memory.get_messages(channel_id)
