@@ -787,54 +787,43 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
 
     await edit(f"🔥 Loading ammunition on {user.mention}...")
 
-    # Gather their recent messages from the daily logs (last 7 days)
+    # Gather user's recent messages — pull DIRECTLY from Discord channel history
+    # This is far more reliable than our local logs which can be sparse.
     user_messages: list[str] = []
+    try:
+        # Scan up to last 1000 messages in this channel for messages by target
+        async for m in interaction.channel.history(limit=1000):
+            if m.author.id == user.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= 50:
+                    break
+    except Exception as e:
+        log.warning("Channel history fetch failed: %s", e)
+
+    # Also scour daily logs (cross-channel) as backup
     today = datetime.now(timezone.utc)
+    target_name = user.display_name
+    seen = set(user_messages)
     for days_back in range(7):
         date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        # Search across all channels for this date
         for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
             try:
                 with open(log_file) as f:
                     for line in f:
                         try:
                             entry = json.loads(line)
-                            if entry.get("author") == target_name and entry.get("content"):
-                                user_messages.append(entry["content"])
+                            if entry.get("author") == target_name:
+                                content = entry.get("content", "").strip()
+                                if content and content not in seen:
+                                    seen.add(content)
+                                    user_messages.append(content)
                         except Exception:
                             continue
             except Exception:
                 continue
 
-    # Also pull from channel memory files (covers messages from before daily logging)
-    for mem_file in MEMORY_DIR.glob("*.json"):
-        try:
-            with open(mem_file) as f:
-                history = json.load(f)
-            for entry in history:
-                content = entry.get("content", "")
-                # Memory format: [BOSS  display_name]: message  OR  [display_name]: message
-                m = re.match(r"^\[(?:⭐BOSS⭐\s+)?([^\]]+)\]:\s*(.+)$", content, re.DOTALL)
-                if m:
-                    author = m.group(1).strip()
-                    msg = m.group(2).strip()
-                    if author.lower() == target_name.lower() and msg:
-                        if msg not in user_messages:
-                            user_messages.append(msg)
-        except Exception:
-            continue
-
-    # Deduplicate while preserving order
-    seen = set()
-    deduped = []
-    for m in user_messages:
-        if m not in seen:
-            seen.add(m)
-            deduped.append(m)
-    user_messages = deduped
-
     # Cap to most recent 80 messages (avoid huge payloads)
-    user_messages = user_messages[-80:]
+    user_messages = user_messages[:80]
 
     if len(user_messages) < 1:
         # Still allow a roast based purely on display name + reputation
