@@ -2548,6 +2548,587 @@ async def bet_command(interaction: discord.Interaction, amount: int):
         )
 
 
+# ── 🃏 /blackjack ────────────────────────────────────────────────────────────
+CARD_SUITS = ["♠", "♥", "♦", "♣"]
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+
+def _new_deck() -> list:
+    return [(r, s) for r in CARD_RANKS for s in CARD_SUITS]
+
+
+def _hand_value(hand: list) -> int:
+    total = 0
+    aces = 0
+    for rank, _ in hand:
+        if rank in ("J", "Q", "K"):
+            total += 10
+        elif rank == "A":
+            total += 11
+            aces += 1
+        else:
+            total += int(rank)
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+
+def _render_hand(hand: list, hide_first: bool = False) -> str:
+    cards = []
+    for i, (r, s) in enumerate(hand):
+        if hide_first and i == 0:
+            cards.append("`[??]`")
+        else:
+            cards.append(f"`[{r}{s}]`")
+    return " ".join(cards)
+
+
+# Track active blackjack games per user
+active_blackjack: dict[int, dict] = {}
+
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.bet = bet
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your game.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🎯")
+    async def hit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._hit(interaction)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success, emoji="✋")
+    async def stand_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._stand(interaction)
+
+    async def _hit(self, interaction: discord.Interaction):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        # Draw a card
+        card = game["deck"].pop()
+        game["player"].append(card)
+        player_total = _hand_value(game["player"])
+
+        if player_total > 21:
+            # Bust
+            del active_blackjack[self.user_id]
+            economy.record_loss(self.user_id)
+            new_bal = economy.balance(self.user_id)
+            self.disable_all()
+            await interaction.response.edit_message(
+                content=(
+                    f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
+                    f"**Dealer:** {_render_hand(game['dealer'])}\n"
+                    f"**You:** {_render_hand(game['player'])} = **{player_total}**\n\n"
+                    f"## 💥 BUST!\n"
+                    f"Lost **{self.bet:,}** coins.\n"
+                    f"Balance: **{new_bal:,}**"
+                ),
+                view=self,
+            )
+            return
+
+        # Continue
+        await interaction.response.edit_message(
+            content=(
+                f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
+                f"**Dealer:** {_render_hand(game['dealer'], hide_first=True)} = ?\n"
+                f"**You:** {_render_hand(game['player'])} = **{player_total}**"
+            ),
+            view=self,
+        )
+
+    async def _stand(self, interaction: discord.Interaction):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+
+        # Dealer plays
+        while _hand_value(game["dealer"]) < 17:
+            game["dealer"].append(game["deck"].pop())
+
+        player_total = _hand_value(game["player"])
+        dealer_total = _hand_value(game["dealer"])
+        del active_blackjack[self.user_id]
+
+        # Resolve
+        outcome = ""
+        winnings = 0
+        if dealer_total > 21:
+            winnings = self.bet * 2
+            outcome = "## 🎉 DEALER BUSTS! YOU WIN!"
+            economy.record_win(self.user_id)
+        elif player_total > dealer_total:
+            winnings = self.bet * 2
+            outcome = "## 🎉 YOU WIN!"
+            economy.record_win(self.user_id)
+        elif player_total == dealer_total:
+            winnings = self.bet  # push, get bet back
+            outcome = "## 🤝 PUSH (tie). Bet refunded."
+        else:
+            winnings = 0
+            outcome = "## 💀 DEALER WINS"
+            economy.record_loss(self.user_id)
+
+        if winnings > 0:
+            economy.add(self.user_id, winnings, "blackjack")
+        new_bal = economy.balance(self.user_id)
+
+        self.disable_all()
+        await interaction.response.edit_message(
+            content=(
+                f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
+                f"**Dealer:** {_render_hand(game['dealer'])} = **{dealer_total}**\n"
+                f"**You:** {_render_hand(game['player'])} = **{player_total}**\n\n"
+                f"{outcome}\n"
+                f"{('Won **' + format(winnings, ',') + '** coins.') if winnings > self.bet else ('Lost **' + format(self.bet, ',') + '** coins.') if winnings == 0 else 'Bet refunded.'}\n"
+                f"Balance: **{new_bal:,}**"
+            ),
+            view=self,
+        )
+
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def on_timeout(self):
+        # If a game is still active, refund bet
+        if self.user_id in active_blackjack:
+            economy.add(self.user_id, self.bet, "blackjack timeout refund")
+            del active_blackjack[self.user_id]
+
+
+@tree.command(name="blackjack", description="Play blackjack against the dealer.")
+@discord.app_commands.describe(bet="How many coins to bet")
+async def blackjack_command(interaction: discord.Interaction, bet: int):
+    user = interaction.user
+    if bet <= 0:
+        await interaction.response.send_message("Bet must be positive.", ephemeral=True)
+        return
+    if user.id in active_blackjack:
+        await interaction.response.send_message("You already have a hand in play.", ephemeral=True)
+        return
+    if bet > economy.balance(user.id):
+        await interaction.response.send_message(
+            f"❌ You only have **{economy.balance(user.id):,}** coins.",
+            ephemeral=True,
+        )
+        return
+
+    # Take bet upfront
+    economy.add(user.id, -bet, "blackjack bet")
+
+    deck = _new_deck()
+    random.shuffle(deck)
+    player = [deck.pop(), deck.pop()]
+    dealer = [deck.pop(), deck.pop()]
+    active_blackjack[user.id] = {"deck": deck, "player": player, "dealer": dealer}
+
+    player_total = _hand_value(player)
+
+    # Natural blackjack on the deal?
+    if player_total == 21:
+        # Pay 2.5x for natural
+        winnings = int(bet * 2.5)
+        economy.add(user.id, winnings, "blackjack natural")
+        economy.record_win(user.id)
+        del active_blackjack[user.id]
+        new_bal = economy.balance(user.id)
+        await interaction.response.send_message(
+            f"🃏 **BLACKJACK!**\n\n"
+            f"**Dealer:** {_render_hand(dealer, hide_first=True)}\n"
+            f"**You:** {_render_hand(player)} = **21**\n\n"
+            f"## 🎉 NATURAL BLACKJACK! 2.5x payout!\n"
+            f"Won **{winnings:,}** coins!\n"
+            f"Balance: **{new_bal:,}**"
+        )
+        return
+
+    view = BlackjackView(user.id, bet)
+    await interaction.response.send_message(
+        f"🃏 **BLACKJACK** — Bet: {bet:,}\n\n"
+        f"**Dealer:** {_render_hand(dealer, hide_first=True)} = ?\n"
+        f"**You:** {_render_hand(player)} = **{player_total}**\n\n"
+        f"Hit or Stand?",
+        view=view,
+    )
+
+
+# ── 🎭 /crime ────────────────────────────────────────────────────────────────
+@tree.command(name="crime", description="Commit a random crime. Win or lose coins.")
+async def crime_command(interaction: discord.Interaction):
+    user = interaction.user
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+
+    remaining = economy.get_cooldown_remaining(user.id, "rob")  # share rob cooldown
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"🚨 You're laying low. Try again in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    economy.set_cooldown(user.id, "rob")
+
+    # AI generates the crime story
+    success = random.random() < 0.55
+    crime_system = (
+        cfg["system_prompt"] +
+        "\n\n=== CRIME GENERATOR ===\n"
+        f"You are narrating {user.display_name}'s petty crime. Write a SHORT 2-sentence story "
+        f"about them committing a random crime (mugging, scamming, smuggling, picking pockets, "
+        f"running a Ponzi scheme, fake check, NFT rug pull, etc.). "
+        f"The crime ended in {'SUCCESS' if success else 'FAILURE'}. "
+        "Make it funny, specific, and creative. Stay in character. No preamble — just the story."
+    )
+
+    await edit(f"🦹 *{user.display_name} is up to no good...*")
+    await asyncio.sleep(1.0)
+    await edit(f"🦹 *something is happening...*")
+    await asyncio.sleep(1.0)
+
+    try:
+        story = await ask_ai(
+            crime_system,
+            [{"role": "user", "content": "Generate the crime story."}],
+            {**cfg, "max_tokens": 200, "temperature": min(cfg["temperature"] + 0.1, 1.0)},
+        )
+    except Exception:
+        story = ""
+    if story.startswith("⚠️") or not story.strip():
+        # Fallback flavor
+        if success:
+            story = f"{user.display_name} pulled off a quick scam and slipped into the night."
+        else:
+            story = f"{user.display_name} got caught on camera. Tragic."
+
+    if success:
+        amount = random.randint(150, 800)
+        new_bal = economy.add(user.id, amount, "crime success")
+        economy.record_win(user.id)
+        result = f"💰 **+{amount:,} coins**\nBalance: **{new_bal:,}**"
+        header = "## 🦹 CRIME SUCCESSFUL"
+    else:
+        fine = min(random.randint(100, 400), economy.balance(user.id))
+        new_bal = economy.add(user.id, -fine, "crime failed")
+        economy.record_loss(user.id)
+        result = f"💸 **-{fine:,} coins** (fined)\nBalance: **{new_bal:,}**"
+        header = "## 🚔 CAUGHT!"
+
+    await edit(f"{header}\n\n{story}\n\n{result}")
+
+
+# ── 💍 /marry ────────────────────────────────────────────────────────────────
+MARRIAGES_FILE = MEMORY_DIR / "marriages.json"
+
+def _load_marriages() -> dict:
+    if MARRIAGES_FILE.exists():
+        try:
+            with open(MARRIAGES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_marriages(data: dict):
+    with open(MARRIAGES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+class MarryView(discord.ui.View):
+    def __init__(self, proposer_id: int, target_id: int):
+        super().__init__(timeout=60)
+        self.proposer_id = proposer_id
+        self.target_id = target_id
+        self.responded = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message("This proposal isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Accept 💍", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.responded = True
+        marriages = _load_marriages()
+        # Check both are single
+        if str(self.proposer_id) in marriages or str(self.target_id) in marriages:
+            await interaction.response.edit_message(
+                content="❌ Someone is already married. This proposal is void.",
+                view=None,
+            )
+            return
+        # Marry them
+        marriages[str(self.proposer_id)] = {"spouse": str(self.target_id), "since": time.time()}
+        marriages[str(self.target_id)] = {"spouse": str(self.proposer_id), "since": time.time()}
+        _save_marriages(marriages)
+        # Wedding bonus to both
+        bonus = 1000
+        economy.add(self.proposer_id, bonus, "wedding gift")
+        economy.add(self.target_id, bonus, "wedding gift")
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                f"💒 **WEDDING BELLS** 💒\n\n"
+                f"<@{self.proposer_id}> and <@{self.target_id}> are now married!\n\n"
+                f"💰 Both received **{bonus:,}** coin wedding gifts!\n"
+                f"💑 Use `/divorce` to end it (with consequences)."
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="Reject 💔", style=discord.ButtonStyle.danger)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.responded = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"💔 <@{self.target_id}> rejected the proposal. Brutal.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        if not self.responded:
+            for child in self.children:
+                child.disabled = True
+
+
+@tree.command(name="marry", description="Propose marriage to another user.")
+@discord.app_commands.describe(user="Who you're proposing to")
+async def marry_command(interaction: discord.Interaction, user: discord.Member):
+    proposer = interaction.user
+    if user.id == proposer.id:
+        await interaction.response.send_message("You can't marry yourself.", ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message("Bots can't marry.", ephemeral=True)
+        return
+
+    marriages = _load_marriages()
+    if str(proposer.id) in marriages:
+        spouse_id = marriages[str(proposer.id)]["spouse"]
+        await interaction.response.send_message(
+            f"❌ You're already married to <@{spouse_id}>. Use `/divorce` first.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+    if str(user.id) in marriages:
+        await interaction.response.send_message(
+            f"❌ {user.mention} is already married.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    silent = discord.AllowedMentions.none()
+    await interaction.response.defer()
+
+    async def edit(content, view=None):
+        kwargs = {"content": content, "allowed_mentions": silent}
+        if view is not None:
+            kwargs["view"] = view
+        try:
+            await interaction.edit_original_response(**kwargs)
+        except Exception:
+            pass
+
+    await edit("💍 *getting down on one knee...*")
+    await asyncio.sleep(1.5)
+    await edit("💍 💍 *opening the box...*")
+    await asyncio.sleep(1.5)
+    await edit(
+        f"# 💍 PROPOSAL\n\n"
+        f"{proposer.mention} drops to one knee in front of {user.mention}...\n\n"
+        f"*Will you accept?*"
+    )
+    await asyncio.sleep(1.5)
+
+    view = MarryView(proposer.id, user.id)
+    # The proposal needs to ping the target user
+    await interaction.edit_original_response(
+        content=(
+            f"# 💍 PROPOSAL 💍\n\n"
+            f"{proposer.mention} has proposed to {user.mention}!\n\n"
+            f"{user.mention}, do you accept?"
+        ),
+        view=view,
+        allowed_mentions=discord.AllowedMentions(users=[user]),
+    )
+
+
+@tree.command(name="divorce", description="End your marriage. Costs coins.")
+async def divorce_command(interaction: discord.Interaction):
+    user = interaction.user
+    marriages = _load_marriages()
+    if str(user.id) not in marriages:
+        await interaction.response.send_message("You're not married.", ephemeral=True)
+        return
+
+    spouse_id = int(marriages[str(user.id)]["spouse"])
+    cost = 500
+    bal = economy.balance(user.id)
+    actual = min(cost, bal)
+    economy.add(user.id, -actual, "divorce")
+
+    del marriages[str(user.id)]
+    if str(spouse_id) in marriages:
+        del marriages[str(spouse_id)]
+    _save_marriages(marriages)
+
+    await interaction.response.send_message(
+        f"💔 **DIVORCED**\n\n"
+        f"{user.mention} divorced <@{spouse_id}>.\n"
+        f"Lawyer fees: **{actual:,}** coins.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ── 🎡 /wheel ────────────────────────────────────────────────────────────────
+WHEEL_OUTCOMES = [
+    {"label": "💰 +1000 coins", "type": "gain", "amount": 1000, "weight": 8},
+    {"label": "💰 +500 coins",  "type": "gain", "amount": 500,  "weight": 12},
+    {"label": "💰 +250 coins",  "type": "gain", "amount": 250,  "weight": 16},
+    {"label": "💀 -500 coins",  "type": "loss", "amount": 500,  "weight": 12},
+    {"label": "💀 -250 coins",  "type": "loss", "amount": 250,  "weight": 14},
+    {"label": "🎰 Double balance", "type": "double", "weight": 3},
+    {"label": "💸 Lose half balance", "type": "halve", "weight": 4},
+    {"label": "🔄 Swap balance with random user", "type": "swap", "weight": 3},
+    {"label": "🍀 Nothing happens", "type": "nothing", "weight": 10},
+    {"label": "💎 JACKPOT +5000", "type": "gain", "amount": 5000, "weight": 1},
+]
+
+
+@tree.command(name="wheel", description="Spin the wheel of fortune for a random outcome.")
+async def wheel_command(interaction: discord.Interaction):
+    user = interaction.user
+    silent = discord.AllowedMentions.none()
+    remaining = economy.get_cooldown_remaining(user.id, "work")  # share work cooldown
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ The wheel needs to cool down. Try again in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.set_cooldown(user.id, "work")
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animation: cycle through outcomes
+    await edit(f"🎡 {user.mention} spins the wheel...")
+    await asyncio.sleep(0.8)
+    for _ in range(8):
+        sample = random.choice(WHEEL_OUTCOMES)
+        await edit(f"🎡 *spinning...*\n\n> {sample['label']}")
+        await asyncio.sleep(0.25)
+    for _ in range(4):
+        sample = random.choice(WHEEL_OUTCOMES)
+        await edit(f"🎡 *slowing...*\n\n> {sample['label']}")
+        await asyncio.sleep(0.5)
+
+    # Pick weighted outcome
+    weights = [o["weight"] for o in WHEEL_OUTCOMES]
+    outcome = random.choices(WHEEL_OUTCOMES, weights=weights, k=1)[0]
+
+    label = outcome["label"]
+    result_text = ""
+    if outcome["type"] == "gain":
+        new_bal = economy.add(user.id, outcome["amount"], "wheel gain")
+        result_text = f"You gained **{outcome['amount']:,}** coins!\nBalance: **{new_bal:,}**"
+    elif outcome["type"] == "loss":
+        actual = min(outcome["amount"], economy.balance(user.id))
+        new_bal = economy.add(user.id, -actual, "wheel loss")
+        result_text = f"You lost **{actual:,}** coins.\nBalance: **{new_bal:,}**"
+    elif outcome["type"] == "double":
+        bal = economy.balance(user.id)
+        new_bal = economy.add(user.id, bal, "wheel double")
+        result_text = f"Your balance was **doubled**!\nBalance: **{new_bal:,}**"
+    elif outcome["type"] == "halve":
+        bal = economy.balance(user.id)
+        loss = bal // 2
+        new_bal = economy.add(user.id, -loss, "wheel halve")
+        result_text = f"You lost **{loss:,}** coins (half).\nBalance: **{new_bal:,}**"
+    elif outcome["type"] == "swap":
+        # Pick a random other user with a balance
+        others = []
+        if interaction.guild:
+            for m in interaction.guild.members:
+                if m.id != user.id and not m.bot and economy.balance(m.id) > 0:
+                    others.append(m)
+        if others:
+            target = random.choice(others)
+            user_bal = economy.balance(user.id)
+            target_bal = economy.balance(target.id)
+            # Set both balances
+            u = economy._user(user.id)
+            t = economy._user(target.id)
+            u["balance"] = target_bal
+            t["balance"] = user_bal
+            economy._save()
+            result_text = (
+                f"🔄 You swapped balances with {target.mention}!\n"
+                f"You now have **{target_bal:,}** coins, they have **{user_bal:,}**."
+            )
+        else:
+            result_text = "No one to swap with. Spared by chance."
+    else:  # nothing
+        result_text = "Nothing happens. The universe ignored you."
+
+    await edit(
+        f"# 🎡 THE WHEEL HAS SPOKEN\n\n"
+        f"## > {label}\n\n"
+        f"{result_text}"
+    )
+
+
+# ── 🎰 /casino — hub menu ─────────────────────────────────────────────────────
+@tree.command(name="casino", description="Welcome to the casino. See all gambling games.")
+async def casino_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎰 WELCOME TO THE CASINO 🎰",
+        description=f"_{interaction.user.display_name}, what's your poison?_",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="🃏 /blackjack `<bet>`", value="Beat the dealer to 21", inline=False)
+    embed.add_field(name="🎰 /slots `<bet>`",     value="Spin the reels • up to 20x payout", inline=False)
+    embed.add_field(name="🪙 /bet `<amount>`",    value="50/50 coinflip • double or nothing", inline=False)
+    embed.add_field(name="🎡 /wheel",             value="Spin for a random outcome", inline=False)
+    embed.add_field(name="🦹 /crime",             value="Risk it for a profit", inline=False)
+    embed.add_field(name="🎯 /gun",               value="Russian roulette w/ friends", inline=False)
+    embed.add_field(name="💰 /heist",             value="Rob a bank with your crew", inline=False)
+    embed.add_field(name="💸 /rob `<user>`",      value="Pickpocket someone", inline=False)
+    bal = economy.balance(interaction.user.id)
+    embed.set_footer(text=f"💰 Your balance: {bal:,} coins")
+    await interaction.response.send_message(embed=embed)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -2569,11 +3150,15 @@ async def commands_command(interaction: discord.Interaction):
     embed.add_field(
         name="🎲 GAMES (earn coins)",
         value=(
+            "`/blackjack` Beat the dealer\n"
+            "`/casino` Casino menu\n"
+            "`/wheel` Wheel of fortune\n"
+            "`/crime` Random crime\n"
             "`/rs` Race (tag racers)\n"
             "`/duel` Pistol duel\n"
             "`/gun` Russian roulette\n"
             "`/heist` Bank heist crew\n"
-            "`/slots` Slot machine (bet)\n"
+            "`/slots` Slot machine\n"
             "`/rps-tournament` 4-player RPS"
         ),
         inline=True
@@ -2590,6 +3175,8 @@ async def commands_command(interaction: discord.Interaction):
     embed.add_field(
         name="🎉 FUN",
         value=(
+            "`/marry` Propose to a user\n"
+            "`/divorce` End a marriage\n"
             "`/hack` Hack a user\n"
             "`/ship` Ship two users\n"
             "`/rate` Rate something /10\n"
