@@ -191,6 +191,157 @@ class DailyLog:
 daily_log = DailyLog()
 
 
+# ── 💰 Economy ────────────────────────────────────────────────────────────────
+ECONOMY_FILE = MEMORY_DIR / "economy.json"
+ECONOMY_LOCK = asyncio.Lock()
+
+# Default starting balance
+STARTING_BALANCE = 500
+# Daily reward amount range
+DAILY_MIN, DAILY_MAX = 200, 500
+# Weekly reward
+WEEKLY_MIN, WEEKLY_MAX = 1500, 3500
+# Work command range
+WORK_MIN, WORK_MAX = 50, 250
+# Rob command - chance and limits
+ROB_SUCCESS_CHANCE = 0.45
+ROB_MIN_TARGET_BALANCE = 200
+ROB_PERCENT_MIN, ROB_PERCENT_MAX = 0.05, 0.25  # 5-25% of victim's balance
+ROB_FINE_MIN, ROB_FINE_MAX = 100, 400
+# Cooldowns in seconds
+COOLDOWNS = {
+    "daily":  24 * 3600,
+    "weekly": 7 * 24 * 3600,
+    "work":   45 * 60,
+    "rob":    2 * 3600,
+    "beg":    10 * 60,
+}
+
+
+class Economy:
+    """JSON-backed economy. Tracks balance and per-command cooldowns per user."""
+    def __init__(self):
+        self._data: dict = {"users": {}}
+        self._loaded = False
+
+    def _load(self):
+        if self._loaded:
+            return
+        if ECONOMY_FILE.exists():
+            try:
+                with open(ECONOMY_FILE) as f:
+                    self._data = json.load(f)
+                if "users" not in self._data:
+                    self._data["users"] = {}
+            except Exception as e:
+                log.warning("Economy load failed: %s", e)
+                self._data = {"users": {}}
+        self._loaded = True
+
+    def _save(self):
+        try:
+            with open(ECONOMY_FILE, "w") as f:
+                json.dump(self._data, f, indent=2)
+        except Exception as e:
+            log.warning("Economy save failed: %s", e)
+
+    def _user(self, user_id: int) -> dict:
+        self._load()
+        uid = str(user_id)
+        if uid not in self._data["users"]:
+            self._data["users"][uid] = {
+                "balance": STARTING_BALANCE,
+                "cooldowns": {},
+                "stats": {"games_won": 0, "games_lost": 0, "total_earned": 0, "total_lost": 0},
+            }
+        return self._data["users"][uid]
+
+    def balance(self, user_id: int) -> int:
+        return self._user(user_id)["balance"]
+
+    def add(self, user_id: int, amount: int, reason: str = "") -> int:
+        u = self._user(user_id)
+        u["balance"] += amount
+        if amount > 0:
+            u["stats"]["total_earned"] = u["stats"].get("total_earned", 0) + amount
+        else:
+            u["stats"]["total_lost"] = u["stats"].get("total_lost", 0) + abs(amount)
+        if u["balance"] < 0:
+            u["balance"] = 0
+        self._save()
+        return u["balance"]
+
+    def transfer(self, from_id: int, to_id: int, amount: int) -> bool:
+        if amount <= 0:
+            return False
+        sender = self._user(from_id)
+        if sender["balance"] < amount:
+            return False
+        sender["balance"] -= amount
+        receiver = self._user(to_id)
+        receiver["balance"] += amount
+        self._save()
+        return True
+
+    def record_win(self, user_id: int):
+        u = self._user(user_id)
+        u["stats"]["games_won"] = u["stats"].get("games_won", 0) + 1
+        self._save()
+
+    def record_loss(self, user_id: int):
+        u = self._user(user_id)
+        u["stats"]["games_lost"] = u["stats"].get("games_lost", 0) + 1
+        self._save()
+
+    def stats(self, user_id: int) -> dict:
+        return self._user(user_id)["stats"].copy()
+
+    def get_cooldown_remaining(self, user_id: int, key: str) -> int:
+        """Returns 0 if usable, else seconds remaining."""
+        u = self._user(user_id)
+        last = u["cooldowns"].get(key, 0)
+        cd = COOLDOWNS.get(key, 0)
+        remaining = int((last + cd) - time.time())
+        return max(remaining, 0)
+
+    def set_cooldown(self, user_id: int, key: str):
+        u = self._user(user_id)
+        u["cooldowns"][key] = time.time()
+        self._save()
+
+    def leaderboard(self, top_n: int = 10) -> list:
+        self._load()
+        users = self._data["users"]
+        ranked = sorted(
+            users.items(),
+            key=lambda x: x[1].get("balance", 0),
+            reverse=True,
+        )
+        return ranked[:top_n]
+
+
+economy = Economy()
+
+
+def fmt_cooldown(seconds: int) -> str:
+    """Format seconds as h:m or m:s string."""
+    if seconds <= 0:
+        return "ready"
+    if seconds >= 3600:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h {m}m"
+    if seconds >= 60:
+        m = seconds // 60
+        s = seconds % 60
+        return f"{m}m {s}s"
+    return f"{seconds}s"
+
+
+def fmt_coins(amount: int) -> str:
+    return f"💰 **{amount:,}**"
+
+
 # ── Provider implementations ─────────────────────────────────────────────────
 class RateLimitError(Exception):
     pass
@@ -728,9 +879,11 @@ async def race_command(
         # Assign each user a random vehicle (no duplicates)
         vehicles = random.sample(RACE_RACERS, min(len(RACE_RACERS), 8))
         racers = []  # [(emoji, name, mention)]
+        name_to_user_id: dict[str, int] = {}  # for economy payout
         for i, u in enumerate(all_users):
             emoji, _vehicle = vehicles[i]
             racers.append((emoji, u.display_name, u.mention))
+            name_to_user_id[u.display_name] = u.id
 
         # If only the starter raced, fill in to 4 racers with NPCs
         if len(racers) == 1:
@@ -807,10 +960,27 @@ async def race_command(
             f"{['🥇','🥈','🥉','4️⃣'][i] if i < 4 else f'#{i+1}'} {e} {(m if m else f'**{n}**')}"
             for i, (e, n, m) in enumerate(finished)
         )
+
+        # Economy: prize for real-user winner only
+        prize_text = ""
+        winner_uid = name_to_user_id.get(winner_name)
+        if winner_uid:
+            # Bigger prize when more real users were in the race
+            real_count = len([1 for r in racers if r[2] is not None])
+            prize = 100 + (real_count - 1) * 100  # 1=100, 2=200, 3=300, 4=400
+            economy.add(winner_uid, prize, "race win")
+            economy.record_win(winner_uid)
+            prize_text = f"\n💰 Earned **{prize:,}** coins!"
+            # Mark the other real-user finishers as losses
+            for _e, n, _m in finished[1:]:
+                uid = name_to_user_id.get(n)
+                if uid:
+                    economy.record_loss(uid)
+
         final = (
             f"🏁 **RACE FINISHED!**\n\n"
             f"{draw(positions, finished)}\n\n"
-            f"## 🏆 {winner_emoji} {winner_label} WINS!\n\n"
+            f"## 🏆 {winner_emoji} {winner_label} WINS!{prize_text}\n\n"
             f"**Final standings:**\n{results}"
         )
         # Allow only the winner to be pinged on the final message
@@ -1477,11 +1647,17 @@ async def duel_command(interaction: discord.Interaction, opponent: discord.Membe
         f"{winner.mention} was faster on the draw.",
         f"{loser.mention} blinked. That was all {winner.mention} needed.",
     ]
+    # Economy: winner gets a prize
+    duel_prize = random.randint(150, 400)
+    new_bal = economy.add(winner.id, duel_prize, "duel win")
+    economy.record_win(winner.id)
+    economy.record_loss(loser.id)
     final = (
         f"🎩 **DUEL RESULT** 🎩\n\n"
         f"{random.choice(flavors)}\n\n"
         f"## 🏆 {winner.mention} stands victorious.\n"
-        f"💀 {loser.mention} lies in the dust."
+        f"💀 {loser.mention} lies in the dust.\n\n"
+        f"💰 {winner.display_name} earned **{duel_prize:,}** coins!"
     )
     # Final message can ping both users — they earned it
     try:
@@ -1579,10 +1755,18 @@ async def gun_command(
             turn_idx += 1
 
     winner = alive[0]
+    # Economy: bigger prize = more players
+    gun_prize = 250 + (len(players) - 1) * 200  # 2p=450, 3p=650, 4p=850
+    new_bal = economy.add(winner.id, gun_prize, "russian roulette win")
+    economy.record_win(winner.id)
+    for p in players:
+        if p.id != winner.id:
+            economy.record_loss(p.id)
     final = (
         f"🎯 **GAME OVER**\n\n"
         + "\n".join(log_lines[-8:])
         + f"\n\n## 🏆 {winner.mention} is the last one standing!"
+        + f"\n💰 Earned **{gun_prize:,}** coins!"
     )
     try:
         await interaction.edit_original_response(content=final)
@@ -1645,11 +1829,17 @@ async def heist_command(
     # 15% chance the heist fails
     if random.random() < 0.15:
         caught = random.choice(crew)
+        # Caught crew member pays a fine
+        fine = min(300, economy.balance(caught.id))
+        economy.add(caught.id, -fine, "heist caught")
+        for p in crew:
+            economy.record_loss(p.id)
         final = (
             f"🚔 **HEIST FAILED!**\n\n"
             f"The cops showed up. {caught.mention} got pinned to the wall.\n"
-            f"The rest of the crew escaped with **NOTHING**.\n\n"
-            f"💀 The crew: {crew_str}"
+            f"The rest of the crew escaped with **NOTHING**.\n"
+            f"💀 {caught.display_name} paid a **{fine:,}** coin fine.\n\n"
+            f"The crew: {crew_str}"
         )
         try:
             await interaction.edit_original_response(content=final)
@@ -1657,12 +1847,14 @@ async def heist_command(
             pass
         return
 
-    # Otherwise everyone gets a random share
+    # Otherwise everyone gets a random share — REAL coins now
     payouts = []
     total = 0
     for p in crew:
-        amount = random.randint(5_000, 250_000)
+        amount = random.randint(200, 1500)
         loot_emoji, loot_name = random.choice(HEIST_LOOT)
+        economy.add(p.id, amount, "heist payout")
+        economy.record_win(p.id)
         payouts.append((p, amount, loot_emoji, loot_name))
         total += amount
 
@@ -1671,13 +1863,13 @@ async def heist_command(
     biggest = payouts[0]
 
     payout_lines = "\n".join(
-        f"{['👑','🥈','🥉','🎖️','🎖️'][i] if i < 5 else '•'} {p.mention} — **${amt:,}** {emoji} _{name}_"
+        f"{['👑','🥈','🥉','🎖️','🎖️'][i] if i < 5 else '•'} {p.mention} — 💰 **{amt:,}** coins {emoji} _{name}_"
         for i, (p, amt, emoji, name) in enumerate(payouts)
     )
 
     final = (
         f"💰 **HEIST SUCCESSFUL!** 💰\n\n"
-        f"The crew got out clean with **${total:,}** in loot!\n\n"
+        f"The crew got out clean with **{total:,}** coins in loot!\n\n"
         f"**Cuts:**\n{payout_lines}\n\n"
         f"🏆 {biggest[0].mention} took the biggest haul."
     )
@@ -1853,10 +2045,24 @@ SLOT_PAYOUT = {
     "🍀": 75, "🍇": 50, "🍒": 25, "🍋": 10,
 }
 
-@tree.command(name="slots", description="Pull the lever on the slot machine!")
-async def slots_command(interaction: discord.Interaction):
+@tree.command(name="slots", description="Pull the lever! Bet coins to spin the slot machine.")
+@discord.app_commands.describe(bet="How many coins to bet (default 100)")
+async def slots_command(interaction: discord.Interaction, bet: int = 100):
     silent = discord.AllowedMentions.none()
     user = interaction.user
+
+    if bet <= 0:
+        await interaction.response.send_message("Bet must be positive.", ephemeral=True)
+        return
+    if bet > economy.balance(user.id):
+        await interaction.response.send_message(
+            f"❌ You only have **{economy.balance(user.id):,}** coins.",
+            ephemeral=True,
+        )
+        return
+
+    # Take the bet upfront
+    economy.add(user.id, -bet, "slots bet")
     await interaction.response.defer()
 
     async def edit(content):
@@ -1916,18 +2122,40 @@ async def slots_command(interaction: discord.Interaction):
     await edit(render(final_reels, "🎰 SPINNING 🎰"))
     await asyncio.sleep(0.6)
 
-    # Result
+    # Result — payouts are multiplied by the bet
     if final_reels[0] == final_reels[1] == final_reels[2]:
+        # Jackpot: bet × 10 (or × 20 for diamond)
         symbol = final_reels[0]
-        winnings = SLOT_PAYOUT.get(symbol, 50) * 3
-        result = f"## 🎉 JACKPOT! 🎉\n\n{user.mention} hit **3x {symbol}** and won **${winnings:,}**!"
+        multiplier = 20 if symbol == "💎" else (10 if symbol == "7️⃣" else 7)
+        winnings = bet * multiplier
+        new_bal = economy.add(user.id, winnings, "slots jackpot")
+        economy.record_win(user.id)
+        result = (
+            f"## 🎉 JACKPOT! 🎉\n\n"
+            f"{user.mention} hit **3x {symbol}** ({multiplier}x payout)\n"
+            f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
+            f"Balance: **{new_bal:,}**"
+        )
     elif final_reels[0] == final_reels[1] or final_reels[1] == final_reels[2] or final_reels[0] == final_reels[2]:
-        # Find the pair
+        # Pair: bet × 1.5 (small profit)
         pair_symbol = max(set(final_reels), key=final_reels.count)
-        winnings = SLOT_PAYOUT.get(pair_symbol, 25)
-        result = f"## ✨ PAIR! ✨\n\n{user.mention} hit **2x {pair_symbol}** and won **${winnings}**."
+        winnings = int(bet * 1.5)
+        new_bal = economy.add(user.id, winnings, "slots pair")
+        economy.record_win(user.id)
+        result = (
+            f"## ✨ PAIR! ✨\n\n"
+            f"{user.mention} hit **2x {pair_symbol}** (1.5x payout)\n"
+            f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
+            f"Balance: **{new_bal:,}**"
+        )
     else:
-        result = f"## 💸 NO MATCH 💸\n\nBetter luck next time, {user.mention}."
+        economy.record_loss(user.id)
+        new_bal = economy.balance(user.id)
+        result = (
+            f"## 💸 NO MATCH 💸\n\n"
+            f"{user.mention} lost **{bet:,}** coins.\n"
+            f"Balance: **{new_bal:,}**"
+        )
 
     final_display = render(final_reels, "🎰 RESULT 🎰") + "\n\n" + result
     try:
@@ -1937,28 +2165,444 @@ async def slots_command(interaction: discord.Interaction):
 
 
 # ── ⚖️ /court ───────────────────────────────────────────────────────────────
+# ── 💰 Economy commands ──────────────────────────────────────────────────────
+COIN_EMOJI = "💰"
+
+
+@tree.command(name="balance", description="Check your or someone else's coin balance.")
+@discord.app_commands.describe(user="Whose balance to check (defaults to you)")
+async def balance_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    bal = economy.balance(target.id)
+    stats = economy.stats(target.id)
+    embed = discord.Embed(
+        title=f"{COIN_EMOJI} {target.display_name}'s Wallet",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="Balance", value=f"**{bal:,}** coins", inline=False)
+    embed.add_field(name="Wins", value=str(stats.get("games_won", 0)), inline=True)
+    embed.add_field(name="Losses", value=str(stats.get("games_lost", 0)), inline=True)
+    embed.add_field(name="Total Earned", value=f"{stats.get('total_earned',0):,}", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="daily", description="Claim your daily coin reward.")
+async def daily_command(interaction: discord.Interaction):
+    user = interaction.user
+    remaining = economy.get_cooldown_remaining(user.id, "daily")
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ Your daily resets in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    reward = random.randint(DAILY_MIN, DAILY_MAX)
+    economy.set_cooldown(user.id, "daily")
+
+    await edit("📦 *Opening your daily box...*")
+    await asyncio.sleep(1.0)
+    await edit("📦 *Unwrapping...*")
+    await asyncio.sleep(0.9)
+    await edit("✨ *...*")
+    await asyncio.sleep(0.7)
+    new_bal = economy.add(user.id, reward, "daily")
+    await edit(
+        f"🎁 **DAILY REWARD!**\n\n"
+        f"You found {COIN_EMOJI} **{reward:,}** coins!\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+@tree.command(name="weekly", description="Claim your weekly coin reward (bigger but rarer).")
+async def weekly_command(interaction: discord.Interaction):
+    user = interaction.user
+    remaining = economy.get_cooldown_remaining(user.id, "weekly")
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ Your weekly resets in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    reward = random.randint(WEEKLY_MIN, WEEKLY_MAX)
+    economy.set_cooldown(user.id, "weekly")
+
+    await edit("💼 *Opening the weekly safe...*")
+    await asyncio.sleep(1.0)
+    await edit("🔓 *...combination accepted...*")
+    await asyncio.sleep(1.0)
+    await edit("💸 *...counting...*")
+    await asyncio.sleep(1.0)
+    new_bal = economy.add(user.id, reward, "weekly")
+    await edit(
+        f"💎 **WEEKLY REWARD!**\n\n"
+        f"You scored {COIN_EMOJI} **{reward:,}** coins!\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+WORK_JOBS = [
+    ("📦", "Amazon warehouse"),
+    ("🍕", "Pizza delivery"),
+    ("🚗", "Uber driving"),
+    ("☕", "Barista"),
+    ("🛒", "DoorDashing"),
+    ("📱", "Selling sneakers on StockX"),
+    ("💻", "Freelance coding"),
+    ("🎰", "Pit boss at the casino"),
+    ("🛠️", "Handyman gig"),
+    ("📸", "Selling stock photos"),
+    ("🎤", "Open mic comedy"),
+    ("🎮", "Streaming on Twitch"),
+]
+
+
+@tree.command(name="work", description="Work a random job for some coins. 45 min cooldown.")
+async def work_command(interaction: discord.Interaction):
+    user = interaction.user
+    remaining = economy.get_cooldown_remaining(user.id, "work")
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"😴 You're tired. Rest for **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    emoji, job = random.choice(WORK_JOBS)
+    reward = random.randint(WORK_MIN, WORK_MAX)
+    economy.set_cooldown(user.id, "work")
+
+    await edit(f"{emoji} *Clocking in at {job}...*")
+    await asyncio.sleep(1.0)
+    await edit(f"{emoji} *Working hard at {job}...*")
+    await asyncio.sleep(1.2)
+    await edit(f"{emoji} *Almost done at {job}...*")
+    await asyncio.sleep(1.0)
+    new_bal = economy.add(user.id, reward, "work")
+    await edit(
+        f"{emoji} **JOB COMPLETE!**\n\n"
+        f"You worked at *{job}* and earned {COIN_EMOJI} **{reward:,}** coins.\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+@tree.command(name="beg", description="Beg for spare change. Sometimes you get nothing.")
+async def beg_command(interaction: discord.Interaction):
+    user = interaction.user
+    remaining = economy.get_cooldown_remaining(user.id, "beg")
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"🥺 People are tired of you. Try again in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    economy.set_cooldown(user.id, "beg")
+    # 25% nothing, 75% small reward
+    if random.random() < 0.25:
+        flavors = [
+            "A stranger spit on you. Disgusting.",
+            "Someone laughed at you and walked away.",
+            "Someone gave you a piece of gum. You ate it. No coins.",
+            "A pigeon stole your hat.",
+            "You got told to get a job. You got nothing.",
+        ]
+        await edit(f"🥺 *begging on the corner...*")
+        await asyncio.sleep(1.2)
+        await edit(f"😔 {random.choice(flavors)}\n\nYou got **0** coins.")
+        return
+
+    reward = random.randint(5, 80)
+    await edit(f"🥺 *begging on the corner...*")
+    await asyncio.sleep(1.0)
+    await edit(f"🤲 *someone is approaching...*")
+    await asyncio.sleep(1.0)
+    new_bal = economy.add(user.id, reward, "beg")
+    flavors = [
+        f"A kind stranger gave you {reward} coins.",
+        f"You found {reward} coins on the ground.",
+        f"A drunk guy threw {reward} coins at you.",
+        f"You did a sad face. Worth {reward} coins.",
+    ]
+    await edit(
+        f"🥺 **BEG SUCCESS**\n\n"
+        f"{random.choice(flavors)}\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+@tree.command(name="rob", description="Try to rob another user. 45% success rate. Risky.")
+@discord.app_commands.describe(target="Who to rob")
+async def rob_command(interaction: discord.Interaction, target: discord.Member):
+    user = interaction.user
+    if target.id == user.id:
+        await interaction.response.send_message("You can't rob yourself.", ephemeral=True)
+        return
+    if target.bot:
+        await interaction.response.send_message("You can't rob a bot.", ephemeral=True)
+        return
+
+    remaining = economy.get_cooldown_remaining(user.id, "rob")
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"🚨 You're laying low. Try again in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+
+    target_bal = economy.balance(target.id)
+    if target_bal < ROB_MIN_TARGET_BALANCE:
+        await interaction.response.send_message(
+            f"💸 {target.mention} is too broke to rob (under **{ROB_MIN_TARGET_BALANCE}** coins).",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    economy.set_cooldown(user.id, "rob")
+
+    await edit(f"🦝 {user.mention} is sneaking up on {target.mention}...")
+    await asyncio.sleep(1.5)
+    await edit(f"🦝 *picking the lock...*")
+    await asyncio.sleep(1.5)
+    await edit(f"🦝 *reaching into the wallet...*")
+    await asyncio.sleep(1.5)
+
+    if random.random() < ROB_SUCCESS_CHANCE:
+        # Success
+        pct = random.uniform(ROB_PERCENT_MIN, ROB_PERCENT_MAX)
+        amount = max(1, int(target_bal * pct))
+        economy.add(target.id, -amount, "robbed")
+        new_bal = economy.add(user.id, amount, "rob success")
+        await edit(
+            f"💰 **ROBBERY SUCCESSFUL!**\n\n"
+            f"{user.mention} stole **{amount:,}** coins from {target.mention}!\n"
+            f"{user.display_name}'s balance: **{new_bal:,}**"
+        )
+    else:
+        # Caught — pay a fine
+        fine = random.randint(ROB_FINE_MIN, ROB_FINE_MAX)
+        current = economy.balance(user.id)
+        actual_fine = min(fine, current)
+        economy.add(user.id, -actual_fine, "rob caught")
+        # Half goes to victim as compensation
+        comp = actual_fine // 2
+        if comp > 0:
+            economy.add(target.id, comp, "robbery comp")
+        new_bal = economy.balance(user.id)
+        await edit(
+            f"🚨 **YOU GOT CAUGHT!**\n\n"
+            f"{user.mention} got tackled trying to rob {target.mention}.\n"
+            f"Paid a fine of **{actual_fine:,}** coins. {target.display_name} got **{comp:,}** in compensation.\n"
+            f"{user.display_name}'s balance: **{new_bal:,}**"
+        )
+
+
+@tree.command(name="pay", description="Send coins to another user.")
+@discord.app_commands.describe(user="Who to pay", amount="How many coins")
+async def pay_command(interaction: discord.Interaction, user: discord.Member, amount: int):
+    sender = interaction.user
+    if user.id == sender.id:
+        await interaction.response.send_message("You can't pay yourself.", ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message("Bots don't accept payments.", ephemeral=True)
+        return
+    if amount <= 0:
+        await interaction.response.send_message("Amount must be positive.", ephemeral=True)
+        return
+
+    success = economy.transfer(sender.id, user.id, amount)
+    if not success:
+        bal = economy.balance(sender.id)
+        await interaction.response.send_message(
+            f"❌ Insufficient funds. You have **{bal:,}** coins.",
+            ephemeral=True,
+        )
+        return
+
+    sender_bal = economy.balance(sender.id)
+    await interaction.response.send_message(
+        f"💸 {sender.mention} sent {COIN_EMOJI} **{amount:,}** to {user.mention}.\n"
+        f"{sender.display_name}'s balance: **{sender_bal:,}**",
+        allowed_mentions=discord.AllowedMentions(users=[user]),
+    )
+
+
+@tree.command(name="leaderboard", description="See the richest users in the server.")
+async def leaderboard_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    top = economy.leaderboard(10)
+    if not top:
+        await interaction.edit_original_response(content="No one has any coins yet.")
+        return
+
+    lines = []
+    medals = ["🥇","🥈","🥉"]
+    for i, (uid, data) in enumerate(top):
+        try:
+            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+            name = member.display_name if member else f"User {uid}"
+        except Exception:
+            name = f"User {uid}"
+        prefix = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(f"{prefix} **{name}** — {COIN_EMOJI} {data.get('balance', 0):,}")
+
+    embed = discord.Embed(
+        title="🏆 Richest Users",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    await interaction.edit_original_response(embed=embed)
+
+
+@tree.command(name="bet", description="Bet coins on a coinflip. Double or nothing.")
+@discord.app_commands.describe(amount="How many coins to bet")
+async def bet_command(interaction: discord.Interaction, amount: int):
+    user = interaction.user
+    if amount <= 0:
+        await interaction.response.send_message("Amount must be positive.", ephemeral=True)
+        return
+    if amount > economy.balance(user.id):
+        await interaction.response.send_message(
+            f"❌ You only have **{economy.balance(user.id):,}** coins.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit(f"🪙 {user.mention} bets **{amount:,}** coins. Flipping...")
+    await asyncio.sleep(0.8)
+    await edit("🪙 *spinning...*")
+    await asyncio.sleep(1.0)
+    await edit("🪙 *spinning...*")
+    await asyncio.sleep(1.0)
+
+    if random.random() < 0.5:
+        new_bal = economy.add(user.id, amount, "bet win")
+        economy.record_win(user.id)
+        await edit(
+            f"## 🎉 YOU WON!\n"
+            f"{user.mention} doubled up — gained **{amount:,}** coins!\n"
+            f"Balance: **{new_bal:,}**"
+        )
+    else:
+        new_bal = economy.add(user.id, -amount, "bet loss")
+        economy.record_loss(user.id)
+        await edit(
+            f"## 💀 YOU LOST!\n"
+            f"{user.mention} lost **{amount:,}** coins.\n"
+            f"Balance: **{new_bal:,}**"
+        )
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
-    embed.add_field(name="🏎️ /rs", value="Animated race (tag up to 3 racers)", inline=False)
-    embed.add_field(name="🔥 /roast", value="AI-roast a user using their messages", inline=False)
-    embed.add_field(name="⚖️ /court", value="Put a user on trial. AI judges.", inline=False)
-    embed.add_field(name="📱 /bio", value="AI-generated Tinder bio for a user", inline=False)
-    embed.add_field(name="🔫 /duel", value="Pistol duel between 2 users", inline=True)
-    embed.add_field(name="🎯 /gun", value="Russian roulette (2-4 players)", inline=True)
-    embed.add_field(name="💰 /heist", value="Group bank heist (2-5 crew)", inline=True)
-    embed.add_field(name="💻 /hack", value="Hack a user's data", inline=True)
-    embed.add_field(name="🥊 /rps-tournament", value="4-player RPS bracket", inline=True)
-    embed.add_field(name="🎰 /slots", value="Pull the lever", inline=True)
-    embed.add_field(name="🎲 /roll", value="Roll a dice", inline=True)
-    embed.add_field(name="🪙 /flip", value="Flip a coin", inline=True)
-    embed.add_field(name="🎱 /8ball", value="Magic 8-ball", inline=True)
-    embed.add_field(name="✂️ /rps", value="RPS vs the bot", inline=True)
-    embed.add_field(name="⭐ /rate", value="Rate something /10", inline=True)
-    embed.add_field(name="💞 /ship", value="Ship two users", inline=True)
-    embed.add_field(name="💬 Chat",
-        value="Mention me, reply, or say my name to chat\n`!recap` for a daily recap\n`!clearhistory` to wipe channel memory\n`!botinfo` for info",
-        inline=False)
+    embed.add_field(
+        name="💰 ECONOMY",
+        value=(
+            "`/balance` Check coins\n"
+            "`/daily` Daily reward\n"
+            "`/weekly` Weekly reward\n"
+            "`/work` Earn from a job\n"
+            "`/beg` Beg for change\n"
+            "`/rob` Try to rob someone\n"
+            "`/pay` Send coins\n"
+            "`/bet` Coinflip wager\n"
+            "`/leaderboard` Richest users"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🎲 GAMES (earn coins)",
+        value=(
+            "`/rs` Race (tag racers)\n"
+            "`/duel` Pistol duel\n"
+            "`/gun` Russian roulette\n"
+            "`/heist` Bank heist crew\n"
+            "`/slots` Slot machine (bet)\n"
+            "`/rps-tournament` 4-player RPS"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="🤖 AI",
+        value=(
+            "`/roast` Personalized roast\n"
+            "`/court` AI courtroom trial\n"
+            "`/bio` AI Tinder bio"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="🎉 FUN",
+        value=(
+            "`/hack` Hack a user\n"
+            "`/ship` Ship two users\n"
+            "`/rate` Rate something /10\n"
+            "`/8ball` Magic 8-ball\n"
+            "`/rps` RPS vs bot\n"
+            "`/roll` Roll dice\n"
+            "`/flip` Coin flip"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="💬 CHAT",
+        value="Mention me, reply, or say my name\n`!recap` `!clearhistory` `!botinfo`",
+        inline=False
+    )
     await interaction.response.send_message(embed=embed)
 
 
