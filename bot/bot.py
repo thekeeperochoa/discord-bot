@@ -826,7 +826,284 @@ async def race_command(
         active_races.discard(channel_id)
 
 
-@tree.command(name="roast", description="Generate a brutal personalized roast based on a user's recent messages.")
+# ── Helper: gather user's recent messages from Discord + daily logs ──────────
+async def gather_user_messages(interaction: discord.Interaction, user: discord.Member, max_count: int = 50) -> list[str]:
+    """Pull a user's recent messages from current channel history + daily logs."""
+    user_messages: list[str] = []
+    try:
+        async for m in interaction.channel.history(limit=1000):
+            if m.author.id == user.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= max_count:
+                    break
+    except Exception as e:
+        log.warning("Channel history fetch failed: %s", e)
+
+    today = datetime.now(timezone.utc)
+    target_name = user.display_name
+    seen = set(user_messages)
+    for days_back in range(7):
+        date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("author") == target_name:
+                                content = entry.get("content", "").strip()
+                                if content and content not in seen:
+                                    seen.add(content)
+                                    user_messages.append(content)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+    return user_messages[:80]
+
+
+# ── ⚖️ /court ────────────────────────────────────────────────────────────────
+@tree.command(name="court", description="Put a user on trial for a crime. AI judges the case.")
+@discord.app_commands.describe(defendant="Who's on trial?", charge="What are they charged with?")
+async def court_command(interaction: discord.Interaction, defendant: discord.Member, charge: str):
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+    prosecutor = interaction.user
+
+    if defendant.id == prosecutor.id:
+        await interaction.response.send_message("You can't put yourself on trial.", ephemeral=True)
+        return
+    if defendant.bot:
+        await interaction.response.send_message("Can't put a bot on trial.", ephemeral=True)
+        return
+    if str(defendant.id) in cfg.get("respected_users", []):
+        await interaction.response.send_message(
+            f"❌ {defendant.mention} is the boss. They're above the law.",
+            allowed_mentions=silent,
+        )
+        return
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animated courtroom intro
+    await edit("⚖️ **ALL RISE**\n\n*The court is now in session...*")
+    await asyncio.sleep(2.0)
+    await edit(
+        f"⚖️ **CASE FILE OPENED**\n\n"
+        f"**Prosecution:** {prosecutor.mention}\n"
+        f"**Defendant:** {defendant.mention}\n"
+        f"**Charge:** *{charge}*"
+    )
+    await asyncio.sleep(2.5)
+
+    # Gather defendant's messages as evidence
+    evidence = await gather_user_messages(interaction, defendant, max_count=40)
+    evidence_text = "\n".join(f"- {m}" for m in evidence) if evidence else "(no message history available)"
+
+    await edit(
+        f"⚖️ **CASE: *{charge}***\n\n"
+        f"📜 Court reviewing evidence... ({len(evidence)} messages from {defendant.mention})"
+    )
+    await asyncio.sleep(2.0)
+
+    # Prosecutor opening statement
+    await edit(
+        f"⚖️ **PROSECUTION OPENING STATEMENT**\n\n"
+        f"👨‍⚖️ *{prosecutor.display_name} approaches the bench...*"
+    )
+    await asyncio.sleep(1.8)
+
+    prosecutor_system = (
+        cfg["system_prompt"] +
+        "\n\n=== COURTROOM PROSECUTOR MODE ===\n"
+        f"You are the PROSECUTOR. {defendant.display_name} is on trial for: '{charge}'. "
+        "Deliver a brief, dramatic 2-3 sentence opening statement against the defendant. "
+        "Reference SPECIFIC quotes or patterns from their actual messages below as evidence when possible. "
+        "Be theatrical, witty, and devastating. Stay in character. No preamble — just the statement."
+    )
+    prosecution = await ask_ai(
+        prosecutor_system,
+        [{"role": "user", "content": f"Defendant's recent messages:\n\n{evidence_text}\n\nDeliver your prosecution statement."}],
+        {**cfg, "max_tokens": 250},
+    )
+    if prosecution.startswith("⚠️"):
+        prosecution = "Your honor, the evidence speaks for itself."
+
+    await edit(
+        f"⚖️ **PROSECUTION** ({prosecutor.mention})\n\n"
+        f"> {prosecution}"
+    )
+    await asyncio.sleep(4.0)
+
+    # Defense statement
+    await edit(
+        f"⚖️ **DEFENSE OPENING STATEMENT**\n\n"
+        f"🛡️ *{defendant.display_name}'s counsel rises...*"
+    )
+    await asyncio.sleep(1.8)
+
+    defense_system = (
+        cfg["system_prompt"] +
+        "\n\n=== COURTROOM DEFENSE MODE ===\n"
+        f"You are the DEFENSE ATTORNEY for {defendant.display_name} who is charged with: '{charge}'. "
+        "Deliver a brief, dramatic 2-3 sentence defense. "
+        "Be desperate, dramatic, and reach for any excuse. Use their actual messages as context. "
+        "Stay in character. No preamble — just the defense argument."
+    )
+    defense = await ask_ai(
+        defense_system,
+        [{"role": "user", "content": f"Defendant's recent messages:\n\n{evidence_text}\n\nDeliver your defense statement."}],
+        {**cfg, "max_tokens": 250},
+    )
+    if defense.startswith("⚠️"):
+        defense = "Your honor, my client is innocent. Probably."
+
+    await edit(
+        f"⚖️ **DEFENSE** ({defendant.mention})\n\n"
+        f"> {defense}"
+    )
+    await asyncio.sleep(4.0)
+
+    # Judge deliberates
+    await edit("⚖️ *The judge deliberates...*")
+    await asyncio.sleep(2.5)
+    await edit("⚖️ *The judge consults precedent...*")
+    await asyncio.sleep(2.0)
+    await edit("⚖️ 🔨 *gavel raised...*")
+    await asyncio.sleep(1.5)
+
+    # Verdict
+    judge_system = (
+        cfg["system_prompt"] +
+        "\n\n=== JUDGE MODE ===\n"
+        f"You are the JUDGE in a Discord courtroom comedy. The defendant {defendant.display_name} is charged with: '{charge}'. "
+        "You just heard both prosecution and defense. Deliver a verdict — GUILTY or NOT GUILTY — followed by a "
+        "sentence (the punishment) which can be hilarious or serious. Total 2-4 sentences. "
+        "Format as:\n"
+        "**VERDICT:** GUILTY/NOT GUILTY\n**SENTENCE:** [your punishment]\n\nThen one final sentence of judgement."
+    )
+    verdict_prompt = (
+        f"Charge: {charge}\n\n"
+        f"Prosecution said: {prosecution}\n\n"
+        f"Defense said: {defense}\n\n"
+        f"Defendant's messages for context:\n{evidence_text[:1500]}\n\n"
+        "Deliver your verdict."
+    )
+    verdict = await ask_ai(
+        judge_system,
+        [{"role": "user", "content": verdict_prompt}],
+        {**cfg, "max_tokens": 300},
+    )
+    if verdict.startswith("⚠️"):
+        verdict = "**VERDICT:** GUILTY\n**SENTENCE:** Read the room. Court adjourned."
+
+    final = (
+        f"⚖️ **🔨 GAVEL DROPS** 🔨\n\n"
+        f"## Case: *{charge}*\n"
+        f"**Defendant:** {defendant.mention}\n\n"
+        f"{verdict}"
+    )
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+# ── 📱 /bio — AI Tinder bio ─────────────────────────────────────────────────
+@tree.command(name="bio", description="Generate a savage Tinder bio for a user based on their messages.")
+@discord.app_commands.describe(user="Who's getting a bio?")
+async def bio_command(interaction: discord.Interaction, user: discord.Member):
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+
+    if user.bot:
+        await interaction.response.send_message("Bots don't date.", ephemeral=True)
+        return
+
+    is_boss = str(user.id) in cfg.get("respected_users", [])
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animated "loading profile"
+    await edit(f"📱 *opening Tinder...*")
+    await asyncio.sleep(0.9)
+    await edit(f"📱 *creating profile for {user.mention}...*")
+    await asyncio.sleep(1.0)
+    await edit(f"📱 *uploading photos...* 📸")
+    await asyncio.sleep(1.0)
+
+    # Gather their messages
+    user_messages = await gather_user_messages(interaction, user, max_count=50)
+
+    await edit(f"📱 *analyzing personality...* 🧠 ({len(user_messages)} messages found)")
+    await asyncio.sleep(1.2)
+    await edit(f"📱 *generating bio...* ✍️")
+    await asyncio.sleep(1.0)
+
+    transcript = "\n".join(f"- {m}" for m in user_messages) if user_messages else "(this user is a lurker)"
+
+    if is_boss:
+        # Generous bio for boss
+        bio_system = (
+            cfg["system_prompt"] +
+            "\n\n=== TINDER BIO MODE — RESPECT MODE ===\n"
+            f"Write a flattering, charismatic Tinder bio for {user.display_name} based on their messages. "
+            "Keep it confident, alpha, charming. Format with emojis and bullet points. "
+            "Include: a one-line tagline, 3-4 short bullet points about them, and a closing line. "
+            "Total 100 words max. Stay in character but be respectful."
+        )
+    else:
+        bio_system = (
+            cfg["system_prompt"] +
+            "\n\n=== TINDER BIO MODE ===\n"
+            f"Write a savage, brutally accurate Tinder bio for {user.display_name} based on their actual messages. "
+            "Reference real patterns from their chat history. Be funny and ruthless but not actually mean. "
+            "Format like a real bio: tagline, bullet points, closing line. Use emojis. "
+            "Include height (something stupid like '5'7\" but lies on apps'), occupation (something absurd based on their vibe), and red flags. "
+            "Total 100 words max. Stay in character."
+        )
+
+    bio = await ask_ai(
+        bio_system,
+        [{"role": "user", "content": f"Recent messages from {user.display_name}:\n\n{transcript}\n\nWrite their Tinder bio."}],
+        {**cfg, "max_tokens": 350},
+    )
+    if bio.startswith("⚠️"):
+        bio = "Bio could not be loaded. Even the AI gave up."
+
+    age = random.randint(19, 42)
+    distance = random.randint(1, 25)
+
+    final = (
+        f"📱 **TINDER PROFILE GENERATED** 📱\n\n"
+        f"╭─────────────────────╮\n"
+        f"┃ **{user.display_name}**, {age}\n"
+        f"┃ 📍 {distance} miles away\n"
+        f"╰─────────────────────╯\n\n"
+        f"{bio}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💚 Like     ✖️ Nope     ⭐ Super Like\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
+
 @discord.app_commands.describe(user="Who to roast")
 async def roast_command(interaction: discord.Interaction, user: discord.Member):
     cfg = load_config()
@@ -1116,6 +1393,42 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
         f"### **{score}%** — _{verdict}_"
     )
     await msg.edit(content=final)
+
+
+# ── Helper: gather a user's recent messages from channel + logs ──────────────
+async def gather_user_messages(interaction: discord.Interaction, user: discord.Member, limit: int = 80) -> list[str]:
+    user_messages: list[str] = []
+    try:
+        async for m in interaction.channel.history(limit=1000):
+            if m.author.id == user.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= 50:
+                    break
+    except Exception as e:
+        log.warning("Channel history fetch failed: %s", e)
+
+    today = datetime.now(timezone.utc)
+    target_name = user.display_name
+    seen = set(user_messages)
+    for days_back in range(7):
+        date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("author") == target_name:
+                                content = entry.get("content", "").strip()
+                                if content and content not in seen:
+                                    seen.add(content)
+                                    user_messages.append(content)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+    return user_messages[:limit]
 
 
 # ── 🔫 /duel ─────────────────────────────────────────────────────────────────
@@ -1623,11 +1936,260 @@ async def slots_command(interaction: discord.Interaction):
         pass
 
 
+# ── ⚖️ /court ───────────────────────────────────────────────────────────────
+@tree.command(name="court", description="Put a user on trial. AI is judge, prosecutor, and defense.")
+@discord.app_commands.describe(
+    defendant="Who is on trial?",
+    charge="What are they being charged with?",
+)
+async def court_command(
+    interaction: discord.Interaction,
+    defendant: discord.Member,
+    charge: str,
+):
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+    await interaction.response.defer()
+
+    async def edit(content: str):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Gather defendant's recent messages so the AI can use them as evidence
+    msgs = await gather_user_messages(interaction, defendant, limit=40)
+    evidence = "\n".join(f"- {m}" for m in msgs[:30]) if msgs else "(no chat evidence available)"
+
+    # Animate the courtroom intro
+    await edit("⚖️ **THE COURT IS NOW IN SESSION**\n\n*ALL RISE.*")
+    await asyncio.sleep(1.5)
+    await edit(
+        f"⚖️ **THE COURT IS NOW IN SESSION**\n\n"
+        f"📜 Case: **{defendant.display_name}** v. The Server\n"
+        f"📜 Charge: _{charge}_\n\n"
+        f"*Bailiff brings in the defendant...*"
+    )
+    await asyncio.sleep(2.0)
+
+    # ── PROSECUTION ──
+    await edit(
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ The prosecution rises..."
+    )
+    await asyncio.sleep(1.4)
+
+    pros_system = (
+        cfg["system_prompt"] +
+        "\n\n=== COURTROOM PROSECUTOR MODE ===\n"
+        f"You are the AGGRESSIVE PROSECUTOR. The defendant is {defendant.display_name}. "
+        f"They have been charged with: {charge}. "
+        "Deliver a brutal, witty 2-3 sentence opening statement. "
+        "Cite specific things they've said as 'evidence' if relevant. "
+        "No greetings, no preamble — start mid-rant like a TV courtroom drama. "
+        "Stay in character but lean prosecutorial."
+    )
+    pros_user = f"Their chat history (your evidence):\n{evidence}\n\nDeliver your opening statement against them."
+    prosecution = await ask_ai(
+        pros_system,
+        [{"role": "user", "content": pros_user}],
+        {**cfg, "max_tokens": 200, "temperature": min(cfg["temperature"] + 0.05, 1.0)},
+    )
+    if prosecution.startswith("⚠️"):
+        prosecution = "Your honor, the evidence is overwhelming."
+
+    await edit(
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}"
+    )
+    await asyncio.sleep(3.0)
+
+    # ── DEFENSE ──
+    await edit(
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}\n\n"
+        f"🧑‍💼 The defense rises..."
+    )
+    await asyncio.sleep(1.4)
+
+    def_system = (
+        cfg["system_prompt"] +
+        "\n\n=== DEFENSE ATTORNEY MODE ===\n"
+        f"You are the SMOOTH DEFENSE ATTORNEY for {defendant.display_name}. "
+        f"They are accused of: {charge}. "
+        "The prosecution just attacked them. Deliver a slick, charismatic 2-3 sentence rebuttal. "
+        "Reframe their behavior, deflect, plant doubt. Be theatrical. "
+        "No greetings — just launch in. Stay in character."
+    )
+    def_user = f"Prosecution said: \"{prosecution}\"\n\nTheir chat history:\n{evidence}\n\nDeliver your rebuttal."
+    defense = await ask_ai(
+        def_system,
+        [{"role": "user", "content": def_user}],
+        {**cfg, "max_tokens": 200, "temperature": min(cfg["temperature"] + 0.05, 1.0)},
+    )
+    if defense.startswith("⚠️"):
+        defense = "Your honor, my client is being framed."
+
+    await edit(
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}\n\n"
+        f"🧑‍💼 **DEFENSE:**\n> {defense}"
+    )
+    await asyncio.sleep(3.5)
+
+    # ── DELIBERATION ──
+    await edit(
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}\n\n"
+        f"🧑‍💼 **DEFENSE:**\n> {defense}\n\n"
+        f"⏳ *The judge deliberates...*"
+    )
+    await asyncio.sleep(2.5)
+
+    # ── VERDICT ──
+    # 65% guilty by default — trial is tilted for comedy
+    is_guilty = random.random() < 0.65
+    judge_system = (
+        cfg["system_prompt"] +
+        "\n\n=== JUDGE MODE ===\n"
+        f"You are the JUDGE. The defendant is {defendant.display_name}, charged with: {charge}. "
+        f"You have decided they are {'GUILTY' if is_guilty else 'NOT GUILTY'}. "
+        "Deliver a dramatic 2-sentence verdict explaining your reasoning. "
+        f"End with the sentence handed down (if guilty) or a final cutting remark (if not guilty). "
+        "Be theatrical, in character. No preamble."
+    )
+    judge_user = (
+        f"Prosecution said: \"{prosecution}\"\n"
+        f"Defense said: \"{defense}\"\n\n"
+        f"Deliver your verdict ({'guilty' if is_guilty else 'not guilty'})."
+    )
+    verdict = await ask_ai(
+        judge_system,
+        [{"role": "user", "content": judge_user}],
+        {**cfg, "max_tokens": 220, "temperature": min(cfg["temperature"] + 0.05, 1.0)},
+    )
+    if verdict.startswith("⚠️"):
+        verdict = "Order in the court. Verdict deferred."
+
+    verdict_label = "🔨 **GUILTY**" if is_guilty else "✨ **NOT GUILTY**"
+    final = (
+        f"⚖️ **THE COURT v. {defendant.mention}**\n"
+        f"Charge: _{charge}_\n\n"
+        f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}\n\n"
+        f"🧑‍💼 **DEFENSE:**\n> {defense}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"## {verdict_label}\n\n"
+        f"🧑‍⚖️ **JUDGE:**\n> {verdict}"
+    )
+    if len(final) > 1990:
+        # Send verdict separately to avoid truncation
+        await edit(
+            f"⚖️ **THE COURT v. {defendant.mention}**\n"
+            f"Charge: _{charge}_\n\n"
+            f"🧑‍⚖️ **PROSECUTION:**\n> {prosecution}\n\n"
+            f"🧑‍💼 **DEFENSE:**\n> {defense}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"## {verdict_label}"
+        )
+        try:
+            await interaction.followup.send(f"🧑‍⚖️ **JUDGE:**\n> {verdict}")
+        except Exception:
+            pass
+    else:
+        try:
+            await interaction.edit_original_response(content=final)
+        except Exception:
+            pass
+
+
+# ── 📱 /bio ──────────────────────────────────────────────────────────────────
+@tree.command(name="bio", description="Generate a brutal Tinder bio for a user based on their messages.")
+@discord.app_commands.describe(user="Who needs a bio?")
+async def bio_command(interaction: discord.Interaction, user: discord.Member):
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+    await interaction.response.defer()
+
+    if str(user.id) in cfg.get("respected_users", []):
+        await interaction.edit_original_response(
+            content=f"❌ I'm not writing a bio for the boss.",
+            allowed_mentions=silent,
+        )
+        return
+
+    async def edit(content: str):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animate while gathering ammo
+    await edit(f"📱 *Opening Tinder app...*")
+    await asyncio.sleep(0.7)
+    await edit(f"📱 *Logging in as {user.mention}...*")
+    await asyncio.sleep(0.9)
+    await edit(f"📱 *Scanning their personality...*")
+
+    msgs = await gather_user_messages(interaction, user, limit=60)
+
+    await asyncio.sleep(0.8)
+    await edit(f"📱 *Found {len(msgs)} clues...*")
+    await asyncio.sleep(0.8)
+    await edit(f"📱 *Writing the most accurate bio possible...*")
+
+    transcript = "\n".join(f"- {m}" for m in msgs) if msgs else "(no chat history)"
+    bio_system = (
+        cfg["system_prompt"] +
+        "\n\n=== TINDER BIO MODE ===\n"
+        f"You are writing a brutally accurate Tinder bio for {user.display_name}. "
+        "Use ONLY information you can infer from their chat history below. "
+        "Format the bio EXACTLY like a real Tinder profile — short punchy lines. "
+        "Include: age (guess one), location/vibe, one absurd flex, two red flags they'd actually post, "
+        "an interest, and a closing line. Make it cringe but specific. "
+        "Stay in your character's voice but write the bio AS THE USER. "
+        "Output ONLY the bio text — no preamble, no commentary."
+    )
+    bio_user = f"Their chat history:\n{transcript}\n\nWrite their Tinder bio."
+
+    bio = await ask_ai(
+        bio_system,
+        [{"role": "user", "content": bio_user}],
+        {**cfg, "max_tokens": 280, "temperature": min(cfg["temperature"] + 0.1, 1.0)},
+    )
+    if bio.startswith("⚠️"):
+        await edit(bio)
+        return
+
+    # Render as a card
+    final = (
+        f"📱 **TINDER PROFILE GENERATED** 📱\n\n"
+        f"╔═══════════════════════╗\n"
+        f"   🔥 **{user.display_name}** 🔥\n"
+        f"╚═══════════════════════╝\n\n"
+        f"{bio}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Bio for {user.mention} • {len(msgs)} messages analyzed_"
+    )
+    if len(final) > 1990:
+        final = final[:1990]
+    try:
+        await interaction.edit_original_response(content=final, allowed_mentions=silent)
+    except Exception:
+        pass
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
     embed.add_field(name="🏎️ /rs", value="Animated race (tag up to 3 racers)", inline=False)
     embed.add_field(name="🔥 /roast", value="AI-roast a user using their messages", inline=False)
+    embed.add_field(name="⚖️ /court", value="Put a user on trial. AI judges.", inline=False)
+    embed.add_field(name="📱 /bio", value="AI-generated Tinder bio for a user", inline=False)
     embed.add_field(name="🔫 /duel", value="Pistol duel between 2 users", inline=True)
     embed.add_field(name="🎯 /gun", value="Russian roulette (2-4 players)", inline=True)
     embed.add_field(name="💰 /heist", value="Group bank heist (2-5 crew)", inline=True)
