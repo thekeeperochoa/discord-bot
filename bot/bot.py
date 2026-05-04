@@ -1274,6 +1274,7 @@ async def bio_command(interaction: discord.Interaction, user: discord.Member):
 
 
 
+@tree.command(name="roast", description="Generate a brutal personalized roast based on a user's recent messages.")
 @discord.app_commands.describe(user="Who to roast")
 async def roast_command(interaction: discord.Interaction, user: discord.Member):
     cfg = load_config()
@@ -1404,6 +1405,7 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
 
 
 
+@tree.command(name="roll", description="Roll a dice (1-100 by default).")
 @discord.app_commands.describe(sides="Number of sides on the dice (default 100)")
 async def roll_command(interaction: discord.Interaction, sides: int = 100):
     if sides < 2 or sides > 1_000_000:
