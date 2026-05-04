@@ -3129,6 +3129,105 @@ async def casino_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# ── 🔍 /analyze ──────────────────────────────────────────────────────────────
+@tree.command(name="analyze", description="Scan and analyze your last 50 messages.")
+async def analyze_command(interaction: discord.Interaction):
+    cfg = load_config()
+    user = interaction.user
+    silent = discord.AllowedMentions.none()
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animated scanning sequence
+    await edit(f"🔍 *scanning {user.mention}'s message history...*")
+    await asyncio.sleep(0.9)
+
+    # Pull their last 50 messages from the current channel
+    user_messages: list[str] = []
+    try:
+        async for m in interaction.channel.history(limit=2000):
+            if m.author.id == user.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= 50:
+                    break
+    except Exception as e:
+        log.warning("Channel history fetch failed: %s", e)
+
+    if not user_messages:
+        await edit(f"🔍 No messages found for {user.mention} in this channel.")
+        return
+
+    await edit(f"🔍 *found {len(user_messages)} messages...*")
+    await asyncio.sleep(0.9)
+    await edit("🧠 *analyzing tone, patterns, vocabulary...*")
+    await asyncio.sleep(0.9)
+    await edit("📊 *cross-referencing personality markers...*")
+    await asyncio.sleep(0.9)
+    await edit("✍️ *writing report...*")
+    await asyncio.sleep(0.6)
+
+    # Quick stats we can compute locally
+    total_chars = sum(len(m) for m in user_messages)
+    avg_len = total_chars // len(user_messages)
+    word_count = sum(len(m.split()) for m in user_messages)
+    questions = sum(1 for m in user_messages if "?" in m)
+    exclamations = sum(1 for m in user_messages if "!" in m)
+    laughs = sum(1 for m in user_messages if any(l in m.lower() for l in ["lol", "lmao", "lmfao", "😂", "💀", "haha"]))
+    caps_msgs = sum(1 for m in user_messages if len(m) > 3 and m.isupper())
+
+    transcript = "\n".join(f"- {m}" for m in user_messages)
+
+    analysis_system = (
+        cfg["system_prompt"] +
+        "\n\n=== MESSAGE ANALYZER MODE ===\n"
+        f"You are analyzing {user.display_name}'s last {len(user_messages)} messages from this channel. "
+        "Provide a brutally honest but funny analysis. Format as 4-5 short bullet points covering: "
+        "their vibe / personality, common topics they bring up, recurring phrases or quirks, "
+        "their texting style, and one final 'verdict' line. "
+        "Reference specific things they actually said when relevant. Stay completely in character. "
+        "Each bullet is 1 sentence max. No preamble. Just the bullets."
+    )
+
+    try:
+        analysis = await ask_ai(
+            analysis_system,
+            [{"role": "user", "content": f"Messages from {user.display_name}:\n\n{transcript}"}],
+            {**cfg, "max_tokens": 400},
+        )
+    except Exception:
+        analysis = ""
+    if analysis.startswith("⚠️") or not analysis.strip():
+        analysis = "Analysis failed. The AI looked at your messages and just left."
+
+    # Build the final report card
+    report = (
+        f"# 🔍 Analysis: {user.mention}\n"
+        f"_Based on last **{len(user_messages)}** messages_\n\n"
+        f"{analysis}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**📊 Stats**\n"
+        f"• Total words: **{word_count:,}**\n"
+        f"• Avg message length: **{avg_len}** chars\n"
+        f"• Questions asked: **{questions}**\n"
+        f"• Exclamations: **{exclamations}**\n"
+        f"• Laughing reactions: **{laughs}**\n"
+        f"• ALL CAPS rants: **{caps_msgs}**"
+    )
+
+    if len(report) <= 2000:
+        await edit(report)
+    else:
+        await edit(report[:1990])
+        for i in range(1990, len(report), 1990):
+            await interaction.followup.send(report[i:i+1990])
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -3168,7 +3267,8 @@ async def commands_command(interaction: discord.Interaction):
         value=(
             "`/roast` Personalized roast\n"
             "`/court` AI courtroom trial\n"
-            "`/bio` AI Tinder bio"
+            "`/bio` AI Tinder bio\n"
+            "`/analyze` Analyze your messages"
         ),
         inline=True
     )
