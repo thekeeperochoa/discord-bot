@@ -2394,6 +2394,15 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
         )
         return
 
+    # Check if target is protected
+    if is_protected(target.id):
+        await interaction.response.send_message(
+            f"🛡️ {target.mention} has rob immunity. You can't touch them.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
     await interaction.response.defer()
     silent = discord.AllowedMentions.none()
 
@@ -3228,6 +3237,476 @@ async def analyze_command(interaction: discord.Interaction):
             await interaction.followup.send(report[i:i+1990])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛒 REDEMPTION COMMANDS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 🎨 /buyrole ──────────────────────────────────────────────────────────────
+ROLE_PRICES = {
+    "24h":       2000,
+    "perm":     15000,
+}
+ROLE_COLORS = {
+    "red":     (0xED4245, "🟥 Red"),
+    "orange":  (0xE67E22, "🟧 Orange"),
+    "yellow":  (0xF1C40F, "🟨 Yellow"),
+    "green":   (0x2ECC71, "🟩 Green"),
+    "blue":    (0x3498DB, "🟦 Blue"),
+    "purple":  (0x9B59B6, "🟪 Purple"),
+    "pink":    (0xEB459E, "💗 Pink"),
+    "cyan":    (0x1ABC9C, "🩵 Cyan"),
+    "gold":    (0xF1C40F, "🟨 Gold"),
+    "white":   (0xFFFFFF, "⬜ White"),
+}
+
+# Track temporary roles for cleanup
+TEMP_ROLES_FILE = MEMORY_DIR / "temp_roles.json"
+
+def _load_temp_roles() -> list:
+    if TEMP_ROLES_FILE.exists():
+        try:
+            with open(TEMP_ROLES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _save_temp_roles(data: list):
+    with open(TEMP_ROLES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+@tree.command(name="buyrole", description="Buy a colored Discord role.")
+@discord.app_commands.describe(
+    color="Pick a color",
+    duration="How long? 24h or permanent",
+    custom_name="Optional custom role name (max 30 chars)",
+)
+@discord.app_commands.choices(
+    color=[discord.app_commands.Choice(name=label, value=key) for key, (_, label) in ROLE_COLORS.items()],
+    duration=[
+        discord.app_commands.Choice(name=f"24 hours ({ROLE_PRICES['24h']:,} coins)", value="24h"),
+        discord.app_commands.Choice(name=f"Permanent ({ROLE_PRICES['perm']:,} coins)", value="perm"),
+    ],
+)
+async def buyrole_command(
+    interaction: discord.Interaction,
+    color: discord.app_commands.Choice[str],
+    duration: discord.app_commands.Choice[str],
+    custom_name: str = None,
+):
+    user = interaction.user
+    if not interaction.guild:
+        await interaction.response.send_message("Server only.", ephemeral=True)
+        return
+
+    price = ROLE_PRICES[duration.value]
+    bal = economy.balance(user.id)
+    if bal < price:
+        await interaction.response.send_message(
+            f"❌ You need **{price:,}** coins. You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    # Check bot permissions
+    bot_member = interaction.guild.me
+    if not bot_member.guild_permissions.manage_roles:
+        await interaction.response.send_message(
+            "❌ I need the **Manage Roles** permission. Ask an admin.",
+            ephemeral=True,
+        )
+        return
+
+    color_int, color_label = ROLE_COLORS[color.value]
+    role_name = (custom_name[:30] if custom_name else f"💎 {user.display_name}").strip()
+    if not role_name:
+        role_name = f"💎 {user.display_name}"
+
+    await interaction.response.defer(ephemeral=False)
+
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit(f"🎨 *Crafting your role...*")
+    await asyncio.sleep(1.0)
+
+    try:
+        role = await interaction.guild.create_role(
+            name=role_name,
+            colour=discord.Colour(color_int),
+            reason=f"Purchased by {user.display_name}",
+            mentionable=False,
+        )
+        # Move it just below the bot's top role so it's visible
+        try:
+            top_bot_role = bot_member.top_role
+            await role.edit(position=max(top_bot_role.position - 1, 1))
+        except Exception:
+            pass
+        await user.add_roles(role, reason="buyrole purchase")
+    except discord.Forbidden:
+        await edit("❌ I can't manage roles. Move my role higher than the roles I should manage.")
+        return
+    except Exception as e:
+        log.exception("buyrole failed")
+        await edit(f"❌ Failed to create role: {e}")
+        return
+
+    # Charge the user
+    economy.add(user.id, -price, "buyrole")
+    new_bal = economy.balance(user.id)
+
+    # If 24h, schedule cleanup
+    if duration.value == "24h":
+        temp = _load_temp_roles()
+        temp.append({
+            "role_id": role.id,
+            "guild_id": interaction.guild.id,
+            "user_id": user.id,
+            "expires_at": time.time() + 24 * 3600,
+        })
+        _save_temp_roles(temp)
+        duration_label = "24 hours"
+    else:
+        duration_label = "permanently"
+
+    final = (
+        f"🎨 **ROLE PURCHASED!**\n\n"
+        f"{user.mention} bought {color_label} role **{role_name}** for **{price:,}** coins!\n"
+        f"Lasts **{duration_label}**.\n\n"
+        f"Balance: **{new_bal:,}**"
+    )
+    await edit(final)
+
+
+# Background task to expire 24h roles
+async def expire_temp_roles():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(600)  # check every 10 min
+        try:
+            temp = _load_temp_roles()
+            now = time.time()
+            still_active = []
+            for entry in temp:
+                if entry["expires_at"] <= now:
+                    # Remove the role
+                    try:
+                        guild = client.get_guild(entry["guild_id"])
+                        if guild:
+                            role = guild.get_role(entry["role_id"])
+                            if role:
+                                await role.delete(reason="24h temp role expired")
+                    except Exception as e:
+                        log.warning("Temp role cleanup failed: %s", e)
+                else:
+                    still_active.append(entry)
+            if len(still_active) != len(temp):
+                _save_temp_roles(still_active)
+        except Exception as e:
+            log.warning("expire_temp_roles loop error: %s", e)
+
+
+# ── 🛡️ /protect ──────────────────────────────────────────────────────────────
+PROTECT_FILE = MEMORY_DIR / "protect.json"
+PROTECT_PRICE = 1500
+PROTECT_DURATION = 12 * 3600  # 12 hours
+
+
+def _load_protections() -> dict:
+    if PROTECT_FILE.exists():
+        try:
+            with open(PROTECT_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_protections(data: dict):
+    with open(PROTECT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def is_protected(user_id: int) -> bool:
+    data = _load_protections()
+    expiry = data.get(str(user_id), 0)
+    return time.time() < expiry
+
+
+@tree.command(name="protect", description="Buy 12-hour rob immunity.")
+async def protect_command(interaction: discord.Interaction):
+    user = interaction.user
+    bal = economy.balance(user.id)
+
+    # Check existing protection
+    data = _load_protections()
+    existing_expiry = data.get(str(user.id), 0)
+    if time.time() < existing_expiry:
+        remaining = int(existing_expiry - time.time())
+        await interaction.response.send_message(
+            f"🛡️ You're already protected for another **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+
+    if bal < PROTECT_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{PROTECT_PRICE:,}** coins. You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -PROTECT_PRICE, "protect")
+    data[str(user.id)] = time.time() + PROTECT_DURATION
+    _save_protections(data)
+    new_bal = economy.balance(user.id)
+
+    silent = discord.AllowedMentions.none()
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit("🛡️ *hiring private security...*")
+    await asyncio.sleep(1.0)
+    await edit("🛡️ *installing biometric locks...*")
+    await asyncio.sleep(1.0)
+    await edit(
+        f"## 🛡️ PROTECTION ACTIVATED\n\n"
+        f"{user.mention} is **immune to /rob** for the next **12 hours**.\n"
+        f"Cost: **{PROTECT_PRICE:,}** coins.\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+# ── 📢 /megaphone ────────────────────────────────────────────────────────────
+MEGAPHONE_PRICE = 5000
+
+@tree.command(name="megaphone", description="Have Jordan announce your message to the channel (with @here ping).")
+@discord.app_commands.describe(message="What you want announced (max 200 chars)")
+async def megaphone_command(interaction: discord.Interaction, message: str):
+    user = interaction.user
+    if len(message) > 200:
+        await interaction.response.send_message("Message too long (max 200 chars).", ephemeral=True)
+        return
+    bal = economy.balance(user.id)
+    if bal < MEGAPHONE_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{MEGAPHONE_PRICE:,}** coins. You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    # Sanitize — no @everyone or role mentions
+    safe_message = message.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+
+    economy.add(user.id, -MEGAPHONE_PRICE, "megaphone")
+    new_bal = economy.balance(user.id)
+
+    await interaction.response.defer()
+
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content, allow_here=False):
+        kw = {"content": content}
+        if allow_here:
+            kw["allowed_mentions"] = discord.AllowedMentions(everyone=True, users=False, roles=False)
+        else:
+            kw["allowed_mentions"] = silent
+        try:
+            await interaction.edit_original_response(**kw)
+        except Exception:
+            pass
+
+    await edit("📢 *Jordan grabs the megaphone...*")
+    await asyncio.sleep(1.0)
+    await edit("📢 *clears throat...*")
+    await asyncio.sleep(1.0)
+
+    # Final megaphone message — pings @here
+    final = (
+        f"📢 **MEGAPHONE** 📢\n\n"
+        f"@here — {user.mention} paid {MEGAPHONE_PRICE:,} coins to say:\n\n"
+        f"# > {safe_message}"
+    )
+    try:
+        await interaction.edit_original_response(
+            content=final,
+            allowed_mentions=discord.AllowedMentions(everyone=True, users=[user], roles=False),
+        )
+    except Exception:
+        pass
+
+
+# ── 🎰 /lottery ──────────────────────────────────────────────────────────────
+LOTTERY_FILE = MEMORY_DIR / "lottery.json"
+LOTTERY_TICKET_PRICE = 100
+LOTTERY_MAX_TICKETS_PER_USER = 50
+
+
+def _load_lottery() -> dict:
+    if LOTTERY_FILE.exists():
+        try:
+            with open(LOTTERY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"jackpot": 1000, "tickets": {}, "history": []}
+
+
+def _save_lottery(data: dict):
+    with open(LOTTERY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+@tree.command(name="lottery", description="Buy lottery tickets or check the jackpot.")
+@discord.app_commands.describe(tickets="How many tickets to buy (leave empty just to view)")
+async def lottery_command(interaction: discord.Interaction, tickets: int = 0):
+    user = interaction.user
+    data = _load_lottery()
+
+    # Just viewing
+    if tickets == 0:
+        my_tickets = data["tickets"].get(str(user.id), 0)
+        total_tickets = sum(data["tickets"].values())
+        chance = (my_tickets / total_tickets * 100) if total_tickets > 0 else 0
+        embed = discord.Embed(
+            title="🎰 LOTTERY",
+            description=f"Tickets: **{LOTTERY_TICKET_PRICE:,}** coins each. Drawing happens daily at the recap hour.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="💰 Current Jackpot", value=f"**{data['jackpot']:,}** coins", inline=False)
+        embed.add_field(name="🎟️ Your Tickets", value=str(my_tickets), inline=True)
+        embed.add_field(name="🎟️ Total Tickets", value=str(total_tickets), inline=True)
+        embed.add_field(name="📊 Your Win Chance", value=f"{chance:.1f}%", inline=True)
+        if data.get("history"):
+            last = data["history"][-1]
+            embed.add_field(
+                name="📜 Last Winner",
+                value=f"<@{last['winner_id']}> won **{last['amount']:,}** on {last['date']}",
+                inline=False
+            )
+        embed.set_footer(text="Use /lottery tickets:N to buy. Max 50 per drawing.")
+        await interaction.response.send_message(embed=embed)
+        return
+
+    if tickets <= 0:
+        await interaction.response.send_message("Tickets must be positive.", ephemeral=True)
+        return
+
+    current_tickets = data["tickets"].get(str(user.id), 0)
+    if current_tickets + tickets > LOTTERY_MAX_TICKETS_PER_USER:
+        await interaction.response.send_message(
+            f"❌ Max {LOTTERY_MAX_TICKETS_PER_USER} tickets per user per drawing. You already have {current_tickets}.",
+            ephemeral=True,
+        )
+        return
+
+    cost = tickets * LOTTERY_TICKET_PRICE
+    bal = economy.balance(user.id)
+    if bal < cost:
+        await interaction.response.send_message(
+            f"❌ {tickets} tickets cost **{cost:,}** coins. You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -cost, "lottery tickets")
+    data["tickets"][str(user.id)] = current_tickets + tickets
+    # Half of ticket cost goes to jackpot
+    data["jackpot"] += cost // 2
+    _save_lottery(data)
+
+    new_bal = economy.balance(user.id)
+    total_tickets = sum(data["tickets"].values())
+    chance = ((current_tickets + tickets) / total_tickets * 100) if total_tickets > 0 else 0
+
+    await interaction.response.send_message(
+        f"🎟️ **{tickets:,}** tickets purchased for {cost:,} coins!\n"
+        f"💰 Jackpot: **{data['jackpot']:,}**\n"
+        f"📊 Your win chance: **{chance:.1f}%**\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+# Background task: daily lottery drawing
+async def lottery_drawing_scheduler():
+    """Runs lottery drawing once per day at the configured recap hour."""
+    await client.wait_until_ready()
+    last_drawn_date = None
+    while not client.is_closed():
+        await asyncio.sleep(300)  # check every 5 min
+        cfg = load_config()
+        target_hour = cfg.get("daily_recap_hour_utc", 4)
+        now = datetime.now(timezone.utc)
+        if now.hour != target_hour:
+            continue
+        today_str = now.strftime("%Y-%m-%d")
+        if last_drawn_date == today_str:
+            continue
+
+        try:
+            data = _load_lottery()
+            if not data["tickets"]:
+                last_drawn_date = today_str
+                continue
+
+            # Build weighted draw — each user weighted by their ticket count
+            entries = []
+            for uid, count in data["tickets"].items():
+                entries.extend([uid] * count)
+            if not entries:
+                last_drawn_date = today_str
+                continue
+            winner_uid = random.choice(entries)
+            jackpot = data["jackpot"]
+
+            # Pay out
+            economy.add(int(winner_uid), jackpot, "lottery jackpot")
+            economy.record_win(int(winner_uid))
+            data["history"] = data.get("history", [])
+            data["history"].append({
+                "winner_id": winner_uid,
+                "amount": jackpot,
+                "date": today_str,
+                "tickets": data["tickets"][winner_uid],
+                "total_tickets": len(entries),
+            })
+            data["history"] = data["history"][-30:]  # keep last 30 drawings
+            # Reset for next round
+            data["tickets"] = {}
+            data["jackpot"] = 1000  # seed for next round
+            _save_lottery(data)
+
+            # Announce in the recap channel if configured
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            if recap_channel_id:
+                try:
+                    channel = client.get_channel(int(recap_channel_id))
+                    if channel:
+                        await channel.send(
+                            f"🎰 **DAILY LOTTERY DRAWING** 🎰\n\n"
+                            f"## 🏆 Winner: <@{winner_uid}>\n"
+                            f"💰 Won **{jackpot:,}** coins!\n\n"
+                            f"_New round starts now. Buy tickets with `/lottery tickets:N`_",
+                        )
+                except Exception as e:
+                    log.warning("Lottery announce failed: %s", e)
+
+            log.info("Lottery drawn: %s won %s", winner_uid, jackpot)
+            last_drawn_date = today_str
+        except Exception as e:
+            log.exception("Lottery drawing error: %s", e)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -3243,6 +3722,16 @@ async def commands_command(interaction: discord.Interaction):
             "`/pay` Send coins\n"
             "`/bet` Coinflip wager\n"
             "`/leaderboard` Richest users"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🛒 SHOP & REDEEM",
+        value=(
+            "`/buyrole` Colored Discord role\n"
+            "`/protect` 12h rob immunity\n"
+            "`/megaphone` Channel-wide announcement\n"
+            "`/lottery` Buy tickets / view jackpot"
         ),
         inline=False
     )
@@ -3308,6 +3797,8 @@ async def on_ready():
     client.loop.create_task(rotate_status())
     client.loop.create_task(silence_checker())
     client.loop.create_task(daily_recap_scheduler())
+    client.loop.create_task(expire_temp_roles())
+    client.loop.create_task(lottery_drawing_scheduler())
 
 
 @client.event
