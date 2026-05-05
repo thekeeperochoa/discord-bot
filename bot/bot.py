@@ -3707,6 +3707,993 @@ async def lottery_drawing_scheduler():
             log.exception("Lottery drawing error: %s", e)
 
 
+# ── 🛒 /shop — interactive shop hub ──────────────────────────────────────────
+
+class ShopMainView(discord.ui.View):
+    """Top-level shop menu — buttons for each category."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your shop session. Open your own with `/shop`.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Colored Role", style=discord.ButtonStyle.primary, emoji="🎨", row=0)
+    async def role_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎨 Buy a Colored Role",
+            description=(
+                "Get a custom-colored Discord role next to your name.\n\n"
+                f"**24 hours** — {ROLE_PRICES['24h']:,} coins\n"
+                f"**Permanent** — {ROLE_PRICES['perm']:,} coins\n\n"
+                "Pick a color below."
+            ),
+            color=discord.Color.purple(),
+        )
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(embed=embed, view=ShopColorView(self.user_id))
+
+    @discord.ui.button(label="Rob Immunity", style=discord.ButtonStyle.success, emoji="🛡️", row=0)
+    async def protect_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = economy.balance(self.user_id)
+        already = is_protected(self.user_id)
+        if already:
+            data = _load_protections()
+            remaining = int(data.get(str(self.user_id), 0) - time.time())
+            await interaction.response.send_message(
+                f"🛡️ You're already protected for another **{fmt_cooldown(remaining)}**.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🛡️ Rob Immunity",
+            description=(
+                f"For **{PROTECT_PRICE:,} coins**, no one can `/rob` you for **12 hours**.\n\n"
+                "Click confirm to purchase."
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopConfirmProtectView(self.user_id)
+        )
+
+    @discord.ui.button(label="Megaphone", style=discord.ButtonStyle.danger, emoji="📢", row=0)
+    async def megaphone_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = economy.balance(self.user_id)
+        if bal < MEGAPHONE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Costs **{MEGAPHONE_PRICE:,}** coins. You have **{bal:,}**.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(MegaphoneModal(self.user_id))
+
+    @discord.ui.button(label="Lottery", style=discord.ButtonStyle.secondary, emoji="🎰", row=1)
+    async def lottery_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = _load_lottery()
+        my_tickets = data["tickets"].get(str(self.user_id), 0)
+        total_tickets = sum(data["tickets"].values())
+        chance = (my_tickets / total_tickets * 100) if total_tickets > 0 else 0
+
+        embed = discord.Embed(
+            title="🎰 Lottery",
+            description=(
+                f"Buy tickets for **{LOTTERY_TICKET_PRICE:,}** coins each.\n"
+                f"Drawing happens daily. Max 50 tickets per user per round.\n\n"
+                f"💰 **Jackpot:** {data['jackpot']:,} coins\n"
+                f"🎟️ **Your tickets:** {my_tickets}\n"
+                f"📊 **Win chance:** {chance:.1f}%\n"
+                f"🎟️ **Total tickets sold:** {total_tickets}"
+            ),
+            color=discord.Color.gold(),
+        )
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopLotteryView(self.user_id)
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
+    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🛒 Shop closed",
+            description="Come back anytime with `/shop`.",
+            color=discord.Color.greyple(),
+        )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+def shop_back_button():
+    """Reusable Back button for sub-views."""
+    btn = discord.ui.Button(label="Back to Shop", style=discord.ButtonStyle.secondary, emoji="◀️", row=4)
+    return btn
+
+
+class ShopColorView(discord.ui.View):
+    """Pick a color for buyrole."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+        # Add color buttons dynamically
+        colors_list = list(ROLE_COLORS.items())
+        for i, (key, (color_int, label)) in enumerate(colors_list):
+            row = i // 5  # 5 per row
+            self.add_item(self._make_color_button(key, label, row))
+
+        # Back button
+        back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, emoji="◀️", row=3)
+        async def go_back(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("Not your session.", ephemeral=True)
+                return
+            await _show_shop_main(interaction, self.user_id, edit=True)
+        back.callback = go_back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your session.", ephemeral=True)
+            return False
+        return True
+
+    def _make_color_button(self, key: str, label: str, row: int) -> discord.ui.Button:
+        btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, row=row)
+        async def cb(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("Not your session.", ephemeral=True)
+                return
+            # Show duration choice for this color
+            color_int, color_label = ROLE_COLORS[key]
+            embed = discord.Embed(
+                title=f"{color_label} Role",
+                description=(
+                    "How long do you want this role?\n\n"
+                    f"**24 hours** — {ROLE_PRICES['24h']:,} coins\n"
+                    f"**Permanent** — {ROLE_PRICES['perm']:,} coins"
+                ),
+                color=discord.Color(color_int) if color_int != 0xFFFFFF else discord.Color.light_grey(),
+            )
+            bal = economy.balance(self.user_id)
+            embed.set_footer(text=f"💰 Your balance: {bal:,}")
+            await interaction.response.edit_message(embed=embed, view=ShopRoleDurationView(self.user_id, key))
+        btn.callback = cb
+        return btn
+
+
+class ShopRoleDurationView(discord.ui.View):
+    def __init__(self, user_id: int, color_key: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.color_key = color_key
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your session.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="24 Hours", style=discord.ButtonStyle.primary, emoji="⏱️")
+    async def buy_24h(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._purchase(interaction, "24h")
+
+    @discord.ui.button(label="Permanent", style=discord.ButtonStyle.success, emoji="💎")
+    async def buy_perm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._purchase(interaction, "perm")
+
+    @discord.ui.button(label="Custom Name", style=discord.ButtonStyle.secondary, emoji="✏️", row=1)
+    async def custom_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BuyRoleModal(self.user_id, self.color_key))
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="◀️", row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+    async def _purchase(self, interaction: discord.Interaction, duration: str, custom_name: str = None):
+        # This re-implements the buyrole logic but inside an interaction
+        user = interaction.user
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        price = ROLE_PRICES[duration]
+        bal = economy.balance(user.id)
+        if bal < price:
+            await interaction.response.send_message(
+                f"❌ Need **{price:,}**. You have **{bal:,}**.", ephemeral=True
+            )
+            return
+
+        bot_member = guild.me
+        if not bot_member.guild_permissions.manage_roles:
+            await interaction.response.send_message(
+                "❌ I need **Manage Roles** permission. Ask an admin.", ephemeral=True
+            )
+            return
+
+        color_int, color_label = ROLE_COLORS[self.color_key]
+        role_name = (custom_name[:30] if custom_name else f"💎 {user.display_name}").strip() or f"💎 {user.display_name}"
+
+        await interaction.response.defer()
+
+        try:
+            role = await guild.create_role(
+                name=role_name,
+                colour=discord.Colour(color_int),
+                reason=f"Shop purchase by {user.display_name}",
+                mentionable=False,
+            )
+            try:
+                top_bot_role = bot_member.top_role
+                await role.edit(position=max(top_bot_role.position - 1, 1))
+            except Exception:
+                pass
+            await user.add_roles(role, reason="shop buyrole")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I can't manage roles. Move my role higher in Server Settings.", ephemeral=True
+            )
+            return
+        except Exception as e:
+            log.exception("Shop buyrole failed")
+            await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+            return
+
+        economy.add(user.id, -price, "shop buyrole")
+        new_bal = economy.balance(user.id)
+
+        if duration == "24h":
+            temp = _load_temp_roles()
+            temp.append({
+                "role_id": role.id,
+                "guild_id": guild.id,
+                "user_id": user.id,
+                "expires_at": time.time() + 24 * 3600,
+            })
+            _save_temp_roles(temp)
+            duration_label = "24 hours"
+        else:
+            duration_label = "permanently"
+
+        embed = discord.Embed(
+            title="✅ Role Purchased",
+            description=(
+                f"You bought {color_label} role **{role_name}** for **{price:,}** coins.\n"
+                f"Lasts **{duration_label}**."
+            ),
+            color=discord.Color(color_int) if color_int != 0xFFFFFF else discord.Color.light_grey(),
+        )
+        embed.set_footer(text=f"💰 New balance: {new_bal:,}")
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(embed=embed, view=self)
+
+
+class BuyRoleModal(discord.ui.Modal, title="Custom Role Name"):
+    role_name = discord.ui.TextInput(
+        label="Role name",
+        placeholder="E.g. 💎 Boss",
+        max_length=30,
+        required=True,
+    )
+
+    def __init__(self, user_id: int, color_key: str):
+        super().__init__()
+        self.user_id = user_id
+        self.color_key = color_key
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Show duration choice with the custom name now stored
+        view = ShopRoleDurationViewCustom(self.user_id, self.color_key, self.role_name.value)
+        color_int, color_label = ROLE_COLORS[self.color_key]
+        embed = discord.Embed(
+            title=f"{color_label} — Custom: {self.role_name.value}",
+            description=(
+                "How long?\n\n"
+                f"**24 hours** — {ROLE_PRICES['24h']:,} coins\n"
+                f"**Permanent** — {ROLE_PRICES['perm']:,} coins"
+            ),
+            color=discord.Color(color_int) if color_int != 0xFFFFFF else discord.Color.light_grey(),
+        )
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class ShopRoleDurationViewCustom(discord.ui.View):
+    """Same as ShopRoleDurationView but with a stored custom name."""
+    def __init__(self, user_id: int, color_key: str, custom_name: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.color_key = color_key
+        self.custom_name = custom_name
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your session.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="24 Hours", style=discord.ButtonStyle.primary, emoji="⏱️")
+    async def buy_24h(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ShopRoleDurationView._purchase(self, interaction, "24h", self.custom_name)
+
+    @discord.ui.button(label="Permanent", style=discord.ButtonStyle.success, emoji="💎")
+    async def buy_perm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ShopRoleDurationView._purchase(self, interaction, "perm", self.custom_name)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="◀️", row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+
+class ShopConfirmProtectView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your session.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label=f"Buy Protection", style=discord.ButtonStyle.success, emoji="🛡️")
+    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = economy.balance(self.user_id)
+        if bal < PROTECT_PRICE:
+            await interaction.response.send_message(f"❌ Not enough coins.", ephemeral=True)
+            return
+        if is_protected(self.user_id):
+            await interaction.response.send_message("🛡️ Already protected.", ephemeral=True)
+            return
+        economy.add(self.user_id, -PROTECT_PRICE, "shop protect")
+        data = _load_protections()
+        data[str(self.user_id)] = time.time() + PROTECT_DURATION
+        _save_protections(data)
+        new_bal = economy.balance(self.user_id)
+        embed = discord.Embed(
+            title="🛡️ Protection Activated",
+            description=f"You're immune to `/rob` for the next **12 hours**.",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=f"💰 New balance: {new_bal:,}")
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="◀️")
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+
+class MegaphoneModal(discord.ui.Modal, title="Megaphone Message"):
+    message = discord.ui.TextInput(
+        label=f"Your message (costs {MEGAPHONE_PRICE} coins)",
+        placeholder="Pings @here when posted",
+        style=discord.TextStyle.paragraph,
+        max_length=200,
+        required=True,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user = interaction.user
+        bal = economy.balance(user.id)
+        if bal < MEGAPHONE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Costs **{MEGAPHONE_PRICE:,}**. You have **{bal:,}**.", ephemeral=True
+            )
+            return
+        safe_msg = self.message.value.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        economy.add(user.id, -MEGAPHONE_PRICE, "shop megaphone")
+        new_bal = economy.balance(user.id)
+        # Send the megaphone message
+        await interaction.response.send_message(
+            content=(
+                f"📢 **MEGAPHONE** 📢\n\n"
+                f"@here — {user.mention} paid {MEGAPHONE_PRICE:,} coins to say:\n\n"
+                f"# > {safe_msg}\n\n"
+                f"-# Balance: {new_bal:,}"
+            ),
+            allowed_mentions=discord.AllowedMentions(everyone=True, users=[user], roles=False),
+        )
+
+
+class ShopLotteryView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your session.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="1 ticket", style=discord.ButtonStyle.primary)
+    async def buy1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, 1)
+
+    @discord.ui.button(label="5 tickets", style=discord.ButtonStyle.primary)
+    async def buy5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, 5)
+
+    @discord.ui.button(label="10 tickets", style=discord.ButtonStyle.primary)
+    async def buy10(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, 10)
+
+    @discord.ui.button(label="Custom amount", style=discord.ButtonStyle.secondary, emoji="✏️", row=1)
+    async def custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(LotteryModal(self.user_id))
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="◀️", row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+    async def _buy(self, interaction: discord.Interaction, count: int):
+        await _purchase_lottery_tickets(interaction, self.user_id, count)
+
+
+class LotteryModal(discord.ui.Modal, title="Buy Lottery Tickets"):
+    amount = discord.ui.TextInput(
+        label=f"How many tickets? ({LOTTERY_TICKET_PRICE} coins each, max 50)",
+        placeholder="e.g. 25",
+        required=True,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            n = int(self.amount.value.strip())
+        except ValueError:
+            await interaction.response.send_message("That's not a number.", ephemeral=True)
+            return
+        if n <= 0:
+            await interaction.response.send_message("Pick a positive number.", ephemeral=True)
+            return
+        await _purchase_lottery_tickets(interaction, self.user_id, n)
+
+
+async def _purchase_lottery_tickets(interaction: discord.Interaction, user_id: int, count: int):
+    data = _load_lottery()
+    current = data["tickets"].get(str(user_id), 0)
+    if current + count > LOTTERY_MAX_TICKETS_PER_USER:
+        await interaction.response.send_message(
+            f"❌ Max {LOTTERY_MAX_TICKETS_PER_USER} per user per drawing. You already have {current}.",
+            ephemeral=True,
+        )
+        return
+    cost = count * LOTTERY_TICKET_PRICE
+    bal = economy.balance(user_id)
+    if bal < cost:
+        await interaction.response.send_message(
+            f"❌ Costs **{cost:,}**. You have **{bal:,}**.", ephemeral=True
+        )
+        return
+    economy.add(user_id, -cost, "shop lottery")
+    data["tickets"][str(user_id)] = current + count
+    data["jackpot"] += cost // 2
+    _save_lottery(data)
+    new_bal = economy.balance(user_id)
+    total_tickets = sum(data["tickets"].values())
+    chance = ((current + count) / total_tickets * 100) if total_tickets > 0 else 0
+
+    embed = discord.Embed(
+        title="🎟️ Tickets Purchased",
+        description=(
+            f"You bought **{count}** tickets for **{cost:,}** coins.\n\n"
+            f"💰 Jackpot: **{data['jackpot']:,}**\n"
+            f"🎟️ Your tickets: **{current + count}**\n"
+            f"📊 Win chance: **{chance:.1f}%**"
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"💰 New balance: {new_bal:,}")
+    # Use response if not yet responded, otherwise followup
+    if not interaction.response.is_done():
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: bool = False):
+    bal = economy.balance(user_id)
+    user = interaction.guild.get_member(user_id) if interaction.guild else None
+    name = user.display_name if user else "You"
+    embed = discord.Embed(
+        title="🛒 SHOP",
+        description=(
+            f"Welcome, **{name}**. Pick a category below.\n\n"
+            f"🎨 **Colored Role** — {ROLE_PRICES['24h']:,}–{ROLE_PRICES['perm']:,} coins\n"
+            f"🛡️ **Rob Immunity (12h)** — {PROTECT_PRICE:,} coins\n"
+            f"📢 **Megaphone (@here)** — {MEGAPHONE_PRICE:,} coins\n"
+            f"🎰 **Lottery Tickets** — {LOTTERY_TICKET_PRICE:,} coins each"
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"💰 Your balance: {bal:,}")
+    view = ShopMainView(user_id)
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+@tree.command(name="shop", description="Open the shop and browse what you can buy with coins.")
+async def shop_command(interaction: discord.Interaction):
+    await _show_shop_main(interaction, interaction.user.id, edit=False)
+
+
+# ── 🛒 /shop — interactive shop UI ───────────────────────────────────────────
+
+class ShopMainView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your shop.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Colored Role", style=discord.ButtonStyle.primary, emoji="🎨", row=0)
+    async def role_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        view = RolePickerView(self.user_id)
+        await interaction.response.edit_message(
+            content=_shop_role_text(self.user_id),
+            view=view,
+            embed=None,
+        )
+
+    @discord.ui.button(label="Rob Immunity", style=discord.ButtonStyle.success, emoji="🛡️", row=0)
+    async def protect_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        view = ConfirmPurchaseView(self.user_id, "protect", PROTECT_PRICE)
+        await interaction.response.edit_message(
+            content=_shop_protect_text(self.user_id),
+            view=view,
+            embed=None,
+        )
+
+    @discord.ui.button(label="Megaphone", style=discord.ButtonStyle.danger, emoji="📢", row=0)
+    async def mega_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.send_modal(MegaphoneModal(self.user_id))
+
+    @discord.ui.button(label="Lottery", style=discord.ButtonStyle.secondary, emoji="🎰", row=1)
+    async def lottery_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        view = LotteryShopView(self.user_id)
+        await interaction.response.edit_message(
+            content=_shop_lottery_text(),
+            view=view,
+            embed=None,
+        )
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    async def refresh_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        embed = _build_shop_embed(interaction.user)
+        await interaction.response.edit_message(content=None, embed=embed, view=ShopMainView(self.user_id))
+
+
+def _build_shop_embed(user) -> discord.Embed:
+    bal = economy.balance(user.id)
+    embed = discord.Embed(
+        title="🛒 SHOP",
+        description=f"Welcome, {user.display_name}. What are you buying?",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="🎨 Colored Discord Role",
+        value=f"24h: **{ROLE_PRICES['24h']:,}** coins\nPermanent: **{ROLE_PRICES['perm']:,}** coins",
+        inline=True,
+    )
+    embed.add_field(
+        name="🛡️ Rob Immunity",
+        value=f"12 hours: **{PROTECT_PRICE:,}** coins",
+        inline=True,
+    )
+    embed.add_field(
+        name="📢 Megaphone",
+        value=f"@here ping w/ your msg: **{MEGAPHONE_PRICE:,}** coins",
+        inline=True,
+    )
+    data = _load_lottery()
+    embed.add_field(
+        name="🎰 Lottery Tickets",
+        value=f"**{LOTTERY_TICKET_PRICE}** coins each\nJackpot: **{data['jackpot']:,}**",
+        inline=True,
+    )
+    embed.set_footer(text=f"💰 Your balance: {bal:,} coins")
+    return embed
+
+
+def _shop_role_text(user_id: int) -> str:
+    bal = economy.balance(user_id)
+    return (
+        f"## 🎨 Buy a Colored Role\n\n"
+        f"Pick a color below to preview pricing.\n"
+        f"💰 Your balance: **{bal:,}** coins"
+    )
+
+
+def _shop_protect_text(user_id: int) -> str:
+    bal = economy.balance(user_id)
+    data = _load_protections()
+    existing = data.get(str(user_id), 0)
+    extra = ""
+    if time.time() < existing:
+        remaining = int(existing - time.time())
+        extra = f"\n\n⚠️ You're already protected for **{fmt_cooldown(remaining)}**."
+    return (
+        f"## 🛡️ Rob Immunity (12 hours)\n\n"
+        f"Cost: **{PROTECT_PRICE:,}** coins\n"
+        f"💰 Your balance: **{bal:,}** coins{extra}"
+    )
+
+
+def _shop_lottery_text() -> str:
+    data = _load_lottery()
+    total_tickets = sum(data["tickets"].values())
+    return (
+        f"## 🎰 Lottery\n\n"
+        f"💰 Jackpot: **{data['jackpot']:,}** coins\n"
+        f"🎟️ Tickets sold: **{total_tickets}**\n"
+        f"💵 Price per ticket: **{LOTTERY_TICKET_PRICE}** coins\n"
+        f"📊 Max **{LOTTERY_MAX_TICKETS_PER_USER}** tickets per user per drawing\n\n"
+        f"Pick how many tickets to buy:"
+    )
+
+
+# ── Role picker (color choice → duration choice) ─────────────────────────────
+class RolePickerView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        # Build select with all colors
+        options = [
+            discord.SelectOption(label=label, value=key)
+            for key, (_, label) in ROLE_COLORS.items()
+        ]
+        self.add_item(RoleColorSelect(user_id, options))
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=None,
+            embed=_build_shop_embed(interaction.user),
+            view=ShopMainView(self.user_id),
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+
+class RoleColorSelect(discord.ui.Select):
+    def __init__(self, user_id: int, options):
+        super().__init__(placeholder="Pick a color...", options=options, min_values=1, max_values=1)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        color_key = self.values[0]
+        view = RoleDurationView(self.user_id, color_key)
+        _, label = ROLE_COLORS[color_key]
+        await interaction.response.edit_message(
+            content=(
+                f"## 🎨 {label} Role\n\n"
+                f"Pick how long you want it:"
+            ),
+            view=view,
+        )
+
+
+class RoleDurationView(discord.ui.View):
+    def __init__(self, user_id: int, color_key: str):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.color_key = color_key
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label=f"24 Hours ({ROLE_PRICES['24h']:,})", style=discord.ButtonStyle.primary, emoji="⏱️")
+    async def short_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.send_modal(RoleNameModal(self.user_id, self.color_key, "24h"))
+
+    @discord.ui.button(label=f"Permanent ({ROLE_PRICES['perm']:,})", style=discord.ButtonStyle.success, emoji="♾️")
+    async def perm_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.send_modal(RoleNameModal(self.user_id, self.color_key, "perm"))
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=_shop_role_text(self.user_id),
+            view=RolePickerView(self.user_id),
+        )
+
+
+class RoleNameModal(discord.ui.Modal, title="Name your role"):
+    role_name = discord.ui.TextInput(
+        label="Role name (or leave blank for default)",
+        placeholder="e.g. The Boss",
+        required=False,
+        max_length=30,
+    )
+
+    def __init__(self, user_id: int, color_key: str, duration: str):
+        super().__init__()
+        self.user_id = user_id
+        self.color_key = color_key
+        self.duration = duration
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _execute_role_purchase(
+            interaction,
+            self.user_id,
+            self.color_key,
+            self.duration,
+            str(self.role_name).strip() or None,
+        )
+
+
+async def _execute_role_purchase(interaction, user_id, color_key, duration, custom_name):
+    user = interaction.user
+    if not interaction.guild:
+        await interaction.response.send_message("Server only.", ephemeral=True)
+        return
+
+    price = ROLE_PRICES[duration]
+    bal = economy.balance(user.id)
+    if bal < price:
+        await interaction.response.send_message(
+            f"❌ Need **{price:,}** coins. You have **{bal:,}**.", ephemeral=True
+        )
+        return
+
+    bot_member = interaction.guild.me
+    if not bot_member.guild_permissions.manage_roles:
+        await interaction.response.send_message(
+            "❌ I need the **Manage Roles** permission.", ephemeral=True
+        )
+        return
+
+    color_int, color_label = ROLE_COLORS[color_key]
+    role_name = (custom_name[:30] if custom_name else f"💎 {user.display_name}").strip()
+    if not role_name:
+        role_name = f"💎 {user.display_name}"
+
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        role = await interaction.guild.create_role(
+            name=role_name,
+            colour=discord.Colour(color_int),
+            reason=f"Shop purchase by {user.display_name}",
+            mentionable=False,
+        )
+        try:
+            await role.edit(position=max(bot_member.top_role.position - 1, 1))
+        except Exception:
+            pass
+        await user.add_roles(role, reason="shop purchase")
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I can't manage roles. Move my role higher.", ephemeral=True)
+        return
+    except Exception as e:
+        log.exception("shop role purchase failed")
+        await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+        return
+
+    economy.add(user.id, -price, "shop role")
+    new_bal = economy.balance(user.id)
+
+    if duration == "24h":
+        temp = _load_temp_roles()
+        temp.append({
+            "role_id": role.id,
+            "guild_id": interaction.guild.id,
+            "user_id": user.id,
+            "expires_at": time.time() + 24 * 3600,
+        })
+        _save_temp_roles(temp)
+        duration_label = "24 hours"
+    else:
+        duration_label = "permanently"
+
+    await interaction.followup.send(
+        f"🎨 **ROLE PURCHASED!**\n\n"
+        f"{user.mention} bought {color_label} role **{role_name}** for **{price:,}** coins!\n"
+        f"Lasts **{duration_label}**.\n\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+# ── Generic confirm/cancel for protect ───────────────────────────────────────
+class ConfirmPurchaseView(discord.ui.View):
+    def __init__(self, user_id: int, item: str, price: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.item = item
+        self.price = price
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="✅")
+    async def buy(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if self.item == "protect":
+            await self._buy_protect(interaction)
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=None,
+            embed=_build_shop_embed(interaction.user),
+            view=ShopMainView(self.user_id),
+        )
+
+    async def _buy_protect(self, interaction: discord.Interaction):
+        user = interaction.user
+        bal = economy.balance(user.id)
+        data = _load_protections()
+        existing = data.get(str(user.id), 0)
+        if time.time() < existing:
+            remaining = int(existing - time.time())
+            await interaction.response.send_message(
+                f"🛡️ Already protected for **{fmt_cooldown(remaining)}**.", ephemeral=True
+            )
+            return
+        if bal < self.price:
+            await interaction.response.send_message(
+                f"❌ Need **{self.price:,}** coins. You have **{bal:,}**.", ephemeral=True
+            )
+            return
+
+        economy.add(user.id, -self.price, "shop protect")
+        data[str(user.id)] = time.time() + PROTECT_DURATION
+        _save_protections(data)
+        new_bal = economy.balance(user.id)
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                f"## 🛡️ PROTECTION ACTIVATED\n\n"
+                f"{user.mention} is **immune to /rob** for the next **12 hours**.\n"
+                f"Cost: **{self.price:,}** coins.\n"
+                f"Balance: **{new_bal:,}**"
+            ),
+            view=self,
+        )
+
+
+# ── Megaphone modal ──────────────────────────────────────────────────────────
+class MegaphoneModal(discord.ui.Modal, title=f"📢 Megaphone ({MEGAPHONE_PRICE:,} coins)"):
+    msg = discord.ui.TextInput(
+        label="Your announcement",
+        placeholder="What do you want to shout to the channel?",
+        style=discord.TextStyle.paragraph,
+        max_length=200,
+        required=True,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user = interaction.user
+        bal = economy.balance(user.id)
+        if bal < MEGAPHONE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{MEGAPHONE_PRICE:,}** coins. You have **{bal:,}**.", ephemeral=True
+            )
+            return
+        message = str(self.msg).strip()
+        safe_message = message.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        economy.add(user.id, -MEGAPHONE_PRICE, "shop megaphone")
+        await interaction.response.send_message(
+            f"📢 **MEGAPHONE** 📢\n\n"
+            f"@here — {user.mention} paid {MEGAPHONE_PRICE:,} coins to say:\n\n"
+            f"# > {safe_message}",
+            allowed_mentions=discord.AllowedMentions(everyone=True, users=[user], roles=False),
+        )
+
+
+# ── Lottery picker ───────────────────────────────────────────────────────────
+class LotteryShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    async def _buy(self, interaction: discord.Interaction, n: int):
+        user = interaction.user
+        data = _load_lottery()
+        current = data["tickets"].get(str(user.id), 0)
+        if current + n > LOTTERY_MAX_TICKETS_PER_USER:
+            await interaction.response.send_message(
+                f"❌ Max {LOTTERY_MAX_TICKETS_PER_USER} per drawing. You already have {current}.",
+                ephemeral=True,
+            )
+            return
+        cost = n * LOTTERY_TICKET_PRICE
+        bal = economy.balance(user.id)
+        if bal < cost:
+            await interaction.response.send_message(
+                f"❌ Need **{cost:,}** coins. You have **{bal:,}**.", ephemeral=True
+            )
+            return
+        economy.add(user.id, -cost, "shop lottery")
+        data["tickets"][str(user.id)] = current + n
+        data["jackpot"] += cost // 2
+        _save_lottery(data)
+        new_bal = economy.balance(user.id)
+        total_tickets = sum(data["tickets"].values())
+        chance = ((current + n) / total_tickets * 100) if total_tickets else 0
+        await interaction.response.send_message(
+            f"🎟️ Bought **{n}** tickets for {cost:,} coins!\n"
+            f"💰 Jackpot: **{data['jackpot']:,}**\n"
+            f"📊 Win chance: **{chance:.1f}%**\n"
+            f"Balance: **{new_bal:,}**",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="1 Ticket", style=discord.ButtonStyle.primary, emoji="🎟️")
+    async def b1(self, interaction, _b): await self._buy(interaction, 1)
+
+    @discord.ui.button(label="5 Tickets", style=discord.ButtonStyle.primary, emoji="🎟️")
+    async def b5(self, interaction, _b): await self._buy(interaction, 5)
+
+    @discord.ui.button(label="10 Tickets", style=discord.ButtonStyle.primary, emoji="🎟️")
+    async def b10(self, interaction, _b): await self._buy(interaction, 10)
+
+    @discord.ui.button(label="25 Tickets", style=discord.ButtonStyle.success, emoji="🎟️")
+    async def b25(self, interaction, _b): await self._buy(interaction, 25)
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, _b):
+        await interaction.response.edit_message(
+            content=None,
+            embed=_build_shop_embed(interaction.user),
+            view=ShopMainView(self.user_id),
+        )
+
+
+@tree.command(name="shop", description="Browse the shop with interactive buttons.")
+async def shop_command(interaction: discord.Interaction):
+    embed = _build_shop_embed(interaction.user)
+    view = ShopMainView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -3728,6 +4715,7 @@ async def commands_command(interaction: discord.Interaction):
     embed.add_field(
         name="🛒 SHOP & REDEEM",
         value=(
+            "**`/shop` — Interactive shop menu (everything in one place)**\n"
             "`/buyrole` Colored Discord role\n"
             "`/protect` 12h rob immunity\n"
             "`/megaphone` Channel-wide announcement\n"
