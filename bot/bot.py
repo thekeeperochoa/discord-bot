@@ -4236,9 +4236,7 @@ async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: 
 
 @tree.command(name="shop", description="Browse the shop with interactive buttons.")
 async def shop_command(interaction: discord.Interaction):
-    embed = _build_shop_embed(interaction.user)
-    view = ShopMainView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
+    await _show_shop_main(interaction, interaction.user.id, edit=False)
 
 
 @tree.command(name="commands", description="List all available bot commands.")
