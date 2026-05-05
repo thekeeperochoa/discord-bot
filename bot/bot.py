@@ -4203,6 +4203,766 @@ async def shop_command(interaction: discord.Interaction):
     await _show_shop_main(interaction, interaction.user.id, edit=False)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎮 ADVANCED GAMES
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 🎲 /quest — AI choose-your-own-adventure ─────────────────────────────────
+QUEST_MAX_TURNS = 4  # number of choices before final outcome
+
+
+class QuestView(discord.ui.View):
+    def __init__(self, user_id: int, history: list, turn: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.history = history  # list of {"text": ..., "choice": ...}
+        self.turn = turn
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your quest.", ephemeral=True)
+            return False
+        return True
+
+    def add_choice_buttons(self, choices: list):
+        # Add up to 3 choice buttons
+        for i, choice_text in enumerate(choices[:3]):
+            label = choice_text[:75]
+            btn = discord.ui.Button(
+                label=label,
+                style=[discord.ButtonStyle.primary, discord.ButtonStyle.success, discord.ButtonStyle.secondary][i % 3],
+                custom_id=f"quest_choice_{i}",
+                row=i,
+            )
+            btn.callback = self._make_callback(choice_text)
+            self.add_item(btn)
+
+    def _make_callback(self, choice_text: str):
+        async def cb(interaction: discord.Interaction):
+            await self._handle_choice(interaction, choice_text)
+        return cb
+
+    async def _handle_choice(self, interaction: discord.Interaction, choice: str):
+        # Disable buttons and continue the quest
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # Build context for AI
+        cfg = load_config()
+        self.history.append({"choice": choice})
+        self.turn += 1
+
+        is_final = self.turn >= QUEST_MAX_TURNS
+
+        history_text = "\n\n".join(
+            f"Scene {i+1}: {h.get('text','')}\nPlayer chose: {h.get('choice','')}"
+            for i, h in enumerate(self.history) if h.get('text')
+        )
+        # Latest choice is the most recent
+        last_choice = self.history[-1]["choice"]
+
+        if is_final:
+            sys = (
+                cfg["system_prompt"] +
+                "\n\n=== QUEST GENERATOR — FINAL SCENE ===\n"
+                "You are running a choose-your-own-adventure for a Discord user. "
+                "This is the FINAL scene. Based on their journey, write a 2-3 sentence ending. "
+                "End with EXACTLY one line in this format: VERDICT: WIN or VERDICT: LOSS. "
+                "Win = they survived/triumphed/got the prize. Loss = they died/failed/got robbed. "
+                "Stay in character. Be vivid and specific."
+            )
+            prompt = f"Quest so far:\n\n{history_text}\n\nWrite the final scene and verdict."
+        else:
+            sys = (
+                cfg["system_prompt"] +
+                "\n\n=== QUEST GENERATOR ===\n"
+                f"You are running a choose-your-own-adventure. This is scene {self.turn + 1} of {QUEST_MAX_TURNS + 1}. "
+                "Write 2 short sentences describing what happens after the player's last choice, "
+                "then exactly 3 numbered options for what they do next. "
+                "Format strictly as:\n"
+                "[scene description]\n\n"
+                "1) [option 1]\n"
+                "2) [option 2]\n"
+                "3) [option 3]\n\n"
+                "Stay in character. Make options creative and varied."
+            )
+            prompt = f"Quest so far:\n\n{history_text}\n\nLatest choice: {last_choice}\n\nContinue the story."
+
+        try:
+            response = await ask_ai(
+                sys, [{"role": "user", "content": prompt}],
+                {**cfg, "max_tokens": 400, "temperature": 0.95},
+            )
+        except Exception as e:
+            log.exception("quest AI failed")
+            response = ""
+
+        if not response or response.startswith("⚠️"):
+            await interaction.followup.send("⚠️ The quest got lost in the void. Try again later.")
+            return
+
+        if is_final:
+            # Parse verdict
+            verdict_match = re.search(r"VERDICT:\s*(WIN|LOSS)", response, re.IGNORECASE)
+            verdict = verdict_match.group(1).upper() if verdict_match else random.choice(["WIN", "LOSS"])
+            # Remove the VERDICT line from displayed text
+            ending_text = re.sub(r"VERDICT:\s*(WIN|LOSS)", "", response, flags=re.IGNORECASE).strip()
+
+            user = interaction.user
+            if verdict == "WIN":
+                reward = random.randint(500, 2000)
+                economy.add(user.id, reward, "quest win")
+                economy.record_win(user.id)
+                outcome_line = f"## 🏆 VICTORY!\n💰 You earned **{reward:,}** coins.\nBalance: **{economy.balance(user.id):,}**"
+            else:
+                fine = min(random.randint(200, 600), economy.balance(user.id))
+                economy.add(user.id, -fine, "quest loss")
+                economy.record_loss(user.id)
+                outcome_line = f"## 💀 DEFEAT!\n💸 You lost **{fine:,}** coins.\nBalance: **{economy.balance(user.id):,}**"
+
+            final = f"# 🎲 QUEST COMPLETE\n\n{ending_text}\n\n{outcome_line}"
+            await interaction.followup.send(final)
+            return
+
+        # Parse the 3 options
+        options_match = re.findall(r"^\s*\d+[\)\.]\s*(.+?)\s*$", response, re.MULTILINE)
+        if len(options_match) < 2:
+            # Couldn't parse; force 3 generic options
+            options_match = ["Continue carefully", "Take a risk", "Run away"]
+        options = options_match[:3]
+
+        # Strip options from displayed scene
+        scene_text = re.sub(r"^\s*\d+[\)\.].*$", "", response, flags=re.MULTILINE).strip()
+
+        self.history[-1]["text"] = scene_text  # store this scene
+        new_view = QuestView(self.user_id, self.history, self.turn)
+        new_view.add_choice_buttons(options)
+
+        embed = discord.Embed(
+            title=f"🎲 Quest — Scene {self.turn + 1}/{QUEST_MAX_TURNS + 1}",
+            description=scene_text,
+            color=discord.Color.purple(),
+        )
+        embed.set_footer(text=f"{interaction.user.display_name}'s adventure")
+        await interaction.followup.send(embed=embed, view=new_view)
+
+
+@tree.command(name="quest", description="Start an AI-generated choose-your-own-adventure!")
+async def quest_command(interaction: discord.Interaction):
+    cfg = load_config()
+    user = interaction.user
+
+    await interaction.response.defer()
+
+    # Generate the opening scene
+    sys = (
+        cfg["system_prompt"] +
+        "\n\n=== QUEST GENERATOR — OPENING ===\n"
+        f"You are starting a choose-your-own-adventure for {user.display_name}. "
+        "Write the opening scene in 2 short sentences (set the stakes!), "
+        "then exactly 3 numbered options for what they do next. "
+        "Pick a wild scenario: heist, dungeon crawl, gang turf war, ancient ruins, alien abduction, etc. "
+        "Format strictly as:\n"
+        "[scene description]\n\n"
+        "1) [option 1]\n"
+        "2) [option 2]\n"
+        "3) [option 3]\n\n"
+        "Stay in character."
+    )
+    try:
+        response = await ask_ai(
+            sys, [{"role": "user", "content": f"Begin the quest for {user.display_name}."}],
+            {**cfg, "max_tokens": 400, "temperature": 0.95},
+        )
+    except Exception:
+        response = ""
+
+    if not response or response.startswith("⚠️"):
+        await interaction.followup.send("⚠️ Couldn't start the quest. Try again later.")
+        return
+
+    options_match = re.findall(r"^\s*\d+[\)\.]\s*(.+?)\s*$", response, re.MULTILINE)
+    if len(options_match) < 2:
+        options_match = ["Press forward", "Hide and wait", "Run for it"]
+    options = options_match[:3]
+    scene_text = re.sub(r"^\s*\d+[\)\.].*$", "", response, flags=re.MULTILINE).strip()
+
+    history = [{"text": scene_text, "choice": None}]
+    view = QuestView(user.id, history, turn=0)
+    view.add_choice_buttons(options)
+
+    embed = discord.Embed(
+        title=f"🎲 Quest — Scene 1/{QUEST_MAX_TURNS + 1}",
+        description=scene_text,
+        color=discord.Color.purple(),
+    )
+    embed.set_footer(text=f"{user.display_name}'s adventure")
+    await interaction.followup.send(embed=embed, view=view)
+
+
+# ── 🚪 /shootout — door elimination ──────────────────────────────────────────
+SHOOTOUT_LOBBY: dict[str, dict] = {}  # channel_id -> {host_id, players, message_id, started, buy_in}
+
+
+class ShootoutLobbyView(discord.ui.View):
+    def __init__(self, channel_id: str, buy_in: int):
+        super().__init__(timeout=60)
+        self.channel_id = channel_id
+        self.buy_in = buy_in
+
+    @discord.ui.button(label="Join Shootout", style=discord.ButtonStyle.success, emoji="🚪")
+    async def join(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        lobby = SHOOTOUT_LOBBY.get(self.channel_id)
+        if not lobby or lobby.get("started"):
+            await interaction.response.send_message("Lobby closed.", ephemeral=True)
+            return
+        if interaction.user.id in lobby["players"]:
+            await interaction.response.send_message("You're already in.", ephemeral=True)
+            return
+        if economy.balance(interaction.user.id) < self.buy_in:
+            await interaction.response.send_message(
+                f"❌ Need **{self.buy_in:,}** coins to join.", ephemeral=True
+            )
+            return
+        economy.add(interaction.user.id, -self.buy_in, "shootout buy-in")
+        lobby["players"].append(interaction.user.id)
+        await interaction.response.edit_message(content=_lobby_text(lobby, self.buy_in), view=self)
+
+    @discord.ui.button(label="Start Game", style=discord.ButtonStyle.primary, emoji="▶️")
+    async def start(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        lobby = SHOOTOUT_LOBBY.get(self.channel_id)
+        if not lobby or lobby.get("started"):
+            await interaction.response.send_message("Already started.", ephemeral=True)
+            return
+        if interaction.user.id != lobby["host_id"]:
+            await interaction.response.send_message("Only the host can start.", ephemeral=True)
+            return
+        if len(lobby["players"]) < 2:
+            await interaction.response.send_message("Need at least 2 players.", ephemeral=True)
+            return
+        lobby["started"] = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=_lobby_text(lobby, self.buy_in), view=self)
+        # Start the actual game
+        await _run_shootout(interaction, lobby, self.buy_in)
+
+
+def _lobby_text(lobby: dict, buy_in: int) -> str:
+    players = lobby["players"]
+    pot = len(players) * buy_in
+    player_list = "\n".join(f"• <@{pid}>" for pid in players) if players else "_no one yet_"
+    status = "**STARTING...**" if lobby.get("started") else "_waiting for players_"
+    return (
+        f"# 🚪 SHOOTOUT LOBBY\n\n"
+        f"Buy-in: **{buy_in:,}** coins\n"
+        f"Pot: **{pot:,}** coins\n"
+        f"Status: {status}\n\n"
+        f"**Players ({len(players)}):**\n{player_list}\n\n"
+        f"_Click Join to enter. Host clicks Start when ready._"
+    )
+
+
+async def _run_shootout(interaction: discord.Interaction, lobby: dict, buy_in: int):
+    channel = interaction.channel
+    players = list(lobby["players"])
+    pot = len(players) * buy_in
+
+    # Wait briefly so people can read the lobby
+    await asyncio.sleep(2.0)
+
+    round_num = 1
+    while len(players) > 1:
+        # Set up round: 4 doors, only N-1 are safe (to guarantee elimination)
+        safe_doors = list(range(1, 5))
+        random.shuffle(safe_doors)
+        # One specific door is the death door
+        death_door = random.randint(1, 4)
+        safe_doors = [d for d in [1, 2, 3, 4] if d != death_door]
+
+        # Show prompt
+        round_msg = await channel.send(
+            f"# 🚪 ROUND {round_num} 🚪\n\n"
+            f"**Players alive:** {', '.join(f'<@{p}>' for p in players)}\n\n"
+            f"Pick a door using the buttons below. **One door is rigged.**\n"
+            f"You have **15 seconds** to pick.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+        # Create button view with 4 doors
+        view = ShootoutDoorView(players)
+        await round_msg.edit(view=view)
+
+        # Wait for picks
+        await asyncio.sleep(15)
+        view.disable_all()
+        try:
+            await round_msg.edit(view=view)
+        except Exception:
+            pass
+
+        # Resolve
+        picks = view.picks  # {user_id: door}
+        # Auto-pick random door for anyone who didn't choose
+        for p in players:
+            if p not in picks:
+                picks[p] = random.choice([1, 2, 3, 4])
+
+        # Eliminate everyone who picked the death door
+        eliminated = [p for p in players if picks[p] == death_door]
+        if not eliminated:
+            # No one died — pick one random unlucky soul
+            unlucky = random.choice(players)
+            eliminated = [unlucky]
+
+        survivors = [p for p in players if p not in eliminated]
+
+        # Build round result
+        pick_lines = "\n".join(
+            f"<@{p}> → Door {picks[p]} {'💀' if p in eliminated else '✅'}"
+            for p in players
+        )
+        await channel.send(
+            f"# 💥 ROUND {round_num} RESULT\n\n"
+            f"The death door was **Door {death_door}**.\n\n"
+            f"{pick_lines}\n\n"
+            f"**Eliminated:** {', '.join(f'<@{e}>' for e in eliminated)}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await asyncio.sleep(3)
+
+        for p in eliminated:
+            economy.record_loss(p)
+
+        players = survivors
+        round_num += 1
+
+        if len(players) == 1:
+            break
+
+    # Winner
+    winner = players[0]
+    economy.add(winner, pot, "shootout win")
+    economy.record_win(winner)
+    new_bal = economy.balance(winner)
+    await channel.send(
+        f"# 🏆 SHOOTOUT CHAMPION 🏆\n\n"
+        f"<@{winner}> survived and takes the **{pot:,}** coin pot!\n"
+        f"Balance: **{new_bal:,}**",
+        allowed_mentions=discord.AllowedMentions(users=[interaction.guild.get_member(winner)] if interaction.guild else False),
+    )
+    SHOOTOUT_LOBBY.pop(lobby.get("channel_id", ""), None)
+
+
+class ShootoutDoorView(discord.ui.View):
+    def __init__(self, players: list):
+        super().__init__(timeout=15)
+        self.players = players
+        self.picks: dict[int, int] = {}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in self.players:
+            await interaction.response.send_message("You're not in this game.", ephemeral=True)
+            return False
+        if interaction.user.id in self.picks:
+            await interaction.response.send_message("You already picked.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction: discord.Interaction, door: int):
+        self.picks[interaction.user.id] = door
+        await interaction.response.send_message(
+            f"🚪 You picked Door **{door}**. Locked in.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Door 1", style=discord.ButtonStyle.primary, emoji="🚪")
+    async def d1(self, interaction, _b): await self._pick(interaction, 1)
+
+    @discord.ui.button(label="Door 2", style=discord.ButtonStyle.primary, emoji="🚪")
+    async def d2(self, interaction, _b): await self._pick(interaction, 2)
+
+    @discord.ui.button(label="Door 3", style=discord.ButtonStyle.primary, emoji="🚪")
+    async def d3(self, interaction, _b): await self._pick(interaction, 3)
+
+    @discord.ui.button(label="Door 4", style=discord.ButtonStyle.primary, emoji="🚪")
+    async def d4(self, interaction, _b): await self._pick(interaction, 4)
+
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+
+@tree.command(name="shootout", description="Host a hostage shootout. Players pick doors. Last alive wins the pot.")
+@discord.app_commands.describe(buy_in="How many coins each player puts into the pot")
+async def shootout_command(interaction: discord.Interaction, buy_in: int = 200):
+    if buy_in <= 0:
+        await interaction.response.send_message("Buy-in must be positive.", ephemeral=True)
+        return
+    channel_id = str(interaction.channel_id)
+    if channel_id in SHOOTOUT_LOBBY:
+        await interaction.response.send_message("A shootout is already running here.", ephemeral=True)
+        return
+    if economy.balance(interaction.user.id) < buy_in:
+        await interaction.response.send_message(
+            f"❌ Need **{buy_in:,}** coins to host.", ephemeral=True
+        )
+        return
+
+    economy.add(interaction.user.id, -buy_in, "shootout host buy-in")
+    lobby = {
+        "host_id": interaction.user.id,
+        "channel_id": channel_id,
+        "players": [interaction.user.id],
+        "started": False,
+    }
+    SHOOTOUT_LOBBY[channel_id] = lobby
+
+    view = ShootoutLobbyView(channel_id, buy_in)
+    await interaction.response.send_message(content=_lobby_text(lobby, buy_in), view=view)
+
+
+# ── 💣 /bomb — hot potato ────────────────────────────────────────────────────
+ACTIVE_BOMBS: dict[str, dict] = {}  # channel_id -> bomb state
+
+
+class BombPassModal(discord.ui.Modal, title="💣 Pass the Bomb"):
+    target = discord.ui.TextInput(
+        label="Tag user to pass to (paste their @mention)",
+        placeholder="@username",
+        required=True,
+        max_length=100,
+    )
+
+    def __init__(self, channel_id: str, holder_id: int):
+        super().__init__()
+        self.channel_id = channel_id
+        self.holder_id = holder_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        bomb = ACTIVE_BOMBS.get(self.channel_id)
+        if not bomb or bomb.get("exploded"):
+            await interaction.response.send_message("Bomb is gone.", ephemeral=True)
+            return
+        if bomb["holder_id"] != interaction.user.id:
+            await interaction.response.send_message("You don't have the bomb!", ephemeral=True)
+            return
+
+        # Parse target mention
+        m = re.match(r"<@!?(\d+)>", str(self.target).strip())
+        target_id = None
+        if m:
+            target_id = int(m.group(1))
+        else:
+            # Try by name
+            name = str(self.target).strip().lstrip("@").lower()
+            if interaction.guild:
+                for member in interaction.guild.members:
+                    if name in (member.display_name.lower(), member.name.lower()):
+                        target_id = member.id
+                        break
+        if not target_id:
+            await interaction.response.send_message("❌ Couldn't find that user.", ephemeral=True)
+            return
+        if target_id == interaction.user.id:
+            await interaction.response.send_message("Can't pass to yourself.", ephemeral=True)
+            return
+        target = interaction.guild.get_member(target_id) if interaction.guild else None
+        if not target or target.bot:
+            await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+            return
+
+        bomb["holder_id"] = target_id
+        bomb["passes"] = bomb.get("passes", 0) + 1
+        await interaction.response.send_message(
+            f"💣 {interaction.user.mention} passed the bomb to {target.mention}!\n"
+            f"⏰ Time remaining: ~**{int(bomb['expires_at'] - time.time())}s**\n"
+            f"_Pass it before it explodes!_",
+            allowed_mentions=discord.AllowedMentions(users=[target]),
+        )
+
+
+class BombHoldView(discord.ui.View):
+    def __init__(self, channel_id: str):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="Pass the Bomb 💣", style=discord.ButtonStyle.danger, emoji="🔥")
+    async def pass_btn(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        bomb = ACTIVE_BOMBS.get(self.channel_id)
+        if not bomb or bomb.get("exploded"):
+            await interaction.response.send_message("Bomb is gone.", ephemeral=True)
+            return
+        if interaction.user.id != bomb["holder_id"]:
+            await interaction.response.send_message(
+                f"You don't have the bomb! <@{bomb['holder_id']}> does.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await interaction.response.send_modal(BombPassModal(self.channel_id, interaction.user.id))
+
+
+@tree.command(name="bomb", description="Hot potato. Pass the bomb to a user. Whoever holds it when it explodes loses coins.")
+@discord.app_commands.describe(target="Who you're throwing the bomb to first", stakes="Coins the loser pays (default 500)")
+async def bomb_command(interaction: discord.Interaction, target: discord.Member, stakes: int = 500):
+    channel_id = str(interaction.channel_id)
+    if channel_id in ACTIVE_BOMBS and not ACTIVE_BOMBS[channel_id].get("exploded"):
+        await interaction.response.send_message("A bomb is already in play here.", ephemeral=True)
+        return
+    if target.id == interaction.user.id:
+        await interaction.response.send_message("Can't bomb yourself.", ephemeral=True)
+        return
+    if target.bot:
+        await interaction.response.send_message("Bots don't play.", ephemeral=True)
+        return
+    if stakes < 50:
+        await interaction.response.send_message("Stakes too low (min 50).", ephemeral=True)
+        return
+
+    # Random fuse 30-90 seconds
+    fuse = random.randint(30, 90)
+    expires_at = time.time() + fuse
+
+    ACTIVE_BOMBS[channel_id] = {
+        "holder_id": target.id,
+        "stakes": stakes,
+        "expires_at": expires_at,
+        "exploded": False,
+        "passes": 0,
+    }
+
+    view = BombHoldView(channel_id)
+    await interaction.response.send_message(
+        f"# 💣 LIVE BOMB! 💣\n\n"
+        f"{interaction.user.mention} threw a bomb at {target.mention}!\n"
+        f"⏰ Fuse: **{fuse} seconds**\n"
+        f"💸 Stakes: **{stakes:,}** coins\n\n"
+        f"_{target.mention}, click the button to pass it before it blows!_",
+        view=view,
+        allowed_mentions=discord.AllowedMentions(users=[target]),
+    )
+
+    # Schedule explosion
+    asyncio.create_task(_bomb_explode(interaction, channel_id, fuse))
+
+
+async def _bomb_explode(interaction: discord.Interaction, channel_id: str, fuse: int):
+    await asyncio.sleep(fuse)
+    bomb = ACTIVE_BOMBS.get(channel_id)
+    if not bomb or bomb.get("exploded"):
+        return
+    bomb["exploded"] = True
+
+    holder_id = bomb["holder_id"]
+    stakes = bomb["stakes"]
+    actual_loss = min(stakes, economy.balance(holder_id))
+    economy.add(holder_id, -actual_loss, "bomb explosion")
+    economy.record_loss(holder_id)
+    new_bal = economy.balance(holder_id)
+
+    channel = interaction.channel
+    await channel.send(
+        f"# 💥💥💥 **BOOM** 💥💥💥\n\n"
+        f"<@{holder_id}> was holding the bomb when it exploded!\n"
+        f"💸 Lost **{actual_loss:,}** coins.\n"
+        f"📊 Bomb was passed **{bomb['passes']}** times.\n"
+        f"Balance: **{new_bal:,}**",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    ACTIVE_BOMBS.pop(channel_id, None)
+
+
+# ── 🟡 /connect4 ─────────────────────────────────────────────────────────────
+ACTIVE_C4: dict[str, dict] = {}  # channel_id -> game state
+
+C4_ROWS, C4_COLS = 6, 7
+EMPTY = "⚪"
+P1_PIECE = "🔴"
+P2_PIECE = "🟡"
+
+
+def _new_c4_board():
+    return [[EMPTY] * C4_COLS for _ in range(C4_ROWS)]
+
+
+def _render_c4(board, p1_id, p2_id, current_id, status="", last_col=None):
+    cols = " ".join(["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣"])
+    rows_str = "\n".join(" ".join(row) for row in board)
+    turn_indicator = f"<@{current_id}>'s turn" if current_id else ""
+    header = f"## 🟡 CONNECT 4\n<@{p1_id}> {P1_PIECE} vs {P2_PIECE} <@{p2_id}>\n\n"
+    if status:
+        return header + status + "\n\n" + rows_str + "\n" + cols
+    return header + turn_indicator + "\n\n" + rows_str + "\n" + cols
+
+
+def _drop_piece(board, col, piece) -> int:
+    """Drop piece in column. Returns row index or -1 if column full."""
+    for r in range(C4_ROWS - 1, -1, -1):
+        if board[r][col] == EMPTY:
+            board[r][col] = piece
+            return r
+    return -1
+
+
+def _check_win(board, piece) -> bool:
+    # Horizontal
+    for r in range(C4_ROWS):
+        for c in range(C4_COLS - 3):
+            if all(board[r][c+i] == piece for i in range(4)):
+                return True
+    # Vertical
+    for r in range(C4_ROWS - 3):
+        for c in range(C4_COLS):
+            if all(board[r+i][c] == piece for i in range(4)):
+                return True
+    # Diagonal /
+    for r in range(3, C4_ROWS):
+        for c in range(C4_COLS - 3):
+            if all(board[r-i][c+i] == piece for i in range(4)):
+                return True
+    # Diagonal \
+    for r in range(C4_ROWS - 3):
+        for c in range(C4_COLS - 3):
+            if all(board[r+i][c+i] == piece for i in range(4)):
+                return True
+    return False
+
+
+def _board_full(board) -> bool:
+    return all(board[0][c] != EMPTY for c in range(C4_COLS))
+
+
+class C4View(discord.ui.View):
+    def __init__(self, channel_id: str):
+        super().__init__(timeout=300)
+        self.channel_id = channel_id
+        # Add 7 column buttons
+        for col in range(C4_COLS):
+            label = str(col + 1)
+            btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"c4_col_{col}")
+            btn.callback = self._make_callback(col)
+            self.add_item(btn)
+
+    def _make_callback(self, col: int):
+        async def cb(interaction: discord.Interaction):
+            await self._handle_drop(interaction, col)
+        return cb
+
+    async def _handle_drop(self, interaction: discord.Interaction, col: int):
+        game = ACTIVE_C4.get(self.channel_id)
+        if not game or game.get("ended"):
+            await interaction.response.send_message("Game over.", ephemeral=True)
+            return
+        if interaction.user.id != game["current_id"]:
+            await interaction.response.send_message("Not your turn.", ephemeral=True)
+            return
+
+        row = _drop_piece(game["board"], col, game["current_piece"])
+        if row == -1:
+            await interaction.response.send_message("Column is full.", ephemeral=True)
+            return
+
+        # Check win
+        if _check_win(game["board"], game["current_piece"]):
+            game["ended"] = True
+            winner_id = game["current_id"]
+            loser_id = game["p2_id"] if winner_id == game["p1_id"] else game["p1_id"]
+            economy.add(winner_id, game["pot"], "connect4 win")
+            economy.record_win(winner_id)
+            economy.record_loss(loser_id)
+            new_bal = economy.balance(winner_id)
+            for child in self.children:
+                child.disabled = True
+            status = f"## 🏆 <@{winner_id}> WINS! Took **{game['pot']:,}** coins.\nBalance: **{new_bal:,}**"
+            await interaction.response.edit_message(
+                content=_render_c4(game["board"], game["p1_id"], game["p2_id"], None, status=status),
+                view=self,
+                allowed_mentions=discord.AllowedMentions(users=[interaction.guild.get_member(winner_id)] if interaction.guild else False),
+            )
+            ACTIVE_C4.pop(self.channel_id, None)
+            return
+
+        # Check tie
+        if _board_full(game["board"]):
+            game["ended"] = True
+            # Refund both players half the pot
+            refund = game["pot"] // 2
+            economy.add(game["p1_id"], refund, "connect4 tie")
+            economy.add(game["p2_id"], refund, "connect4 tie")
+            for child in self.children:
+                child.disabled = True
+            status = f"## 🤝 TIE! Pot refunded ({refund:,} each)."
+            await interaction.response.edit_message(
+                content=_render_c4(game["board"], game["p1_id"], game["p2_id"], None, status=status),
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            ACTIVE_C4.pop(self.channel_id, None)
+            return
+
+        # Switch turns
+        if game["current_id"] == game["p1_id"]:
+            game["current_id"] = game["p2_id"]
+            game["current_piece"] = P2_PIECE
+        else:
+            game["current_id"] = game["p1_id"]
+            game["current_piece"] = P1_PIECE
+
+        await interaction.response.edit_message(
+            content=_render_c4(game["board"], game["p1_id"], game["p2_id"], game["current_id"]),
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+@tree.command(name="connect4", description="Challenge a user to Connect 4. Winner takes the pot.")
+@discord.app_commands.describe(opponent="Who to challenge", wager="Coins each player wagers (default 200)")
+async def connect4_command(interaction: discord.Interaction, opponent: discord.Member, wager: int = 200):
+    challenger = interaction.user
+    if opponent.id == challenger.id:
+        await interaction.response.send_message("Can't challenge yourself.", ephemeral=True)
+        return
+    if opponent.bot:
+        await interaction.response.send_message("Bots don't play.", ephemeral=True)
+        return
+    if wager <= 0:
+        await interaction.response.send_message("Wager must be positive.", ephemeral=True)
+        return
+    channel_id = str(interaction.channel_id)
+    if channel_id in ACTIVE_C4:
+        await interaction.response.send_message("A Connect 4 game is already in this channel.", ephemeral=True)
+        return
+    if economy.balance(challenger.id) < wager or economy.balance(opponent.id) < wager:
+        await interaction.response.send_message(
+            f"❌ Both players need **{wager:,}** coins.", ephemeral=True
+        )
+        return
+
+    # Take wagers
+    economy.add(challenger.id, -wager, "connect4 wager")
+    economy.add(opponent.id, -wager, "connect4 wager")
+    pot = wager * 2
+
+    board = _new_c4_board()
+    ACTIVE_C4[channel_id] = {
+        "p1_id": challenger.id,
+        "p2_id": opponent.id,
+        "board": board,
+        "current_id": challenger.id,
+        "current_piece": P1_PIECE,
+        "pot": pot,
+        "ended": False,
+    }
+
+    view = C4View(channel_id)
+    await interaction.response.send_message(
+        content=_render_c4(board, challenger.id, opponent.id, challenger.id),
+        view=view,
+        allowed_mentions=discord.AllowedMentions(users=[opponent]),
+    )
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -4235,6 +4995,10 @@ async def commands_command(interaction: discord.Interaction):
     embed.add_field(
         name="🎲 GAMES (earn coins)",
         value=(
+            "`/quest` AI choose-your-adventure\n"
+            "`/shootout` Door elimination\n"
+            "`/bomb` Hot potato\n"
+            "`/connect4` Connect 4 PvP\n"
             "`/blackjack` Beat the dealer\n"
             "`/casino` Casino menu\n"
             "`/wheel` Wheel of fortune\n"
