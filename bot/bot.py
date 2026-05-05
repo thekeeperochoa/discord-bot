@@ -1567,42 +1567,6 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
     await msg.edit(content=final)
 
 
-# ── Helper: gather a user's recent messages from channel + logs ──────────────
-async def gather_user_messages(interaction: discord.Interaction, user: discord.Member, limit: int = 80) -> list[str]:
-    user_messages: list[str] = []
-    try:
-        async for m in interaction.channel.history(limit=1000):
-            if m.author.id == user.id and m.content and m.content.strip():
-                user_messages.append(m.content.strip())
-                if len(user_messages) >= 50:
-                    break
-    except Exception as e:
-        log.warning("Channel history fetch failed: %s", e)
-
-    today = datetime.now(timezone.utc)
-    target_name = user.display_name
-    seen = set(user_messages)
-    for days_back in range(7):
-        date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
-            try:
-                with open(log_file) as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line)
-                            if entry.get("author") == target_name:
-                                content = entry.get("content", "").strip()
-                                if content and content not in seen:
-                                    seen.add(content)
-                                    user_messages.append(content)
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-
-    return user_messages[:limit]
-
-
 # ── 🔫 /duel ─────────────────────────────────────────────────────────────────
 @tree.command(name="duel", description="Pistol duel between two users at dawn.")
 @discord.app_commands.describe(opponent="Who do you challenge?")
