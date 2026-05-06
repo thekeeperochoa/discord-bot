@@ -5358,6 +5358,270 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
     ACTIVE_FIGHTS.pop(channel_id, None)
 
 
+# ── 🔮 /tarot — animated tarot reading ───────────────────────────────────────
+TAROT_DECK = [
+    "The Fool", "The Magician", "The High Priestess", "The Empress",
+    "The Emperor", "The Hierophant", "The Lovers", "The Chariot",
+    "Strength", "The Hermit", "Wheel of Fortune", "Justice",
+    "The Hanged Man", "Death", "Temperance", "The Devil",
+    "The Tower", "The Star", "The Moon", "The Sun",
+    "Judgement", "The World",
+]
+
+
+@tree.command(name="tarot", description="Get an AI-interpreted 3-card tarot reading based on your chat history.")
+async def tarot_command(interaction: discord.Interaction):
+    cfg = load_config()
+    user = interaction.user
+    silent = discord.AllowedMentions.none()
+
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Pick 3 unique cards
+    cards = random.sample(TAROT_DECK, 3)
+    reversed_flags = [random.choice([True, False]) for _ in range(3)]
+    positions = ["PAST", "PRESENT", "FUTURE"]
+
+    # Animation: shuffle deck
+    await edit(f"🔮 *{user.mention} sits at the table...*")
+    await asyncio.sleep(1.0)
+    await edit("🔮 *the cards are shuffled...*\n\n🂠 🂠 🂠 🂠 🂠 🂠 🂠 🂠 🂠")
+    await asyncio.sleep(1.2)
+    await edit("🔮 *three cards are drawn from the deck...*\n\n🂠 🂠 🂠")
+    await asyncio.sleep(1.3)
+
+    # Reveal each card slowly
+    revealed = ["🂠", "🂠", "🂠"]
+    for i, (pos, card, rev) in enumerate(zip(positions, cards, reversed_flags)):
+        await edit(
+            f"🔮 *flipping the **{pos}** card...*\n\n"
+            + " ".join(revealed)
+        )
+        await asyncio.sleep(1.1)
+        # Render the card (rev marker if reversed)
+        marker = "🔄" if rev else "🃏"
+        revealed[i] = marker
+        await edit(
+            f"🔮 **{pos}: {card}** {'(reversed)' if rev else ''}\n\n"
+            + " ".join(revealed) + "\n"
+            + " ".join(["PAST    ", "PRESENT", "FUTURE  "])
+        )
+        await asyncio.sleep(1.5)
+
+    # Gather context for AI interpretation (from this user's recent messages)
+    user_messages: list[str] = []
+    try:
+        async for m in interaction.channel.history(limit=500):
+            if m.author.id == user.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= 30:
+                    break
+    except Exception:
+        pass
+    history_blob = "\n".join(f"- {m}" for m in user_messages) if user_messages else "(this person doesn't post much)"
+
+    # AI interpretation
+    cards_summary = "\n".join(
+        f"{pos}: {card}{' (reversed)' if rev else ''}"
+        for pos, card, rev in zip(positions, cards, reversed_flags)
+    )
+
+    sys = (
+        cfg["system_prompt"] +
+        "\n\n=== TAROT READER MODE ===\n"
+        f"You are reading tarot for {user.display_name}. The 3 cards drawn:\n"
+        f"{cards_summary}\n\n"
+        "Write a short interpretation: 1 sentence per card (PAST, PRESENT, FUTURE), "
+        "weaving in things from their actual chat history when relevant. "
+        "End with 1 sentence of overall guidance. "
+        "Stay completely in character. Be mystical but cutting. "
+        "Format strictly:\n"
+        "**PAST:** [interpretation]\n"
+        "**PRESENT:** [interpretation]\n"
+        "**FUTURE:** [interpretation]\n\n"
+        "**THE READING:** [closing line]"
+    )
+
+    await edit(f"🔮 *the reader interprets the cards...*\n\n{cards_summary}")
+    await asyncio.sleep(1.0)
+
+    try:
+        reading = await ask_ai(
+            sys,
+            [{"role": "user", "content": f"Recent messages from {user.display_name}:\n\n{history_blob}\n\nRead the cards."}],
+            {**cfg, "max_tokens": 400},
+        )
+    except Exception:
+        reading = ""
+    if reading.startswith("⚠️") or not reading.strip():
+        reading = (
+            f"**PAST:** Your past holds shadows you'd rather forget.\n"
+            f"**PRESENT:** You stand at a crossroads of bad decisions.\n"
+            f"**FUTURE:** The path ahead bends toward chaos.\n\n"
+            f"**THE READING:** Trust nothing, especially yourself."
+        )
+
+    final = (
+        f"# 🔮 TAROT READING — {user.display_name}\n\n"
+        f"```\n  PAST       PRESENT     FUTURE\n  {cards[0][:9]:<11}{cards[1][:9]:<12}{cards[2][:9]:<10}\n```\n"
+        f"{reading}"
+    )
+    await edit(final)
+
+
+# ── ⚖️ /lawsuit — sue a user, AI judges, real damages ───────────────────────
+LAWSUIT_FILING_FEE = 200
+
+
+@tree.command(name="lawsuit", description="Sue another user. AI judge awards (or denies) damages.")
+@discord.app_commands.describe(
+    defendant="Who you're suing",
+    claim="What they did to you",
+)
+async def lawsuit_command(interaction: discord.Interaction, defendant: discord.Member, claim: str):
+    cfg = load_config()
+    silent = discord.AllowedMentions.none()
+    plaintiff = interaction.user
+
+    if defendant.id == plaintiff.id:
+        await interaction.response.send_message("You can't sue yourself.", ephemeral=True)
+        return
+    if defendant.bot:
+        await interaction.response.send_message("You can't sue a bot.", ephemeral=True)
+        return
+    if str(defendant.id) in cfg.get("respected_users", []):
+        await interaction.response.send_message(
+            f"❌ {defendant.mention} is the boss. They're above the law.",
+            ephemeral=True, allowed_mentions=silent,
+        )
+        return
+
+    bal = economy.balance(plaintiff.id)
+    if bal < LAWSUIT_FILING_FEE:
+        await interaction.response.send_message(
+            f"❌ Filing fee is **{LAWSUIT_FILING_FEE:,}** coins. You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(plaintiff.id, -LAWSUIT_FILING_FEE, "lawsuit filing fee")
+    await interaction.response.defer()
+
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    # Animated court intro
+    await edit("⚖️ **CIVIL COURT IS NOW IN SESSION**")
+    await asyncio.sleep(1.5)
+    await edit(
+        f"⚖️ **CASE FILED**\n\n"
+        f"**Plaintiff:** {plaintiff.mention}\n"
+        f"**Defendant:** {defendant.mention}\n"
+        f"**Filing fee paid:** {LAWSUIT_FILING_FEE:,} coins\n\n"
+        f"📜 **Claim:** _{claim}_"
+    )
+    await asyncio.sleep(2.5)
+    await edit(f"⚖️ *The judge reviews the claim...*")
+    await asyncio.sleep(1.8)
+    await edit(f"⚖️ 🔨 *gavel raised...*")
+    await asyncio.sleep(1.3)
+
+    # AI judge
+    judge_system = (
+        cfg["system_prompt"] +
+        "\n\n=== CIVIL COURT JUDGE MODE ===\n"
+        f"You are a comedy judge ruling on a lawsuit between two users. "
+        f"Plaintiff {plaintiff.display_name} sued defendant {defendant.display_name} for: '{claim}'. "
+        "Deliver a 2-3 sentence ruling — be theatrical and absurd. "
+        "End with one of these EXACT formats on a new line:\n"
+        "AWARD: <number> coins\n"
+        "or\n"
+        "DISMISSED\n"
+        "or\n"
+        "COUNTERSUIT: <number> coins (this means the plaintiff has to pay the defendant)\n\n"
+        "Pick AWARD if the case has merit (use a number between 100 and 2000). "
+        "Pick DISMISSED if the lawsuit is frivolous. "
+        "Pick COUNTERSUIT (rare) if the plaintiff is clearly the bad guy. "
+        "Stay in character."
+    )
+    user_prompt = (
+        f"Plaintiff: {plaintiff.display_name}\n"
+        f"Defendant: {defendant.display_name}\n"
+        f"Claim: {claim}\n\n"
+        f"Deliver your ruling."
+    )
+
+    try:
+        ruling = await ask_ai(
+            judge_system,
+            [{"role": "user", "content": user_prompt}],
+            {**cfg, "max_tokens": 250},
+        )
+    except Exception:
+        ruling = ""
+    if ruling.startswith("⚠️") or not ruling.strip():
+        ruling = "Court is overworked. Case dismissed.\nDISMISSED"
+
+    # Parse the verdict
+    award_m = re.search(r"AWARD:\s*([\d,]+)", ruling, re.IGNORECASE)
+    countersuit_m = re.search(r"COUNTERSUIT:\s*([\d,]+)", ruling, re.IGNORECASE)
+    dismissed = bool(re.search(r"\bDISMISSED\b", ruling, re.IGNORECASE))
+
+    # Strip the verdict line(s) from displayed ruling text
+    display_ruling = re.sub(r"(AWARD:.*|DISMISSED|COUNTERSUIT:.*)", "", ruling, flags=re.IGNORECASE).strip()
+
+    if countersuit_m:
+        amount = int(countersuit_m.group(1).replace(",", ""))
+        amount = max(50, min(amount, 5000))  # sanity bounds
+        actual = min(amount, economy.balance(plaintiff.id))
+        economy.add(plaintiff.id, -actual, "lawsuit countersuit")
+        economy.add(defendant.id, actual, "lawsuit countersuit award")
+        verdict_line = (
+            f"# 💀 COUNTERSUIT GRANTED\n"
+            f"{plaintiff.mention} pays {defendant.mention} **{actual:,}** coins for filing a frivolous lawsuit."
+        )
+    elif award_m:
+        amount = int(award_m.group(1).replace(",", ""))
+        amount = max(100, min(amount, 5000))  # sanity bounds
+        actual = min(amount, economy.balance(defendant.id))
+        economy.add(defendant.id, -actual, "lawsuit damages")
+        economy.add(plaintiff.id, actual, "lawsuit award")
+        verdict_line = (
+            f"# 🏆 PLAINTIFF WINS\n"
+            f"{defendant.mention} owes {plaintiff.mention} **{actual:,}** coins in damages."
+        )
+    else:
+        # Dismissed (default)
+        verdict_line = (
+            f"# 🪦 CASE DISMISSED\n"
+            f"{plaintiff.mention} loses the **{LAWSUIT_FILING_FEE:,}** coin filing fee. "
+            f"{defendant.mention} walks free."
+        )
+
+    final = (
+        f"⚖️ **🔨 GAVEL DROPS** 🔨\n\n"
+        f"**Case:** _{claim}_\n"
+        f"**Plaintiff:** {plaintiff.mention} | **Defendant:** {defendant.mention}\n\n"
+        f"**JUDGE'S RULING:**\n> {display_ruling}\n\n"
+        f"{verdict_line}"
+    )
+    if len(final) > 2000:
+        final = final[:1990] + "..."
+    try:
+        await interaction.edit_original_response(content=final)
+    except Exception:
+        pass
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -5413,7 +5677,9 @@ async def commands_command(interaction: discord.Interaction):
         value=(
             "`/roast` Personalized roast\n"
             "`/court` AI courtroom trial\n"
+            "`/lawsuit` Sue another user\n"
             "`/bio` AI Tinder bio\n"
+            "`/tarot` 3-card tarot reading\n"
             "`/analyze` Analyze your messages"
         ),
         inline=True
@@ -5613,6 +5879,9 @@ PREFIX_COMMANDS = {
     "roast":        ("roast",         [{"name":"user","type":"user","required":True}]),
     "bio":          ("bio",           [{"name":"user","type":"user","required":True}]),
     "court":        ("court",         [{"name":"defendant","type":"user","required":True},{"name":"charge","type":"rest_str","required":True}]),
+    "lawsuit":      ("lawsuit",       [{"name":"defendant","type":"user","required":True},{"name":"claim","type":"rest_str","required":True}]),
+    "sue":          ("lawsuit",       [{"name":"defendant","type":"user","required":True},{"name":"claim","type":"rest_str","required":True}]),
+    "tarot":        ("tarot",         []),
     "analyze":      ("analyze",       []),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
