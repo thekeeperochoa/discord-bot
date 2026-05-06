@@ -5458,6 +5458,273 @@ async def on_ready():
     client.loop.create_task(lottery_drawing_scheduler())
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🪄 _prefix command router
+# Allows users to invoke slash commands via "_command args" in chat.
+# Supports user mentions, plain numbers, and quoted strings.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeNamespace:
+    """Mimics Discord's interaction namespace for slash command params."""
+    pass
+
+
+class _PrefixInteraction:
+    """A minimal interaction wrapper for messages so slash command handlers
+    can use the same code path. NOT a real Discord interaction — only the
+    methods/attributes the existing slash commands actually use are stubbed."""
+    def __init__(self, message: discord.Message):
+        self._message = message
+        self.user = message.author
+        self.channel = message.channel
+        self.guild = message.guild
+        self.channel_id = message.channel.id
+        self.guild_id = message.guild.id if message.guild else None
+        self._original_response: discord.Message | None = None
+        self._deferred = False
+        self.response = self._Response(self)
+
+    class _Response:
+        def __init__(self, parent):
+            self._parent = parent
+            self._done = False
+
+        def is_done(self) -> bool:
+            return self._done
+
+        async def send_message(self, content=None, *, embed=None, embeds=None, view=None,
+                               ephemeral=False, allowed_mentions=None):
+            kwargs = {}
+            if content is not None: kwargs["content"] = content
+            if embed is not None: kwargs["embed"] = embed
+            if embeds is not None: kwargs["embeds"] = embeds
+            if view is not None: kwargs["view"] = view
+            if allowed_mentions is not None: kwargs["allowed_mentions"] = allowed_mentions
+            sent = await self._parent.channel.send(**kwargs)
+            self._parent._original_response = sent
+            self._done = True
+            return sent
+
+        async def defer(self, ephemeral=False):
+            self._done = True
+            self._parent._deferred = True
+
+        async def send_modal(self, modal):
+            # Modals can't be sent without a real interaction; reply with a notice
+            await self._parent.channel.send(
+                f"⚠️ This command needs an interactive form. Use `/{modal.title}` instead."
+            )
+            self._done = True
+
+    async def edit_original_response(self, **kwargs):
+        if self._original_response:
+            return await self._original_response.edit(**kwargs)
+        # If we deferred but never sent, send a fresh message now
+        sent = await self.channel.send(**{k: v for k, v in kwargs.items() if v is not None})
+        self._original_response = sent
+        return sent
+
+    async def original_response(self):
+        return self._original_response
+
+    @property
+    def followup(self):
+        return self._Followup(self)
+
+    class _Followup:
+        def __init__(self, parent):
+            self._parent = parent
+
+        async def send(self, content=None, *, embed=None, embeds=None, view=None,
+                       ephemeral=False, allowed_mentions=None, wait=False):
+            kwargs = {}
+            if content is not None: kwargs["content"] = content
+            if embed is not None: kwargs["embed"] = embed
+            if embeds is not None: kwargs["embeds"] = embeds
+            if view is not None: kwargs["view"] = view
+            if allowed_mentions is not None: kwargs["allowed_mentions"] = allowed_mentions
+            return await self._parent.channel.send(**kwargs)
+
+
+def _parse_prefix_args(text: str, message: discord.Message) -> list:
+    """Split text into argument tokens. Resolves user mentions, integers, and strings."""
+    # First handle quoted segments
+    tokens = []
+    pattern = re.compile(r'"([^"]+)"|(\S+)')
+    for m in pattern.finditer(text):
+        tokens.append(m.group(1) if m.group(1) is not None else m.group(2))
+    return tokens
+
+
+def _resolve_member(token: str, message: discord.Message) -> discord.Member | None:
+    """Try to convert a token to a Discord Member."""
+    if not message.guild:
+        return None
+    # Mention format
+    m = re.match(r"<@!?(\d+)>", token)
+    if m:
+        return message.guild.get_member(int(m.group(1)))
+    # Bare ID
+    if token.isdigit():
+        return message.guild.get_member(int(token))
+    # Display name / username (case-insensitive contains)
+    lower = token.lstrip("@").lower()
+    for member in message.guild.members:
+        if lower in (member.display_name.lower(), member.name.lower()):
+            return member
+    return None
+
+
+# Map prefix command names to (slash_command_name, [param_specs])
+# param_specs = list of dicts: {"name": str, "type": "user"|"int"|"str"|"rest_str", "required": bool, "default": Any}
+PREFIX_COMMANDS = {
+    # Economy
+    "balance":      ("balance",       [{"name":"user","type":"user","required":False,"default":None}]),
+    "bal":          ("balance",       [{"name":"user","type":"user","required":False,"default":None}]),
+    "daily":        ("daily",         []),
+    "weekly":       ("weekly",        []),
+    "work":         ("work",          []),
+    "beg":          ("beg",           []),
+    "rob":          ("rob",           [{"name":"target","type":"user","required":True}]),
+    "pay":          ("pay",           [{"name":"user","type":"user","required":True},{"name":"amount","type":"int","required":True}]),
+    "leaderboard":  ("leaderboard",   []),
+    "lb":           ("leaderboard",   []),
+    "bet":          ("bet",           [{"name":"amount","type":"int","required":True}]),
+    # Games
+    "fight":        ("fight",         [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
+    "duel":         ("duel",          [{"name":"opponent","type":"user","required":True}]),
+    "blackjack":    ("blackjack",     [{"name":"bet","type":"int","required":True}]),
+    "bj":           ("blackjack",     [{"name":"bet","type":"int","required":True}]),
+    "slots":        ("slots",         [{"name":"bet","type":"int","required":False,"default":100}]),
+    "wheel":        ("wheel",         []),
+    "crime":        ("crime",         []),
+    "quest":        ("quest",         []),
+    "rs":           ("rs",            [{"name":"racer1","type":"user","required":False,"default":None},{"name":"racer2","type":"user","required":False,"default":None},{"name":"racer3","type":"user","required":False,"default":None}]),
+    "race":         ("rs",            [{"name":"racer1","type":"user","required":False,"default":None},{"name":"racer2","type":"user","required":False,"default":None},{"name":"racer3","type":"user","required":False,"default":None}]),
+    "casino":       ("casino",        []),
+    "shop":         ("shop",          []),
+    "shootout":     ("shootout",      [{"name":"buy_in","type":"int","required":False,"default":200}]),
+    "bomb":         ("bomb",          [{"name":"target","type":"user","required":True},{"name":"stakes","type":"int","required":False,"default":500}]),
+    "connect4":     ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
+    "c4":           ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
+    "gun":          ("gun",           [{"name":"player2","type":"user","required":True},{"name":"player3","type":"user","required":False,"default":None},{"name":"player4","type":"user","required":False,"default":None}]),
+    "heist":        ("heist",         [{"name":"crew1","type":"user","required":True},{"name":"crew2","type":"user","required":False,"default":None},{"name":"crew3","type":"user","required":False,"default":None},{"name":"crew4","type":"user","required":False,"default":None}]),
+    # AI
+    "roast":        ("roast",         [{"name":"user","type":"user","required":True}]),
+    "bio":          ("bio",           [{"name":"user","type":"user","required":True}]),
+    "court":        ("court",         [{"name":"defendant","type":"user","required":True},{"name":"charge","type":"rest_str","required":True}]),
+    "analyze":      ("analyze",       []),
+    "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
+    # Fun
+    "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
+    "rate":         ("rate",          [{"name":"thing","type":"rest_str","required":True}]),
+    "8ball":        ("8ball",         [{"name":"question","type":"rest_str","required":True}]),
+    "rps":          ("rps",           [{"name":"choice","type":"str","required":True}]),
+    "roll":         ("roll",          [{"name":"sides","type":"int","required":False,"default":100}]),
+    "flip":         ("flip",          []),
+    "marry":        ("marry",         [{"name":"user","type":"user","required":True}]),
+    "divorce":      ("divorce",       []),
+    # Shop & redeem
+    "protect":      ("protect",       []),
+    "lottery":      ("lottery",       [{"name":"tickets","type":"int","required":False,"default":0}]),
+    "megaphone":    ("megaphone",     [{"name":"message","type":"rest_str","required":True}]),
+    # Meta
+    "commands":     ("commands",      []),
+    "help":         ("commands",      []),
+}
+
+
+async def handle_prefix_command(message: discord.Message, body: str) -> bool:
+    """Parse and dispatch a `_command args` style command. Returns True if handled."""
+    # Split into command name + rest
+    parts = body.split(maxsplit=1)
+    cmd_name = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
+
+    spec = PREFIX_COMMANDS.get(cmd_name)
+    if not spec:
+        return False
+
+    slash_name, param_specs = spec
+
+    # Find the slash command in the tree
+    slash_cmd = tree.get_command(slash_name)
+    if slash_cmd is None:
+        await message.channel.send(f"⚠️ Internal error: `/{slash_name}` not registered.")
+        return True
+
+    # Parse arguments based on the spec
+    kwargs = {}
+    tokens = _parse_prefix_args(rest, message)
+    token_idx = 0
+
+    for ps in param_specs:
+        ptype = ps["type"]
+        if ptype == "rest_str":
+            # Consume all remaining tokens as one string
+            value = " ".join(tokens[token_idx:]).strip()
+            if not value and ps.get("required"):
+                await message.channel.send(f"❌ `{cmd_name}` needs a `{ps['name']}` argument.")
+                return True
+            kwargs[ps["name"]] = value
+            token_idx = len(tokens)
+            continue
+
+        if token_idx >= len(tokens):
+            if ps.get("required"):
+                await message.channel.send(
+                    f"❌ `{cmd_name}` is missing required arg `{ps['name']}`. Try `_{cmd_name} <{ps['name']}>`."
+                )
+                return True
+            kwargs[ps["name"]] = ps.get("default")
+            continue
+
+        tok = tokens[token_idx]
+        token_idx += 1
+
+        if ptype == "user":
+            member = _resolve_member(tok, message)
+            if not member:
+                if ps.get("required"):
+                    await message.channel.send(f"❌ Couldn't find user `{tok}` for `{cmd_name}`.")
+                    return True
+                kwargs[ps["name"]] = ps.get("default")
+            else:
+                kwargs[ps["name"]] = member
+        elif ptype == "int":
+            try:
+                kwargs[ps["name"]] = int(tok)
+            except ValueError:
+                await message.channel.send(f"❌ `{ps['name']}` must be a number for `{cmd_name}`.")
+                return True
+        elif ptype == "str":
+            kwargs[ps["name"]] = tok
+        else:
+            kwargs[ps["name"]] = tok
+
+    # Handle Choice-typed slash params (rps and buyrole use Choice)
+    if slash_name == "rps":
+        # rps takes a Choice; build one
+        choice_value = kwargs.get("choice", "").lower()
+        if choice_value not in ("rock", "paper", "scissors"):
+            await message.channel.send("❌ Pick rock, paper, or scissors.")
+            return True
+        kwargs["choice"] = discord.app_commands.Choice(name=choice_value, value=choice_value)
+
+    # Build a fake interaction and invoke the underlying callback
+    fake = _PrefixInteraction(message)
+    try:
+        # The callback is the underlying coroutine — call it directly
+        await slash_cmd.callback(fake, **kwargs)
+    except Exception as e:
+        log.exception("prefix command failed")
+        try:
+            await message.channel.send(f"⚠️ `{cmd_name}` errored: {e}")
+        except Exception:
+            pass
+    return True
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot and message.author != client.user:
@@ -5470,6 +5737,13 @@ async def on_message(message: discord.Message):
     memory.update_maxlen(cfg["max_memory_messages"])
     channel_id = str(message.channel.id)
     last_channel_activity[channel_id] = time.time()
+
+    # ── _prefix commands → invoke slash commands ─────────────────────────────
+    content_stripped = message.content.strip()
+    if content_stripped.startswith("_") and len(content_stripped) > 1:
+        handled = await handle_prefix_command(message, content_stripped[1:])
+        if handled:
+            return
 
     # Commands
     if message.content.strip() == "!clearhistory":
