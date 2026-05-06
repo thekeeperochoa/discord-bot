@@ -5622,6 +5622,263 @@ async def lawsuit_command(interaction: discord.Interaction, defendant: discord.M
         pass
 
 
+# ── 🤥 /lieordie — AI generates fact, users vote ────────────────────────────
+ACTIVE_LIEORDIE: dict[str, dict] = {}  # channel_id -> game state
+LIEORDIE_VOTING_WINDOW = 30  # seconds
+LIEORDIE_BET = 100           # coins per vote
+
+
+class LieOrDieView(discord.ui.View):
+    def __init__(self, channel_id: str, target_id: int):
+        super().__init__(timeout=LIEORDIE_VOTING_WINDOW)
+        self.channel_id = channel_id
+        self.target_id = target_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        game = ACTIVE_LIEORDIE.get(self.channel_id)
+        if not game or game.get("ended"):
+            await interaction.response.send_message("Voting is closed.", ephemeral=True)
+            return False
+        if interaction.user.id == self.target_id:
+            await interaction.response.send_message("You can't vote on a fact about yourself.", ephemeral=True)
+            return False
+        if interaction.user.id in game["votes"]:
+            await interaction.response.send_message("You already voted.", ephemeral=True)
+            return False
+        if economy.balance(interaction.user.id) < LIEORDIE_BET:
+            await interaction.response.send_message(
+                f"❌ You need at least **{LIEORDIE_BET}** coins to vote.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _vote(self, interaction: discord.Interaction, vote: str):
+        game = ACTIVE_LIEORDIE[self.channel_id]
+        # Take the bet upfront
+        economy.add(interaction.user.id, -LIEORDIE_BET, "lieordie vote")
+        game["votes"][interaction.user.id] = vote
+        true_count = sum(1 for v in game["votes"].values() if v == "true")
+        false_count = sum(1 for v in game["votes"].values() if v == "false")
+        await interaction.response.send_message(
+            f"🗳️ You voted **{vote.upper()}** ({LIEORDIE_BET} coins staked).\n"
+            f"Current count: ✅ TRUE: {true_count} | ❌ FALSE: {false_count}",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="TRUE", style=discord.ButtonStyle.success, emoji="✅")
+    async def true_btn(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._vote(interaction, "true")
+
+    @discord.ui.button(label="FALSE", style=discord.ButtonStyle.danger, emoji="❌")
+    async def false_btn(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._vote(interaction, "false")
+
+
+@tree.command(name="lieordie", description="AI generates a fact about a user. Vote TRUE or FALSE — winners take losers' coins.")
+@discord.app_commands.describe(target="Who is the fact about?")
+async def lieordie_command(interaction: discord.Interaction, target: discord.Member):
+    cfg = load_config()
+    if target.bot:
+        await interaction.response.send_message("Can't run this on a bot.", ephemeral=True)
+        return
+    channel_id = str(interaction.channel_id)
+    if channel_id in ACTIVE_LIEORDIE and not ACTIVE_LIEORDIE[channel_id].get("ended"):
+        await interaction.response.send_message("A round is already running here.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    silent = discord.AllowedMentions.none()
+
+    async def edit(content, view=None):
+        kwargs = {"content": content, "allowed_mentions": silent}
+        if view is not None:
+            kwargs["view"] = view
+        try:
+            await interaction.edit_original_response(**kwargs)
+        except Exception:
+            pass
+
+    # ── Gather the target's messages — pull a LOT to get good signal ─────────
+    await edit(f"🤥 *gathering intel on {target.mention}...*")
+
+    user_messages: list[str] = []
+    try:
+        # Scan up to 5000 messages of channel history to get up to 150 of theirs
+        async for m in interaction.channel.history(limit=5000):
+            if m.author.id == target.id and m.content and m.content.strip():
+                user_messages.append(m.content.strip())
+                if len(user_messages) >= 150:
+                    break
+    except Exception as e:
+        log.warning("lieordie history fetch failed: %s", e)
+
+    # Also pull from daily logs (last 7 days, all channels)
+    today = datetime.now(timezone.utc)
+    target_name = target.display_name
+    seen = set(user_messages)
+    for days_back in range(7):
+        date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        for log_file in RECAP_DIR.glob(f"*_{date_str}.jsonl"):
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("author") == target_name:
+                                content = entry.get("content", "").strip()
+                                if content and content not in seen:
+                                    seen.add(content)
+                                    user_messages.append(content)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+    if len(user_messages) < 10:
+        await edit(
+            f"❌ Not enough message history on {target.mention} to generate a fact. "
+            f"They need at least 10 messages."
+        )
+        return
+
+    # Cap to most recent 200 messages
+    user_messages = user_messages[:200]
+    transcript = "\n".join(f"- {m}" for m in user_messages)
+
+    await edit(f"🤥 *found {len(user_messages)} messages... fabricating a 'fact'...*")
+    await asyncio.sleep(1.0)
+
+    # ── AI generates a fact (truth or lie) about the user ────────────────────
+    is_true = random.choice([True, False])
+
+    if is_true:
+        sys = (
+            cfg["system_prompt"] +
+            "\n\n=== TRUTH MODE ===\n"
+            f"You are generating a TRUE 'fact' about {target.display_name} based on their actual messages. "
+            "Pick something specific they actually said, did, or revealed. Phrase it as a SINGLE statement "
+            "starting with their name (NOT 'I' — third person). "
+            "Make it sound like it COULD be a lie — interesting, weird, or surprising — but it must be "
+            "directly supported by their actual messages. Cite no quotes — just state the fact. "
+            "Output ONLY the fact, one sentence, max 25 words. No preamble."
+        )
+    else:
+        sys = (
+            cfg["system_prompt"] +
+            "\n\n=== LIE MODE ===\n"
+            f"You are generating a FAKE 'fact' about {target.display_name}. "
+            "Make it sound plausible — like something they MIGHT say or do based on their vibe — "
+            "but it must NOT be supported by their messages. Phrase it as a SINGLE statement "
+            "starting with their name (third person). Make it interesting, weird, or surprising. "
+            "Output ONLY the fact, one sentence, max 25 words. No preamble."
+        )
+
+    user_prompt = f"Recent messages from {target.display_name}:\n\n{transcript[:6000]}\n\nGenerate the fact."
+    try:
+        fact = await ask_ai(sys, [{"role": "user", "content": user_prompt}],
+                            {**cfg, "max_tokens": 100, "temperature": 0.95})
+    except Exception:
+        fact = ""
+    if fact.startswith("⚠️") or not fact.strip():
+        await edit("⚠️ AI failed to generate a fact. Try again.")
+        return
+    fact = fact.strip().strip('"').strip("'")
+
+    # ── Set up the game ──────────────────────────────────────────────────────
+    game = {
+        "channel_id": channel_id,
+        "target_id": target.id,
+        "fact": fact,
+        "is_true": is_true,
+        "votes": {},  # user_id -> "true"|"false"
+        "ended": False,
+        "expires_at": time.time() + LIEORDIE_VOTING_WINDOW,
+    }
+    ACTIVE_LIEORDIE[channel_id] = game
+
+    view = LieOrDieView(channel_id, target.id)
+    await edit(
+        (
+            f"# 🤥 LIE OR DIE 🤥\n\n"
+            f"**About:** {target.mention}\n"
+            f"**Buy-in:** {LIEORDIE_BET} coins per vote\n"
+            f"**Voting closes in {LIEORDIE_VOTING_WINDOW}s**\n\n"
+            f"## > {fact}\n\n"
+            f"_Click **TRUE** if you think it's real, **FALSE** if you think it's a lie. Winners split the losers' pot._"
+        ),
+        view=view,
+    )
+
+    # ── Run the round ────────────────────────────────────────────────────────
+    asyncio.create_task(_resolve_lieordie(interaction, channel_id))
+
+
+async def _resolve_lieordie(interaction: discord.Interaction, channel_id: str):
+    # Periodic count updates while voting is open
+    game = ACTIVE_LIEORDIE.get(channel_id)
+    if not game:
+        return
+
+    # Wait out the voting window
+    await asyncio.sleep(LIEORDIE_VOTING_WINDOW)
+
+    game = ACTIVE_LIEORDIE.get(channel_id)
+    if not game or game.get("ended"):
+        return
+    game["ended"] = True
+
+    votes = game["votes"]
+    truth = "true" if game["is_true"] else "false"
+
+    winners = [uid for uid, v in votes.items() if v == truth]
+    losers = [uid for uid, v in votes.items() if v != truth]
+
+    pot = len(losers) * LIEORDIE_BET
+    payout_lines = []
+
+    if winners and pot > 0:
+        share = pot // len(winners)
+        # Each winner: get their bet back + their share of the loser pool
+        for uid in winners:
+            economy.add(uid, LIEORDIE_BET + share, "lieordie win")
+            economy.record_win(uid)
+            payout_lines.append(f"✅ <@{uid}> won **{share + LIEORDIE_BET:,}** ({share:,} profit)")
+        for uid in losers:
+            economy.record_loss(uid)
+            payout_lines.append(f"❌ <@{uid}> lost **{LIEORDIE_BET}**")
+    elif winners and not losers:
+        # Everyone right — refund only
+        for uid in winners:
+            economy.add(uid, LIEORDIE_BET, "lieordie refund")
+            payout_lines.append(f"↩️ <@{uid}> bet refunded (no losers)")
+    elif not winners and losers:
+        # Everyone wrong — house keeps the coins
+        for uid in losers:
+            economy.record_loss(uid)
+            payout_lines.append(f"❌ <@{uid}> lost **{LIEORDIE_BET}** (no one was right)")
+
+    truth_label = "✅ **TRUE**" if game["is_true"] else "❌ **FALSE**"
+    summary = (
+        f"# 🤥 LIE OR DIE — RESULTS\n\n"
+        f"## > {game['fact']}\n\n"
+        f"### The truth: {truth_label}\n\n"
+    )
+    if payout_lines:
+        summary += "**Payouts:**\n" + "\n".join(payout_lines)
+    else:
+        summary += "_No one voted._"
+
+    if len(summary) > 2000:
+        summary = summary[:1990] + "..."
+
+    try:
+        await interaction.channel.send(summary, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+
+    ACTIVE_LIEORDIE.pop(channel_id, None)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -5655,6 +5912,7 @@ async def commands_command(interaction: discord.Interaction):
         name="🎲 GAMES (earn coins)",
         value=(
             "`/fight` Fight w/ spectator betting\n"
+            "`/lieordie` Vote True/False on AI fact\n"
             "`/quest` AI choose-your-adventure\n"
             "`/shootout` Door elimination\n"
             "`/bomb` Hot potato\n"
@@ -5858,6 +6116,8 @@ PREFIX_COMMANDS = {
     "bet":          ("bet",           [{"name":"amount","type":"int","required":True}]),
     # Games
     "fight":        ("fight",         [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
+    "lieordie":     ("lieordie",      [{"name":"target","type":"user","required":True}]),
+    "lod":          ("lieordie",      [{"name":"target","type":"user","required":True}]),
     "duel":         ("duel",          [{"name":"opponent","type":"user","required":True}]),
     "blackjack":    ("blackjack",     [{"name":"bet","type":"int","required":True}]),
     "bj":           ("blackjack",     [{"name":"bet","type":"int","required":True}]),
