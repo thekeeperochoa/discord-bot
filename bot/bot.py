@@ -720,6 +720,413 @@ async def trigger_event(user_id: int, event: str, channel=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 📊 XP / LEVELING SYSTEM
+# Users earn XP for chatting and using commands.
+# Levels unlock perks and confer prestige.
+# ─────────────────────────────────────────────────────────────────────────────
+
+XP_PER_MESSAGE = 5
+XP_PER_COMMAND = 15
+XP_MESSAGE_COOLDOWN = 60  # seconds — prevents spam farming
+
+# Track last message XP timestamp per user (in-memory, fine to lose on restart)
+_xp_last_message: dict[int, float] = {}
+
+
+def xp_for_level(level: int) -> int:
+    """Total XP needed to reach `level`. Quadratic curve."""
+    return 100 * level * level
+
+
+def level_for_xp(xp: int) -> int:
+    """What level a given total XP corresponds to."""
+    if xp < 100:
+        return 0
+    # Solve 100 * L^2 <= xp → L = sqrt(xp / 100)
+    import math
+    return int(math.sqrt(xp / 100))
+
+
+def _get_xp(user_id: int) -> int:
+    return economy._user(user_id).get("xp", 0)
+
+
+def add_xp(user_id: int, amount: int) -> tuple[int, int, bool]:
+    """Add XP. Returns (new_xp, new_level, leveled_up)."""
+    u = economy._user(user_id)
+    old_xp = u.get("xp", 0)
+    old_level = level_for_xp(old_xp)
+    new_xp = old_xp + amount
+    u["xp"] = new_xp
+    economy._save()
+    new_level = level_for_xp(new_xp)
+    return new_xp, new_level, new_level > old_level
+
+
+async def grant_xp(user_id: int, amount: int, channel=None):
+    """Grant XP and announce level-up if it happens."""
+    new_xp, new_level, leveled = add_xp(user_id, amount)
+    if leveled and channel:
+        # Award level-up bonus + apply level-based perks
+        bonus = 100 * new_level
+        economy.add(user_id, bonus, f"level {new_level}")
+        try:
+            embed = discord.Embed(
+                title="📊 LEVEL UP!",
+                description=f"<@{user_id}> reached **Level {new_level}**!",
+                color=discord.Color.green(),
+            )
+            embed.add_field(name="💰 Reward", value=f"+{bonus:,} coins", inline=True)
+            # Milestone perks at major levels
+            milestone_perks = {
+                5:  ("daily_bonus_pct", 5,  "Apprentice"),
+                10: ("work_bonus_pct", 10,  "Hustler"),
+                15: ("slots_luck_pct", 5,   "Gambler"),
+                20: ("rob_protection_pct", 10, "Veteran"),
+                25: ("blackjack_payout_pct", 5, "Card Shark"),
+                30: ("fight_armor_pct", 10, "Brawler"),
+                40: ("daily_bonus_pct", 10, "Elite"),
+                50: ("passive_income", 100, "Legend"),
+            }
+            if new_level in milestone_perks:
+                pkey, pval, title_name = milestone_perks[new_level]
+                u = economy._user(user_id)
+                perks = u.setdefault("perks", {})
+                perks[pkey] = perks.get(pkey, 0) + pval
+                economy._save()
+                embed.add_field(
+                    name="🏅 Title Unlocked",
+                    value=f"**{title_name}**",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="✨ Perk",
+                    value=f"+{pval}% {_perk_label(pkey)}",
+                    inline=False,
+                )
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+
+
+def get_user_title(user_id: int) -> str:
+    """Returns the user's level-based title."""
+    level = level_for_xp(_get_xp(user_id))
+    titles = {
+        0: "Newbie", 5: "Apprentice", 10: "Hustler", 15: "Gambler",
+        20: "Veteran", 25: "Card Shark", 30: "Brawler", 40: "Elite", 50: "Legend",
+    }
+    # Find the highest title they qualify for
+    title = "Newbie"
+    for lvl, name in sorted(titles.items()):
+        if level >= lvl:
+            title = name
+    return title
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔥 LOGIN STREAKS (extends existing /daily streak tracking)
+# 7/14/30/100 day streaks unlock huge bonuses.
+# ─────────────────────────────────────────────────────────────────────────────
+STREAK_BONUSES = {
+    7:   ("Week Warrior",     1_000),
+    14:  ("Two-Week Grinder", 2_500),
+    30:  ("Monthly Loyalty",  10_000),
+    100: ("Centurion",        50_000),
+}
+
+
+async def check_streak_bonus(user_id: int, channel=None):
+    """Awards streak bonuses at 7/14/30/100. Called by /daily."""
+    counters = _get_counters(user_id)
+    streak = counters.get("daily_streak", 0)
+    awarded = counters.setdefault("streak_bonuses_awarded", [])
+    for milestone, (name, bonus) in STREAK_BONUSES.items():
+        if streak >= milestone and milestone not in awarded:
+            awarded.append(milestone)
+            economy.add(user_id, bonus, f"streak {milestone}")
+            economy._save()
+            if channel:
+                try:
+                    embed = discord.Embed(
+                        title=f"🔥 {milestone}-DAY STREAK!",
+                        description=f"<@{user_id}> hit a **{milestone}-day** streak!",
+                        color=discord.Color.orange(),
+                    )
+                    embed.add_field(name="🏆 Title", value=name, inline=True)
+                    embed.add_field(name="💰 Bonus", value=f"+{bonus:,} coins", inline=True)
+                    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏆 WEEKLY TOURNAMENTS
+# Separate weekly leaderboard. Resets every Monday at recap hour.
+# Top 3 win prize coins.
+# ─────────────────────────────────────────────────────────────────────────────
+TOURNAMENT_FILE = MEMORY_DIR / "tournament.json"
+TOURNAMENT_PRIZES = [10_000, 5_000, 2_000]  # 1st, 2nd, 3rd
+
+
+def _load_tournament() -> dict:
+    if TOURNAMENT_FILE.exists():
+        try:
+            with open(TOURNAMENT_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "season_start": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "scores": {},      # user_id -> {coins_earned, games_won, commands_used}
+        "history": [],
+    }
+
+
+def _save_tournament(data: dict):
+    with open(TOURNAMENT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def add_tournament_score(user_id: int, coins_earned: int = 0, games_won: int = 0, commands_used: int = 0):
+    data = _load_tournament()
+    uid = str(user_id)
+    if uid not in data["scores"]:
+        data["scores"][uid] = {"coins_earned": 0, "games_won": 0, "commands_used": 0}
+    data["scores"][uid]["coins_earned"] += max(coins_earned, 0)
+    data["scores"][uid]["games_won"] += games_won
+    data["scores"][uid]["commands_used"] += commands_used
+    _save_tournament(data)
+
+
+def tournament_score(stats: dict) -> int:
+    """Composite tournament score: coins earned + heavy bonus for game wins + small bonus for commands."""
+    return stats["coins_earned"] + stats["games_won"] * 500 + stats["commands_used"] * 10
+
+
+async def tournament_scheduler():
+    """Background task: every Monday at recap hour, distribute prizes and reset."""
+    await client.wait_until_ready()
+    last_reset_date = None
+    while not client.is_closed():
+        await asyncio.sleep(600)  # check every 10 min
+        cfg = load_config()
+        target_hour = cfg.get("daily_recap_hour_utc", 4)
+        now = datetime.now(timezone.utc)
+        # Reset on Monday at the configured hour
+        if now.weekday() != 0 or now.hour != target_hour:
+            continue
+        today_str = now.strftime("%Y-%m-%d")
+        if last_reset_date == today_str:
+            continue
+        last_reset_date = today_str
+
+        try:
+            data = _load_tournament()
+            if not data["scores"]:
+                # Reset season anyway
+                data["season_start"] = today_str
+                _save_tournament(data)
+                continue
+
+            ranked = sorted(
+                data["scores"].items(),
+                key=lambda x: tournament_score(x[1]),
+                reverse=True,
+            )
+
+            # Award prizes
+            announcements = []
+            medals = ["🥇", "🥈", "🥉"]
+            for i, (uid, stats) in enumerate(ranked[:3]):
+                prize = TOURNAMENT_PRIZES[i]
+                economy.add(int(uid), prize, f"tournament rank {i+1}")
+                announcements.append(
+                    f"{medals[i]} <@{uid}> — **{prize:,}** coins (score: {tournament_score(stats):,})"
+                )
+
+            # Save to history & reset
+            data["history"].append({
+                "season_start": data["season_start"],
+                "season_end": today_str,
+                "podium": [
+                    {"user_id": uid, "score": tournament_score(s), "rank": i + 1}
+                    for i, (uid, s) in enumerate(ranked[:3])
+                ],
+            })
+            data["history"] = data["history"][-12:]  # keep last 12 weeks
+            data["season_start"] = today_str
+            data["scores"] = {}
+            _save_tournament(data)
+
+            # Announce
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            if recap_channel_id and announcements:
+                try:
+                    channel = client.get_channel(int(recap_channel_id))
+                    if channel:
+                        await channel.send(
+                            f"# 🏆 WEEKLY TOURNAMENT RESULTS 🏆\n\n"
+                            + "\n".join(announcements)
+                            + "\n\n_New season starts now. Grind hard._",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.exception("tournament_scheduler error: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎲 RANDOM EVENTS
+# Bot periodically drops a minigame (duck, math, scramble) in the recap channel.
+# First user to answer wins the prize.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ACTIVE_RANDOM_EVENT: dict[str, dict] = {}  # channel_id -> event state
+EVENT_INTERVAL_MIN = 90 * 60   # min 90 minutes between events
+EVENT_INTERVAL_MAX = 240 * 60  # max 4 hours
+
+EVENT_TYPES = ["duck", "math", "scramble", "trivia"]
+
+
+async def random_event_scheduler():
+    """Background task: every 1.5-4 hours, drop a random event in the recap channel."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(random.randint(EVENT_INTERVAL_MIN, EVENT_INTERVAL_MAX))
+        try:
+            cfg = load_config()
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            if not recap_channel_id:
+                continue
+            channel = client.get_channel(int(recap_channel_id))
+            if not channel:
+                continue
+            channel_id = str(channel.id)
+            if channel_id in ACTIVE_RANDOM_EVENT:
+                continue  # one at a time
+
+            event_type = random.choice(EVENT_TYPES)
+            await _spawn_random_event(channel, event_type)
+        except Exception as e:
+            log.exception("random_event_scheduler error: %s", e)
+
+
+async def _spawn_random_event(channel, event_type: str):
+    """Drop a specific random event in the channel."""
+    channel_id = str(channel.id)
+    prize = random.randint(300, 1500)
+
+    if event_type == "duck":
+        answer = "bang"
+        prompt = (
+            f"# 🦆 A WILD DUCK APPEARED!\n\n"
+            f"🦆 Quick! Type **`bang`** to shoot it!\n"
+            f"💰 Prize: **{prize:,}** coins"
+        )
+    elif event_type == "math":
+        a, b = random.randint(11, 99), random.randint(11, 99)
+        op = random.choice(["+", "-", "*"])
+        answer = str(eval(f"{a}{op}{b}"))
+        prompt = (
+            f"# 🧮 MATH BLITZ!\n\n"
+            f"First to type the answer wins:\n"
+            f"## **{a} {op} {b} = ?**\n"
+            f"💰 Prize: **{prize:,}** coins"
+        )
+    elif event_type == "scramble":
+        words = [
+            "balance", "fortune", "jackpot", "victory", "champion",
+            "millionaire", "criminal", "shadow", "dynasty", "legend",
+            "phantom", "hunter", "warrior", "midnight", "voltage",
+        ]
+        word = random.choice(words)
+        scrambled = "".join(random.sample(word, len(word)))
+        while scrambled == word:
+            scrambled = "".join(random.sample(word, len(word)))
+        answer = word
+        prompt = (
+            f"# 🔤 SCRAMBLED!\n\n"
+            f"Unscramble this word — first to type it wins:\n"
+            f"## **`{scrambled.upper()}`**\n"
+            f"💰 Prize: **{prize:,}** coins"
+        )
+    elif event_type == "trivia":
+        trivia_pool = [
+            ("What's the capital of France?", "paris"),
+            ("How many continents are there?", "7"),
+            ("What's 2 to the 10th power?", "1024"),
+            ("In what year did WW2 end?", "1945"),
+            ("How many sides does a hexagon have?", "6"),
+            ("What's the largest planet?", "jupiter"),
+            ("Who painted the Mona Lisa?", "leonardo da vinci"),
+            ("What's the chemical symbol for gold?", "au"),
+            ("How many keys are on a standard piano?", "88"),
+            ("What's the tallest mountain in the world?", "everest"),
+        ]
+        question, answer = random.choice(trivia_pool)
+        prompt = (
+            f"# 🧠 TRIVIA TIME!\n\n"
+            f"First to answer wins:\n"
+            f"## **{question}**\n"
+            f"💰 Prize: **{prize:,}** coins"
+        )
+    else:
+        return
+
+    msg = await channel.send(prompt)
+    ACTIVE_RANDOM_EVENT[channel_id] = {
+        "type": event_type,
+        "answer": answer.lower().strip(),
+        "prize": prize,
+        "started_at": time.time(),
+        "message_id": msg.id,
+        "channel_id": channel.id,
+    }
+
+    # Auto-expire after 5 minutes
+    await asyncio.sleep(300)
+    event = ACTIVE_RANDOM_EVENT.get(channel_id)
+    if event and event["message_id"] == msg.id:
+        ACTIVE_RANDOM_EVENT.pop(channel_id, None)
+        try:
+            await channel.send(
+                f"⏰ The event expired. The answer was: **{event['answer']}**"
+            )
+        except Exception:
+            pass
+
+
+async def check_random_event_answer(message: discord.Message) -> bool:
+    """Called from on_message. Returns True if the message resolved a random event."""
+    channel_id = str(message.channel.id)
+    event = ACTIVE_RANDOM_EVENT.get(channel_id)
+    if not event:
+        return False
+    if message.content.strip().lower() == event["answer"]:
+        # Winner!
+        ACTIVE_RANDOM_EVENT.pop(channel_id, None)
+        prize = event["prize"]
+        economy.add(message.author.id, prize, "random event")
+        elapsed = time.time() - event["started_at"]
+        try:
+            await message.channel.send(
+                f"# 🎉 {message.author.mention} won the event!\n\n"
+                f"💰 Prize: **{prize:,}** coins\n"
+                f"⚡ Reaction time: **{elapsed:.1f}s**\n\n"
+                f"_Next event in 1.5-4 hours._",
+                allowed_mentions=discord.AllowedMentions(users=[message.author]),
+            )
+        except Exception:
+            pass
+        # Track random event wins for tournament
+        add_tournament_score(message.author.id, coins_earned=prize, games_won=1)
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🏆 ACHIEVEMENT SYSTEM
 # Tracks milestones across all commands. Unlocks stored per-user in economy.json.
 # Each achievement: id, name, emoji, description, reward (coins).
@@ -2929,6 +3336,8 @@ async def daily_command(interaction: discord.Interaction):
     # Achievements
     await trigger_daily_claim(user.id, channel=interaction.channel)
     await trigger_balance_check(user.id, channel=interaction.channel)
+    await check_streak_bonus(user.id, channel=interaction.channel)
+    add_tournament_score(user.id, coins_earned=final_reward)
 
 
 @tree.command(name="weekly", description="Claim your weekly coin reward (bigger but rarer).")
@@ -6747,6 +7156,87 @@ async def achievements_command(interaction: discord.Interaction, user: discord.M
     await interaction.response.send_message(embed=embed)
 
 
+# ── 📊 /level ────────────────────────────────────────────────────────────────
+@tree.command(name="level", description="See your XP, level, and progress.")
+@discord.app_commands.describe(user="Whose level to view (defaults to you)")
+async def level_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    xp = _get_xp(target.id)
+    level = level_for_xp(xp)
+    title = get_user_title(target.id)
+    badges = get_user_badges(target.id)
+
+    # Progress to next level
+    current_level_xp = xp_for_level(level)
+    next_level_xp = xp_for_level(level + 1)
+    progress = xp - current_level_xp
+    needed = next_level_xp - current_level_xp
+    bar_len = 20
+    filled = int((progress / needed) * bar_len) if needed > 0 else bar_len
+    bar = "█" * filled + "░" * (bar_len - filled)
+
+    embed = discord.Embed(
+        title=f"📊 {target.display_name}'s Level",
+        color=discord.Color.green(),
+    )
+    if badges:
+        embed.title = f"📊 {badges} {target.display_name}"
+    embed.add_field(name="🏅 Title", value=f"**{title}**", inline=True)
+    embed.add_field(name="📈 Level", value=f"**{level}**", inline=True)
+    embed.add_field(name="✨ Total XP", value=f"{xp:,}", inline=True)
+    embed.add_field(
+        name=f"Progress to Level {level + 1}",
+        value=f"`{bar}`\n**{progress:,} / {needed:,}** XP",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── 🏆 /tournament ───────────────────────────────────────────────────────────
+@tree.command(name="tournament", description="See the current weekly tournament leaderboard.")
+async def tournament_command(interaction: discord.Interaction):
+    data = _load_tournament()
+    scores = data.get("scores", {})
+    season_start = data.get("season_start", "?")
+
+    if not scores:
+        embed = discord.Embed(
+            title="🏆 WEEKLY TOURNAMENT",
+            description="_No participants yet this week._\n\nEarn coins, win games, or use commands to compete!",
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"Season started: {season_start} • Resets Monday")
+        await interaction.response.send_message(embed=embed)
+        return
+
+    ranked = sorted(scores.items(), key=lambda x: tournament_score(x[1]), reverse=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, stats) in enumerate(ranked[:10]):
+        try:
+            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+            name = member.display_name if member else f"User {uid}"
+        except Exception:
+            name = f"User {uid}"
+        prefix = medals[i] if i < 3 else f"`#{i+1}`"
+        prize_text = ""
+        if i < 3:
+            prize_text = f" • Prize: **{TOURNAMENT_PRIZES[i]:,}**"
+        score = tournament_score(stats)
+        lines.append(
+            f"{prefix} **{name}** — score **{score:,}**{prize_text}\n"
+            f"   ↳ {stats['coins_earned']:,} earned • {stats['games_won']} wins • {stats['commands_used']} cmds"
+        )
+
+    embed = discord.Embed(
+        title="🏆 WEEKLY TOURNAMENT",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Season started: {season_start} • Resets Monday at recap hour")
+    await interaction.response.send_message(embed=embed)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -6768,8 +7258,10 @@ async def commands_command(interaction: discord.Interaction):
     embed.add_field(
         name="🏆 PROGRESSION",
         value=(
+            "`/level` Your XP, level, and title\n"
             "`/achievements` View earned badges + perks\n"
-            "_25 achievements with permanent perks. Badges show on /balance and /leaderboard._"
+            "`/tournament` Weekly leaderboard\n"
+            "_Chat to earn XP. Level up for permanent perks. Top 3 weekly = big prizes._"
         ),
         inline=False,
     )
@@ -6856,6 +7348,8 @@ async def on_ready():
     client.loop.create_task(daily_recap_scheduler())
     client.loop.create_task(expire_temp_roles())
     client.loop.create_task(lottery_drawing_scheduler())
+    client.loop.create_task(tournament_scheduler())
+    client.loop.create_task(random_event_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7021,6 +7515,11 @@ PREFIX_COMMANDS = {
     "analyze":      ("analyze",       []),
     "achievements": ("achievements",  [{"name":"user","type":"user","required":False,"default":None}]),
     "ach":          ("achievements",  [{"name":"user","type":"user","required":False,"default":None}]),
+    "level":        ("level",         [{"name":"user","type":"user","required":False,"default":None}]),
+    "lvl":          ("level",         [{"name":"user","type":"user","required":False,"default":None}]),
+    "rank":         ("level",         [{"name":"user","type":"user","required":False,"default":None}]),
+    "tournament":   ("tournament",    []),
+    "tourney":      ("tournament",    []),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
@@ -7145,11 +7644,35 @@ async def on_message(message: discord.Message):
     channel_id = str(message.channel.id)
     last_channel_activity[channel_id] = time.time()
 
+    # ── Random events: check if this answers an active event ─────────────────
+    try:
+        if await check_random_event_answer(message):
+            return
+    except Exception as e:
+        log.warning("random event check failed: %s", e)
+
+    # ── XP for chatting (cooldown to prevent farming) ─────────────────────────
+    try:
+        now_ts = time.time()
+        last = _xp_last_message.get(message.author.id, 0)
+        if now_ts - last >= XP_MESSAGE_COOLDOWN and message.content.strip():
+            _xp_last_message[message.author.id] = now_ts
+            await grant_xp(message.author.id, XP_PER_MESSAGE, channel=message.channel)
+    except Exception as e:
+        log.warning("xp grant failed: %s", e)
+
     # ── _prefix commands → invoke slash commands ─────────────────────────────
     content_stripped = message.content.strip()
     if content_stripped.startswith("_") and len(content_stripped) > 1:
         handled = await handle_prefix_command(message, content_stripped[1:])
         if handled:
+            # Bonus XP for using a command
+            try:
+                await grant_xp(message.author.id, XP_PER_COMMAND, channel=message.channel)
+                # Track command use for tournament scoring
+                add_tournament_score(message.author.id, commands_used=1)
+            except Exception:
+                pass
             return
 
     # Commands
