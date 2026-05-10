@@ -6310,6 +6310,95 @@ def _fight_status_text(fight: dict, header: str = "") -> str:
     return body
 
 
+def _build_fight_embed(fight: dict, phase: str = "betting", **kwargs) -> discord.Embed:
+    """Build the fight embed for any phase: betting, fighting, ended."""
+    a_pool = sum(b["amount"] for b in fight["bets"].values() if b["side"] == "a")
+    b_pool = sum(b["amount"] for b in fight["bets"].values() if b["side"] == "b")
+    a_bettors = sum(1 for b in fight["bets"].values() if b["side"] == "a")
+    b_bettors = sum(1 for b in fight["bets"].values() if b["side"] == "b")
+    wager = fight["wager"]
+
+    if phase == "betting":
+        remaining = kwargs.get("remaining", FIGHT_BETTING_WINDOW)
+        title = f"🥊 FIGHT NIGHT — {remaining}s LEFT TO BET"
+        color = discord.Color.gold()
+    elif phase == "fighting":
+        time_left = kwargs.get("time_left", FIGHT_DURATION)
+        title = f"🥊 LIVE FIGHT — {time_left}s LEFT"
+        color = discord.Color.red()
+    elif phase == "ended":
+        title = "🏆 FIGHT OVER"
+        color = discord.Color.green()
+    else:
+        title = "🥊 FIGHT"
+        color = discord.Color.blue()
+
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(
+        name="🥊 Match",
+        value=f"🔴 {fight['a_mention']} vs 🔵 {fight['b_mention']}\nWager: **{wager:,}** coins each",
+        inline=False,
+    )
+
+    # Score (only during fight + after)
+    if phase in ("fighting", "ended"):
+        a_score = kwargs.get("a_score", 0)
+        b_score = kwargs.get("b_score", 0)
+        embed.add_field(
+            name="📊 Score",
+            value=f"🔴 **{fight['a_name']}**: {a_score}\n🔵 **{fight['b_name']}**: {b_score}",
+            inline=False,
+        )
+
+    # Betting pool — always visible
+    pool_value = (
+        f"🔴 {fight['a_name']}: **{a_pool:,}** ({a_bettors} bettor{'s' if a_bettors != 1 else ''})\n"
+        f"🔵 {fight['b_name']}: **{b_pool:,}** ({b_bettors} bettor{'s' if b_bettors != 1 else ''})"
+    )
+    embed.add_field(name="💰 Spectator Pool", value=pool_value, inline=False)
+
+    # Recent action log (during/after fight)
+    log_lines = kwargs.get("log_lines")
+    if log_lines:
+        action = "\n".join(log_lines[-6:])
+        if len(action) > 1020:
+            action = action[-1020:]
+        embed.add_field(name="📝 Action", value=action, inline=False)
+
+    # Final result
+    if phase == "ended":
+        winner_text = kwargs.get("winner_text", "")
+        payout_text = kwargs.get("payout_text", "")
+        if winner_text:
+            embed.add_field(name="🏆 Winner", value=winner_text, inline=False)
+        if payout_text:
+            embed.add_field(name="💸 Payouts", value=payout_text[:1020], inline=False)
+
+    return embed
+
+
+async def _edit_fight_message(fight: dict, **kwargs):
+    """Edit the single fight message with a new embed."""
+    msg = fight.get("message")
+    if not msg:
+        return
+    try:
+        view = fight.get("view") if kwargs.get("phase") == "betting" else None
+        kw = {"embed": _build_fight_embed(fight, **kwargs)}
+        if view is not None:
+            kw["view"] = view
+        elif kwargs.get("phase") == "ended":
+            # Disable view on end
+            v = fight.get("view")
+            if v:
+                for child in v.children:
+                    child.disabled = True
+                kw["view"] = v
+        await msg.edit(**kw)
+    except Exception as e:
+        log.warning("fight message edit failed: %s", e)
+
+
 @tree.command(name="fight", description="Challenge someone to a 60-second fight. Spectators can bet.")
 @discord.app_commands.describe(opponent="Who you're fighting", wager="Coins each fighter puts up (min 100)")
 async def fight_command(interaction: discord.Interaction, opponent: discord.Member, wager: int = 200):
@@ -6361,17 +6450,17 @@ async def fight_command(interaction: discord.Interaction, opponent: discord.Memb
     }
     ACTIVE_FIGHTS[channel_id] = fight
 
-    # Send the initial fight card with betting buttons
+    # Send the initial fight card with betting buttons — ONE embed that updates
     view = FightBetView(channel_id)
-    header = (
-        f"# 🥊 FIGHT NIGHT 🥊\n\n"
-        f"**Betting closes in {FIGHT_BETTING_WINDOW} seconds!**"
-    )
+    embed = _build_fight_embed(fight, phase="betting")
     await interaction.response.send_message(
-        content=_fight_status_text(fight, header),
+        embed=embed,
         view=view,
         allowed_mentions=discord.AllowedMentions(users=[opponent]),
     )
+    fight_message = await interaction.original_response()
+    fight["message"] = fight_message  # store ref so _run_fight can edit it
+    fight["view"] = view
 
     # Run the full fight asynchronously so we don't hold the interaction
     asyncio.create_task(_run_fight(interaction, channel_id))
@@ -6383,65 +6472,38 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
         return
     channel = interaction.channel
 
-    # ── Betting window countdown ──────────────────────────────────────────────
-    countdown_marks = [20, 10, 5]
+    # ── Betting window — ticks down by editing the SAME message ──────────────
     elapsed = 0
-    next_marks = list(countdown_marks)
     while elapsed < FIGHT_BETTING_WINDOW:
-        await asyncio.sleep(5)
-        elapsed += 5
+        await asyncio.sleep(2)
+        elapsed += 2
         remaining = FIGHT_BETTING_WINDOW - elapsed
-        if next_marks and remaining <= next_marks[0]:
-            mark = next_marks.pop(0)
-            try:
-                await channel.send(
-                    f"⏰ **{mark} seconds** left to bet on this fight!\n\n"
-                    + _fight_status_text(fight)
-                )
-            except Exception:
-                pass
+        await _edit_fight_message(fight, phase="betting", remaining=max(remaining, 0))
 
-    # Close betting
+    # ── Close betting & start fight ──────────────────────────────────────────
     fight["phase"] = "fighting"
-
-    # Pre-fight intro
-    try:
-        await channel.send(
-            f"# 🔔 BETTING CLOSED — FIGHT STARTING\n\n"
-            + _fight_status_text(fight)
-        )
-    except Exception:
-        pass
-    await asyncio.sleep(2.0)
-
-    # ── Fight animation ───────────────────────────────────────────────────────
     a_score = 0
     b_score = 0
     log_lines = [
-        f"🔔 **DING DING DING!** {fight['a_mention']} and {fight['b_mention']} step into the ring."
+        f"🔔 **DING DING DING!** {fight['a_name']} and {fight['b_name']} step into the ring."
     ]
-
-    fight_msg = await channel.send(
-        f"# 🥊 LIVE FIGHT 🥊\n\n"
-        f"🔴 {fight['a_name']}: **{a_score}** | 🔵 {fight['b_name']}: **{b_score}**\n\n"
-        + "\n".join(log_lines[-6:]),
-        allowed_mentions=discord.AllowedMentions.none(),
+    await _edit_fight_message(
+        fight, phase="fighting",
+        time_left=FIGHT_DURATION, a_score=a_score, b_score=b_score, log_lines=log_lines,
     )
+    await asyncio.sleep(2.0)
 
+    # ── Fight animation — keeps editing the SAME embed ───────────────────────
     fight_start = time.time()
-    tick = 0
     while time.time() - fight_start < FIGHT_DURATION:
-        await asyncio.sleep(random.uniform(3.5, 5.5))  # variable tempo
-        tick += 1
+        await asyncio.sleep(random.uniform(3.5, 5.5))
 
-        # Decide attacker — slight randomization, occasional double action
         attacker_id = random.choice([fight["a_id"], fight["b_id"]])
         attacker_name = fight["a_name"] if attacker_id == fight["a_id"] else fight["b_name"]
         defender_name = fight["b_name"] if attacker_id == fight["a_id"] else fight["a_name"]
 
         emoji, action = random.choice(FIGHT_MOVES)
 
-        # Random outcome: hit, miss, counter
         roll = random.random()
         if roll < 0.65:
             # Hit
@@ -6452,10 +6514,8 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
                 b_score += damage
             log_lines.append(f"{emoji} **{attacker_name}** {action} on {defender_name}! **(+{damage})**")
         elif roll < 0.85:
-            # Miss
             log_lines.append(f"💨 **{attacker_name}** swings — and {defender_name} dodges it.")
         else:
-            # Counter — defender hits back
             damage = random.randint(2, 5)
             if attacker_id == fight["a_id"]:
                 b_score += damage
@@ -6465,25 +6525,17 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
                 f"🌀 **{defender_name}** counters! **{attacker_name}** eats it. **(+{damage} for {defender_name})**"
             )
 
-        # Occasional trash talk
         if random.random() < 0.18:
             talker = random.choice([fight["a_name"], fight["b_name"]])
             log_lines.append(f"🗯️ {talker} {random.choice(FIGHT_TRASH_TALK)}.")
 
-        # Update message
-        try:
-            await fight_msg.edit(
-                content=(
-                    f"# 🥊 LIVE FIGHT 🥊\n\n"
-                    f"🔴 **{fight['a_name']}**: **{a_score}** | 🔵 **{fight['b_name']}**: **{b_score}**\n"
-                    f"⏰ Time left: **{int(FIGHT_DURATION - (time.time() - fight_start))}s**\n\n"
-                    + "\n".join(log_lines[-6:])
-                )
-            )
-        except Exception:
-            pass
+        time_left = max(int(FIGHT_DURATION - (time.time() - fight_start)), 0)
+        await _edit_fight_message(
+            fight, phase="fighting",
+            time_left=time_left, a_score=a_score, b_score=b_score, log_lines=log_lines,
+        )
 
-    # ── Decide winner ─────────────────────────────────────────────────────────
+    # ── Decide winner ────────────────────────────────────────────────────────
     fight["phase"] = "ended"
     if a_score > b_score:
         winner_id, loser_id = fight["a_id"], fight["b_id"]
@@ -6494,7 +6546,6 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
         winner_name = fight["b_name"]
         winning_side = "b"
     else:
-        # Coin flip on tie
         if random.choice([True, False]):
             winner_id, loser_id = fight["a_id"], fight["b_id"]
             winner_name = fight["a_name"]
@@ -6504,9 +6555,7 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
             winner_name = fight["b_name"]
             winning_side = "b"
 
-    # Pay the fighter wager pot to the winner (2x their wager)
     fighter_payout = fight["wager"] * 2
-    # Apply fight_armor_pct perk on loser — they get a partial wager refund
     armor = get_perk(loser_id, "fight_armor_pct")
     if armor:
         refund = int(fight["wager"] * armor / 100)
@@ -6518,7 +6567,7 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
     await trigger_game_win(winner_id, "fight", channel=channel)
     await trigger_balance_check(winner_id, channel=channel)
 
-    # ── Resolve spectator bets (parimutuel) ───────────────────────────────────
+    # Resolve spectator bets
     a_pool = sum(b["amount"] for b in fight["bets"].values() if b["side"] == "a")
     b_pool = sum(b["amount"] for b in fight["bets"].values() if b["side"] == "b")
     total_pool = a_pool + b_pool
@@ -6529,42 +6578,39 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
     if winning_pool > 0:
         for uid, b in fight["bets"].items():
             if b["side"] == winning_side:
-                # Each winner gets their stake back PLUS proportional share of losing pool
                 share = (b["amount"] / winning_pool) * losing_pool
                 payout = b["amount"] + int(share)
                 economy.add(uid, payout, "fight bet win")
                 profit = payout - b["amount"]
-                payout_lines.append(f"✅ <@{uid}> bet {b['amount']:,} → won **{payout:,}** (+{profit:,})")
+                payout_lines.append(f"✅ <@{uid}> won **{payout:,}** (+{profit:,})")
             else:
-                payout_lines.append(f"❌ <@{uid}> bet {b['amount']:,} → **LOST**")
+                payout_lines.append(f"❌ <@{uid}> lost **{b['amount']:,}**")
     else:
-        # No one bet on the winner — refund losers (rare edge case)
         for uid, b in fight["bets"].items():
             economy.add(uid, b["amount"], "fight bet refund")
-            payout_lines.append(f"↩️ <@{uid}> bet {b['amount']:,} → **refunded** (no winning side)")
+            payout_lines.append(f"↩️ <@{uid}> refunded {b['amount']:,}")
 
-    new_winner_bal = economy.balance(winner_id)
-    final = (
-        f"# 🏆 FIGHT OVER 🏆\n\n"
-        f"## {winner_name} WINS!\n"
-        f"Final score: 🔴 **{a_score}** — **{b_score}** 🔵\n\n"
-        f"💰 **{winner_name}** earned **{fighter_payout:,}** coins from the wager pool.\n"
-        f"Balance: **{new_winner_bal:,}**\n\n"
+    winner_text = (
+        f"## 🏆 {winner_name} WINS!\n"
+        f"💰 Earned **{fighter_payout:,}** coins"
     )
-    if payout_lines:
-        final += f"**Spectator payouts ({total_pool:,} coin pool):**\n" + "\n".join(payout_lines)
-    else:
-        final += "_No spectators placed bets._"
+    payout_text = "\n".join(payout_lines) if payout_lines else "_No spectators placed bets._"
 
-    if len(final) > 2000:
-        final = final[:1990] + "..."
+    await _edit_fight_message(
+        fight, phase="ended",
+        a_score=a_score, b_score=b_score,
+        log_lines=log_lines,
+        winner_text=winner_text, payout_text=payout_text,
+    )
 
+    # Single ping for the winner
     try:
         winner_member = interaction.guild.get_member(winner_id) if interaction.guild else None
-        await channel.send(
-            content=final,
-            allowed_mentions=discord.AllowedMentions(users=[winner_member] if winner_member else False),
-        )
+        if winner_member:
+            await channel.send(
+                f"🏆 {winner_member.mention} took the fight!",
+                allowed_mentions=discord.AllowedMentions(users=[winner_member]),
+            )
     except Exception:
         pass
 
