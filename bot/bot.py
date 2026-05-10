@@ -671,6 +671,13 @@ async def trigger_work_used(user_id: int, channel=None):
 async def trigger_game_win(user_id: int, game: str, channel=None):
     """Generic per-game win counter."""
     count = _bump_counter(user_id, f"{game}_wins")
+    # Track quest progress
+    try:
+        track_quest_progress(user_id, "games_won")
+        track_quest_progress(user_id, "games_played")
+        add_tournament_score(user_id, games_won=1)
+    except Exception:
+        pass
     if game == "duel" and count >= 1:
         await _grant_achievement(user_id, "first_blood", channel)
     elif game == "fight" and count >= 10:
@@ -3338,6 +3345,7 @@ async def daily_command(interaction: discord.Interaction):
     await trigger_balance_check(user.id, channel=interaction.channel)
     await check_streak_bonus(user.id, channel=interaction.channel)
     add_tournament_score(user.id, coins_earned=final_reward)
+    track_quest_progress(user.id, "coins_earned", final_reward)
 
 
 @tree.command(name="weekly", description="Claim your weekly coin reward (bigger but rarer).")
@@ -3534,6 +3542,7 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
             pass
 
     economy.set_cooldown(user.id, "rob")
+    track_quest_progress(user.id, "rob_attempts")
 
     await edit(f"🦝 {user.mention} is sneaking up on {target.mention}...")
     await asyncio.sleep(1.5)
@@ -3606,6 +3615,9 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
             ephemeral=True,
         )
         return
+
+    # Quest tracking
+    track_quest_progress(sender.id, "coins_given", amount)
 
     sender_bal = economy.balance(sender.id)
     await interaction.response.send_message(
@@ -7283,6 +7295,530 @@ async def tournament_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🐶 PETS / COMPANIONS
+# Adopt a pet, feed it daily, it earns passive coins, levels up over time.
+# ─────────────────────────────────────────────────────────────────────────────
+PETS_FILE = MEMORY_DIR / "pets.json"
+PET_ADOPT_COST = 1500
+PET_FEED_COST = 50
+PET_DAILY_INCOME_BASE = 30  # coins per level per day
+PET_HUNGER_DECAY_HOURS = 6  # how often hunger ticks down without food
+
+PET_TYPES = {
+    "dog":      {"emoji": "🐶", "name": "Dog",      "desc": "Loyal coin earner."},
+    "cat":      {"emoji": "🐱", "name": "Cat",      "desc": "Aloof but profitable."},
+    "fox":      {"emoji": "🦊", "name": "Fox",      "desc": "Sneaky and sly."},
+    "dragon":   {"emoji": "🐲", "name": "Dragon",   "desc": "Hoards treasure."},
+    "monkey":   {"emoji": "🐒", "name": "Monkey",   "desc": "Chaotic neutral."},
+    "shark":    {"emoji": "🦈", "name": "Shark",    "desc": "Eats your enemies."},
+    "raccoon":  {"emoji": "🦝", "name": "Raccoon",  "desc": "Born thief."},
+    "owl":      {"emoji": "🦉", "name": "Owl",      "desc": "Wise and calculating."},
+}
+
+
+def _load_pets() -> dict:
+    if PETS_FILE.exists():
+        try:
+            with open(PETS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_pets(data: dict):
+    with open(PETS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _pet_xp_for_level(level: int) -> int:
+    return 50 * level * level
+
+
+def _pet_level(xp: int) -> int:
+    if xp < 50:
+        return 1
+    import math
+    return max(1, int(math.sqrt(xp / 50)))
+
+
+def _pet_hunger(pet: dict) -> int:
+    """Calculate current hunger (0-100). Decays over time."""
+    last_fed = pet.get("last_fed", time.time())
+    hours_since = (time.time() - last_fed) / 3600
+    decay = int(hours_since / PET_HUNGER_DECAY_HOURS * 25)
+    return max(0, 100 - decay)
+
+
+@tree.command(name="adopt", description="Adopt a pet companion. Pets earn passive coins and level up.")
+@discord.app_commands.describe(pet_type="What kind of pet?", name="What to call your pet")
+@discord.app_commands.choices(
+    pet_type=[
+        discord.app_commands.Choice(name=f"{p['emoji']} {p['name']} — {p['desc']}", value=k)
+        for k, p in PET_TYPES.items()
+    ],
+)
+async def adopt_command(
+    interaction: discord.Interaction,
+    pet_type: discord.app_commands.Choice[str],
+    name: str,
+):
+    user = interaction.user
+    pets = _load_pets()
+    if str(user.id) in pets:
+        await interaction.response.send_message(
+            f"❌ You already have a pet. Abandon it first with `/abandon`.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < PET_ADOPT_COST:
+        await interaction.response.send_message(
+            f"❌ Adoption fee is **{PET_ADOPT_COST:,}** coins.", ephemeral=True
+        )
+        return
+
+    name = name.strip()[:30]
+    if not name:
+        await interaction.response.send_message("❌ Give your pet a name.", ephemeral=True)
+        return
+
+    economy.add(user.id, -PET_ADOPT_COST, "pet adoption")
+    pet_info = PET_TYPES[pet_type.value]
+    pets[str(user.id)] = {
+        "type": pet_type.value,
+        "name": name,
+        "xp": 0,
+        "last_fed": time.time(),
+        "last_collected": time.time(),
+        "adopted_at": time.time(),
+    }
+    _save_pets(pets)
+
+    await interaction.response.send_message(
+        f"# {pet_info['emoji']} You adopted **{name}** the {pet_info['name']}!\n\n"
+        f"💰 Earns **{PET_DAILY_INCOME_BASE}** coins per level per day\n"
+        f"🍖 Feed daily with `/feed` (or your pet runs away after 4+ days hungry)\n"
+        f"📊 Check on them with `/pet`\n"
+        f"💎 Use `/collect` to claim earned coins"
+    )
+
+
+@tree.command(name="pet", description="Check on your pet's stats.")
+@discord.app_commands.describe(user="Whose pet to view (defaults to you)")
+async def pet_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    pets = _load_pets()
+    pet = pets.get(str(target.id))
+    if not pet:
+        await interaction.response.send_message(
+            f"{target.mention} doesn't have a pet. Adopt one with `/adopt`!",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    info = PET_TYPES.get(pet["type"], {"emoji": "🐾", "name": "Pet"})
+    level = _pet_level(pet["xp"])
+    next_level_xp = _pet_xp_for_level(level + 1)
+    progress = pet["xp"] - _pet_xp_for_level(level)
+    needed = next_level_xp - _pet_xp_for_level(level)
+    hunger = _pet_hunger(pet)
+
+    bar_len = 15
+    filled = int((progress / needed) * bar_len) if needed > 0 else bar_len
+    xp_bar = "█" * filled + "░" * (bar_len - filled)
+
+    hunger_emoji = "🍖" if hunger >= 70 else ("😐" if hunger >= 40 else ("😟" if hunger >= 15 else "💀"))
+    hunger_filled = int(hunger / 100 * bar_len)
+    hunger_bar = "█" * hunger_filled + "░" * (bar_len - hunger_filled)
+
+    # Calculate pending earnings
+    hours_since_collect = (time.time() - pet.get("last_collected", time.time())) / 3600
+    pending = int(level * PET_DAILY_INCOME_BASE * (hours_since_collect / 24))
+    if hunger < 30:
+        pending = pending // 2  # half earnings if hungry
+
+    embed = discord.Embed(
+        title=f"{info['emoji']} {pet['name']}",
+        description=f"_{info['name']}_ — Level **{level}**",
+        color=discord.Color.teal(),
+    )
+    embed.add_field(name=f"📊 XP ({pet['xp']:,})", value=f"`{xp_bar}` {progress}/{needed}", inline=False)
+    embed.add_field(name=f"{hunger_emoji} Hunger", value=f"`{hunger_bar}` {hunger}/100", inline=False)
+    embed.add_field(name="💰 Pending Earnings", value=f"**{pending:,}** coins", inline=True)
+    embed.add_field(name="📈 Income/day", value=f"{level * PET_DAILY_INCOME_BASE:,}", inline=True)
+    embed.set_footer(text=f"Owner: {target.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="feed", description="Feed your pet to keep it happy.")
+async def feed_command(interaction: discord.Interaction):
+    user = interaction.user
+    pets = _load_pets()
+    pet = pets.get(str(user.id))
+    if not pet:
+        await interaction.response.send_message("You don't have a pet.", ephemeral=True)
+        return
+    if economy.balance(user.id) < PET_FEED_COST:
+        await interaction.response.send_message(
+            f"❌ Feeding costs **{PET_FEED_COST}** coins.", ephemeral=True
+        )
+        return
+    if _pet_hunger(pet) >= 95:
+        await interaction.response.send_message(
+            f"🍖 {pet['name']} is already full!", ephemeral=True
+        )
+        return
+
+    economy.add(user.id, -PET_FEED_COST, "pet feed")
+    pet["last_fed"] = time.time()
+    pet["xp"] = pet.get("xp", 0) + 10  # Feeding gives small XP
+    _save_pets(pets)
+
+    info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+    new_level = _pet_level(pet["xp"])
+    await interaction.response.send_message(
+        f"{info['emoji']} You fed **{pet['name']}**! +10 XP\n"
+        f"Level: **{new_level}** | Hunger: **{_pet_hunger(pet)}/100**"
+    )
+
+
+@tree.command(name="collect", description="Collect coins your pet has earned.")
+async def collect_command(interaction: discord.Interaction):
+    user = interaction.user
+    pets = _load_pets()
+    pet = pets.get(str(user.id))
+    if not pet:
+        await interaction.response.send_message("You don't have a pet.", ephemeral=True)
+        return
+
+    level = _pet_level(pet["xp"])
+    hunger = _pet_hunger(pet)
+    hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
+    if hours_since < 1:
+        await interaction.response.send_message(
+            f"⏰ Wait at least an hour between collections.", ephemeral=True
+        )
+        return
+
+    earnings = int(level * PET_DAILY_INCOME_BASE * (hours_since / 24))
+    if hunger < 30:
+        earnings = earnings // 2  # hungry pet earns half
+    if hunger == 0:
+        earnings = 0
+
+    if earnings <= 0:
+        await interaction.response.send_message(
+            f"💀 {pet['name']} is too hungry to work. Feed them first!", ephemeral=True
+        )
+        return
+
+    pet["last_collected"] = time.time()
+    pet["xp"] = pet.get("xp", 0) + earnings // 10  # Working gives XP
+    _save_pets(pets)
+    new_bal = economy.add(user.id, earnings, "pet collect")
+
+    info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+    note = " _(earnings halved — pet is hungry)_" if hunger < 30 else ""
+    await interaction.response.send_message(
+        f"{info['emoji']} **{pet['name']}** brought you **{earnings:,}** coins!{note}\n"
+        f"Balance: **{new_bal:,}**"
+    )
+
+
+@tree.command(name="abandon", description="Give up your pet (no refund).")
+async def abandon_command(interaction: discord.Interaction):
+    user = interaction.user
+    pets = _load_pets()
+    if str(user.id) not in pets:
+        await interaction.response.send_message("You don't have a pet.", ephemeral=True)
+        return
+    pet = pets[str(user.id)]
+    info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+    name = pet["name"]
+    del pets[str(user.id)]
+    _save_pets(pets)
+    await interaction.response.send_message(
+        f"💔 You abandoned {info['emoji']} **{name}**. They look back at you sadly..."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 👍 REPUTATION SYSTEM
+# Users +rep each other for funny/cool posts. Top rep unlocks perks.
+# 24h cooldown between giving rep.
+# ─────────────────────────────────────────────────────────────────────────────
+REP_COOLDOWN_HOURS = 24
+
+
+@tree.command(name="rep", description="Give another user reputation. 24h cooldown.")
+@discord.app_commands.describe(user="Who deserves rep?", reason="Optional reason")
+async def rep_command(interaction: discord.Interaction, user: discord.Member, reason: str = None):
+    giver = interaction.user
+    if user.id == giver.id:
+        await interaction.response.send_message("Can't rep yourself.", ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message("Bots don't need rep.", ephemeral=True)
+        return
+
+    counters = _get_counters(giver.id)
+    last_rep = counters.get("last_rep_given", 0)
+    cd_seconds = REP_COOLDOWN_HOURS * 3600
+    if time.time() - last_rep < cd_seconds:
+        remaining = int(cd_seconds - (time.time() - last_rep))
+        await interaction.response.send_message(
+            f"⏰ You can rep again in **{fmt_cooldown(remaining)}**.", ephemeral=True
+        )
+        return
+
+    # Increment target's rep
+    target_data = economy._user(user.id)
+    target_data["rep"] = target_data.get("rep", 0) + 1
+    economy._save()
+    counters["last_rep_given"] = time.time()
+    economy._save()
+
+    new_rep = target_data["rep"]
+    rep_perks = {
+        10:  ("daily_bonus_pct", 5,  "Liked"),
+        25:  ("work_bonus_pct", 5,   "Respected"),
+        50:  ("rob_protection_pct", 10, "Beloved"),
+        100: ("passive_income", 50,  "Server Hero"),
+    }
+    perk_announcement = ""
+    if new_rep in rep_perks:
+        pkey, pval, title = rep_perks[new_rep]
+        perks = target_data.setdefault("perks", {})
+        perks[pkey] = perks.get(pkey, 0) + pval
+        economy._save()
+        perk_announcement = f"\n🏅 **{title}** title unlocked! +{pval}% {_perk_label(pkey)}"
+
+    msg = (
+        f"👍 {giver.mention} gave +1 rep to {user.mention}!\n"
+        f"📊 {user.display_name}'s rep: **{new_rep}**"
+    )
+    if reason:
+        msg += f"\n💬 _\"{reason[:100]}\"_"
+    if perk_announcement:
+        msg += perk_announcement
+
+    await interaction.response.send_message(
+        msg,
+        allowed_mentions=discord.AllowedMentions(users=[user]),
+    )
+
+
+@tree.command(name="reputation", description="Check a user's reputation.")
+@discord.app_commands.describe(user="Whose rep to check (defaults to you)")
+async def reputation_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    rep = economy._user(target.id).get("rep", 0)
+    counters = _get_counters(target.id)
+    last_given = counters.get("last_rep_given", 0)
+    can_give = time.time() - last_given >= REP_COOLDOWN_HOURS * 3600
+
+    embed = discord.Embed(
+        title=f"👍 {target.display_name}'s Reputation",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Rep Score", value=f"**{rep}**", inline=False)
+    embed.add_field(
+        name="Can give rep?",
+        value="✅ Ready" if can_give else f"⏰ {fmt_cooldown(int(REP_COOLDOWN_HOURS * 3600 - (time.time() - last_given)))}",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎉 REACTION REWARDS
+# Earn small coin rewards when your messages get reactions.
+# Anti-spam: only first 3 reactions per message count, capped per day.
+# ─────────────────────────────────────────────────────────────────────────────
+REACTION_REWARD = 5         # coins per reaction
+REACTION_DAILY_CAP = 200    # max coins from reactions per user per day
+REACTIONS_PER_MESSAGE_CAP = 3  # max reactions counted per single message
+
+
+@client.event
+async def on_reaction_add(reaction: discord.Reaction, user):
+    # Ignore bots and self-reactions
+    if user.bot:
+        return
+    msg = reaction.message
+    if msg.author.bot or msg.author.id == user.id:
+        return
+
+    counters = _get_counters(msg.author.id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    daily_key = f"reactions_today_{today}"
+    msg_key = f"reaction_msg_{msg.id}"
+
+    earned_today = counters.get(daily_key, 0)
+    if earned_today >= REACTION_DAILY_CAP:
+        return
+
+    msg_count = counters.get(msg_key, 0)
+    if msg_count >= REACTIONS_PER_MESSAGE_CAP:
+        return
+
+    counters[msg_key] = msg_count + 1
+    counters[daily_key] = earned_today + REACTION_REWARD
+    economy._save()
+    economy.add(msg.author.id, REACTION_REWARD, "reaction reward")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📋 QUESTS / MISSIONS
+# Daily and weekly tasks for big bonuses. Resets at recap hour.
+# ─────────────────────────────────────────────────────────────────────────────
+QUESTS_FILE = MEMORY_DIR / "quests.json"
+
+DAILY_QUEST_POOL = [
+    {"id": "play_3_games",     "name": "Play 3 games",                   "target": 3,    "reward": 500,  "track": "games_played"},
+    {"id": "win_2_games",      "name": "Win 2 games",                    "target": 2,    "reward": 750,  "track": "games_won"},
+    {"id": "earn_1k",          "name": "Earn 1,000 coins",               "target": 1000, "reward": 500,  "track": "coins_earned"},
+    {"id": "use_5_cmds",       "name": "Use 5 commands",                 "target": 5,    "reward": 300,  "track": "commands_used"},
+    {"id": "give_500",         "name": "Give 500 coins to another user", "target": 500,  "reward": 600,  "track": "coins_given"},
+    {"id": "rob_someone",      "name": "Rob another user",               "target": 1,    "reward": 400,  "track": "rob_attempts"},
+]
+
+WEEKLY_QUEST_POOL = [
+    {"id": "win_10_games",     "name": "Win 10 games this week",         "target": 10,   "reward": 3_000, "track": "games_won"},
+    {"id": "earn_10k",         "name": "Earn 10,000 coins this week",    "target": 10_000,"reward": 2_500, "track": "coins_earned"},
+    {"id": "play_25_games",    "name": "Play 25 games this week",        "target": 25,   "reward": 2_000, "track": "games_played"},
+    {"id": "use_50_cmds",      "name": "Use 50 commands this week",      "target": 50,   "reward": 1_500, "track": "commands_used"},
+]
+
+
+def _load_quests() -> dict:
+    if QUESTS_FILE.exists():
+        try:
+            with open(QUESTS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_quests(data: dict):
+    with open(QUESTS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _get_user_quests(user_id: int) -> dict:
+    """Get quests, generating new ones if needed."""
+    quests = _load_quests()
+    uid = str(user_id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    week = datetime.now(timezone.utc).strftime("%Y-W%U")
+
+    if uid not in quests:
+        quests[uid] = {}
+
+    user_quests = quests[uid]
+
+    # Daily quests
+    if user_quests.get("daily_date") != today:
+        user_quests["daily_date"] = today
+        chosen = random.sample(DAILY_QUEST_POOL, min(3, len(DAILY_QUEST_POOL)))
+        user_quests["daily"] = [
+            {**q, "progress": 0, "completed": False, "claimed": False}
+            for q in chosen
+        ]
+
+    # Weekly quests
+    if user_quests.get("weekly_date") != week:
+        user_quests["weekly_date"] = week
+        chosen = random.sample(WEEKLY_QUEST_POOL, min(2, len(WEEKLY_QUEST_POOL)))
+        user_quests["weekly"] = [
+            {**q, "progress": 0, "completed": False, "claimed": False}
+            for q in chosen
+        ]
+
+    quests[uid] = user_quests
+    _save_quests(quests)
+    return user_quests
+
+
+def track_quest_progress(user_id: int, track_key: str, amount: int = 1):
+    """Increment progress on any quest tracking this key."""
+    user_quests = _get_user_quests(user_id)
+    quests = _load_quests()
+    uid = str(user_id)
+    changed = False
+    for bucket in ("daily", "weekly"):
+        for q in user_quests.get(bucket, []):
+            if q["track"] == track_key and not q["completed"]:
+                q["progress"] += amount
+                if q["progress"] >= q["target"]:
+                    q["completed"] = True
+                changed = True
+    if changed:
+        quests[uid] = user_quests
+        _save_quests(quests)
+
+
+@tree.command(name="quests", description="See your daily and weekly quests.")
+async def quests_command(interaction: discord.Interaction):
+    user = interaction.user
+    user_quests = _get_user_quests(user.id)
+
+    embed = discord.Embed(
+        title="📋 QUESTS",
+        description="_Daily quests reset every 24h. Weekly resets every Monday._",
+        color=discord.Color.purple(),
+    )
+
+    def fmt_quest(q):
+        if q["claimed"]:
+            return f"✅ ~~**{q['name']}**~~ — _claimed_"
+        elif q["completed"]:
+            return f"🎁 **{q['name']}** — Ready to claim! ({q['progress']}/{q['target']}) — **+{q['reward']:,}**"
+        else:
+            return f"⏳ {q['name']} — {q['progress']}/{q['target']} — _+{q['reward']:,}_"
+
+    daily_text = "\n".join(fmt_quest(q) for q in user_quests.get("daily", []))
+    weekly_text = "\n".join(fmt_quest(q) for q in user_quests.get("weekly", []))
+    embed.add_field(name="📅 DAILY", value=daily_text or "_No quests_", inline=False)
+    embed.add_field(name="📆 WEEKLY", value=weekly_text or "_No quests_", inline=False)
+    embed.set_footer(text="Use /claimquest to claim completed quests.")
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="claimquest", description="Claim rewards from completed quests.")
+async def claimquest_command(interaction: discord.Interaction):
+    user = interaction.user
+    user_quests = _get_user_quests(user.id)
+    quests = _load_quests()
+    uid = str(user.id)
+
+    claimed = []
+    total_reward = 0
+    for bucket in ("daily", "weekly"):
+        for q in user_quests.get(bucket, []):
+            if q["completed"] and not q["claimed"]:
+                q["claimed"] = True
+                economy.add(user.id, q["reward"], f"quest: {q['id']}")
+                claimed.append(f"✅ **{q['name']}** (+{q['reward']:,})")
+                total_reward += q["reward"]
+
+    quests[uid] = user_quests
+    _save_quests(quests)
+
+    if not claimed:
+        await interaction.response.send_message(
+            "No completed quests to claim. Run `/quests` to see progress.", ephemeral=True
+        )
+        return
+
+    new_bal = economy.balance(user.id)
+    await interaction.response.send_message(
+        f"🎁 **QUESTS CLAIMED!**\n\n" + "\n".join(claimed) +
+        f"\n\nTotal: **{total_reward:,}** coins\nBalance: **{new_bal:,}**"
+    )
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -7307,7 +7843,21 @@ async def commands_command(interaction: discord.Interaction):
             "`/level` Your XP, level, and title\n"
             "`/achievements` View earned badges + perks\n"
             "`/tournament` Weekly leaderboard\n"
-            "_Chat to earn XP. Level up for permanent perks. Top 3 weekly = big prizes._"
+            "`/quests` Daily & weekly missions\n"
+            "`/claimquest` Claim completed quests\n"
+            "`/rep @user` Give someone reputation\n"
+            "`/reputation` Check rep score"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🐶 PETS",
+        value=(
+            "`/adopt` Get a pet (1,500 coins)\n"
+            "`/pet` Check your pet's stats\n"
+            "`/feed` Feed your pet (50 coins)\n"
+            "`/collect` Claim earnings\n"
+            "`/abandon` Give up your pet"
         ),
         inline=False,
     )
@@ -7566,6 +8116,16 @@ PREFIX_COMMANDS = {
     "rank":         ("level",         [{"name":"user","type":"user","required":False,"default":None}]),
     "tournament":   ("tournament",    []),
     "tourney":      ("tournament",    []),
+    "adopt":        ("adopt",         [{"name":"pet_type","type":"str","required":True},{"name":"name","type":"rest_str","required":True}]),
+    "pet":          ("pet",           [{"name":"user","type":"user","required":False,"default":None}]),
+    "feed":         ("feed",          []),
+    "collect":      ("collect",       []),
+    "abandon":      ("abandon",       []),
+    "rep":          ("rep",           [{"name":"user","type":"user","required":True},{"name":"reason","type":"rest_str","required":False,"default":None}]),
+    "reputation":   ("reputation",    [{"name":"user","type":"user","required":False,"default":None}]),
+    "quests":       ("quests",        []),
+    "claimquest":   ("claimquest",    []),
+    "claim":        ("claimquest",    []),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
@@ -7663,6 +8223,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             return True
         kwargs["choice"] = discord.app_commands.Choice(name=choice_value, value=choice_value)
 
+    if slash_name == "adopt":
+        # adopt takes a pet_type Choice
+        pet_type = kwargs.get("pet_type", "").lower()
+        if pet_type not in PET_TYPES:
+            await message.channel.send(
+                f"❌ Pet types: {', '.join(PET_TYPES.keys())}"
+            )
+            return True
+        kwargs["pet_type"] = discord.app_commands.Choice(name=pet_type, value=pet_type)
+
     # Build a fake interaction and invoke the underlying callback
     fake = _PrefixInteraction(message)
     try:
@@ -7717,6 +8287,8 @@ async def on_message(message: discord.Message):
                 await grant_xp(message.author.id, XP_PER_COMMAND, channel=message.channel)
                 # Track command use for tournament scoring
                 add_tournament_score(message.author.id, commands_used=1)
+                # Track quest progress
+                track_quest_progress(message.author.id, "commands_used")
             except Exception:
                 pass
             return
