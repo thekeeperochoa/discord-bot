@@ -283,15 +283,26 @@ class Economy:
         self._save()
         return True
 
-    def record_win(self, user_id: int):
+    def record_win(self, user_id: int, game: str = "generic", channel=None):
         u = self._user(user_id)
         u["stats"]["games_won"] = u["stats"].get("games_won", 0) + 1
         self._save()
+        # Schedule achievement checks asynchronously
+        try:
+            asyncio.create_task(trigger_game_win(user_id, game, channel))
+            asyncio.create_task(trigger_balance_check(user_id, channel))
+        except RuntimeError:
+            pass  # No running loop (e.g. during startup)
 
-    def record_loss(self, user_id: int):
+    def record_loss(self, user_id: int, game: str = "generic", channel=None):
         u = self._user(user_id)
         u["stats"]["games_lost"] = u["stats"].get("games_lost", 0) + 1
         self._save()
+        try:
+            asyncio.create_task(trigger_game_loss(user_id, game, channel))
+            asyncio.create_task(trigger_balance_check(user_id, channel))
+        except RuntimeError:
+            pass
 
     def stats(self, user_id: int) -> dict:
         return self._user(user_id)["stats"].copy()
@@ -321,6 +332,695 @@ class Economy:
 
 
 economy = Economy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏆 ACHIEVEMENTS SYSTEM
+# Visible badges, one-time coin rewards, permanent perks.
+# Stored alongside economy data (in the user record).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Each achievement: id -> {emoji, name, description, reward, perk?, perk_value?, hidden?}
+# Perks (applied automatically by the economy/cmd code):
+#   "daily_bonus_pct"   : extra % on /daily payouts
+#   "rob_protection_pct": % chance to nullify a rob attempt
+#   "slots_luck_pct"    : extra % win chance on slots pairs
+#   "blackjack_payout_pct": extra % multiplier on blackjack wins
+#   "fight_armor_pct"   : reduce fight loss by this %
+#   "lottery_discount_pct": % off lottery tickets
+#   "work_bonus_pct"    : extra % on /work payouts
+#   "wheel_luck_pct"    : extra weight on positive wheel outcomes
+#   "passive_income"    : flat coins added per /daily claim
+ACHIEVEMENTS: dict[str, dict] = {
+    # ── Economy milestones ──
+    "first_grand": {
+        "emoji": "💵", "name": "First Grand",
+        "description": "Reach 1,000 coins.",
+        "reward": 100,
+    },
+    "ten_grand": {
+        "emoji": "💰", "name": "Stacks",
+        "description": "Reach 10,000 coins.",
+        "reward": 500,
+        "perk": "daily_bonus_pct", "perk_value": 5,
+    },
+    "hundred_grand": {
+        "emoji": "💎", "name": "Hundred Stacks",
+        "description": "Reach 100,000 coins.",
+        "reward": 2_500,
+        "perk": "daily_bonus_pct", "perk_value": 10,
+    },
+    "millionaire": {
+        "emoji": "👑", "name": "Millionaire",
+        "description": "Reach 1,000,000 coins.",
+        "reward": 25_000,
+        "perk": "passive_income", "perk_value": 100,
+    },
+
+    # ── Daily/work grinder ──
+    "first_daily": {
+        "emoji": "📦", "name": "Day One",
+        "description": "Claim your first /daily.",
+        "reward": 50,
+    },
+    "daily_streak_7": {
+        "emoji": "🔥", "name": "Week Streak",
+        "description": "Claim /daily 7 days in a row.",
+        "reward": 500,
+        "perk": "daily_bonus_pct", "perk_value": 5,
+    },
+    "workhorse": {
+        "emoji": "🛠️", "name": "Workhorse",
+        "description": "Use /work 25 times.",
+        "reward": 300,
+        "perk": "work_bonus_pct", "perk_value": 10,
+    },
+
+    # ── Gambling ──
+    "first_jackpot": {
+        "emoji": "🎰", "name": "Lucky",
+        "description": "Hit a slots jackpot.",
+        "reward": 250,
+        "perk": "slots_luck_pct", "perk_value": 5,
+    },
+    "diamond_hands": {
+        "emoji": "💠", "name": "Diamond Hands",
+        "description": "Hit triple diamonds on slots.",
+        "reward": 1_000,
+    },
+    "lottery_winner": {
+        "emoji": "🎟️", "name": "Jackpot Royalty",
+        "description": "Win the lottery.",
+        "reward": 500,
+        "perk": "lottery_discount_pct", "perk_value": 10,
+    },
+    "blackjack_natural": {
+        "emoji": "🃏", "name": "Natural",
+        "description": "Get a natural 21 in blackjack.",
+        "reward": 300,
+        "perk": "blackjack_payout_pct", "perk_value": 5,
+    },
+
+    # ── Combat / PvP ──
+    "first_blood": {
+        "emoji": "🩸", "name": "First Blood",
+        "description": "Win your first /duel.",
+        "reward": 100,
+    },
+    "fight_champ": {
+        "emoji": "🏆", "name": "Champion",
+        "description": "Win 10 /fight matches.",
+        "reward": 1_500,
+        "perk": "fight_armor_pct", "perk_value": 15,
+    },
+    "shootout_winner": {
+        "emoji": "🚪", "name": "Last One Standing",
+        "description": "Win a /shootout.",
+        "reward": 500,
+    },
+    "russian_winner": {
+        "emoji": "🎯", "name": "Iron Nerve",
+        "description": "Survive Russian roulette /gun.",
+        "reward": 400,
+    },
+
+    # ── Crime ──
+    "successful_thief": {
+        "emoji": "🦝", "name": "Pickpocket Pro",
+        "description": "Successfully /rob 10 users.",
+        "reward": 750,
+        "perk": "rob_protection_pct", "perk_value": 10,
+    },
+    "victim": {
+        "emoji": "💸", "name": "Easy Target",
+        "description": "Get robbed 5 times.",
+        "reward": 200,
+        "perk": "rob_protection_pct", "perk_value": 15,  # consolation perk
+    },
+    "heist_legend": {
+        "emoji": "🚐", "name": "Heist Legend",
+        "description": "Pull off 5 successful heists.",
+        "reward": 800,
+    },
+    "criminal_mind": {
+        "emoji": "🦹", "name": "Career Criminal",
+        "description": "Commit 25 successful crimes.",
+        "reward": 600,
+    },
+
+    # ── Social / Drama ──
+    "married": {
+        "emoji": "💍", "name": "Wedded",
+        "description": "Get married.",
+        "reward": 300,
+        "perk": "passive_income", "perk_value": 25,
+    },
+    "divorced": {
+        "emoji": "💔", "name": "Heartbreaker",
+        "description": "Get divorced.",
+        "reward": 100,
+    },
+    "court_winner": {
+        "emoji": "⚖️", "name": "Litigator",
+        "description": "Win 3 lawsuits.",
+        "reward": 500,
+    },
+
+    # ── Misc / Vanity ──
+    "fortune_teller": {
+        "emoji": "🔮", "name": "Mystic",
+        "description": "Get 10 tarot readings.",
+        "reward": 200,
+    },
+    "bomb_passer": {
+        "emoji": "💣", "name": "Hot Hands",
+        "description": "Successfully pass a /bomb 5 times before it explodes.",
+        "reward": 300,
+    },
+    "wheel_jackpot": {
+        "emoji": "🎡", "name": "Big Wheel",
+        "description": "Hit the /wheel jackpot (+5,000).",
+        "reward": 500,
+        "perk": "wheel_luck_pct", "perk_value": 10,
+    },
+    "completionist": {
+        "emoji": "🌟", "name": "Completionist",
+        "description": "Earn 20 other achievements.",
+        "reward": 5_000,
+        "perk": "passive_income", "perk_value": 50,
+    },
+}
+
+
+def _get_achievements(user_id: int) -> list:
+    """Return list of earned achievement IDs for a user."""
+    u = economy._user(user_id)
+    return u.setdefault("achievements", [])
+
+
+def _get_counters(user_id: int) -> dict:
+    """Return per-user counters (used for milestone tracking like 'won 10 fights')."""
+    u = economy._user(user_id)
+    return u.setdefault("counters", {})
+
+
+def _bump_counter(user_id: int, key: str, by: int = 1) -> int:
+    counters = _get_counters(user_id)
+    counters[key] = counters.get(key, 0) + by
+    economy._save()
+    return counters[key]
+
+
+def _set_counter(user_id: int, key: str, value):
+    counters = _get_counters(user_id)
+    counters[key] = value
+    economy._save()
+
+
+def _user_has_achievement(user_id: int, ach_id: str) -> bool:
+    return ach_id in _get_achievements(user_id)
+
+
+async def _grant_achievement(user_id: int, ach_id: str, channel=None):
+    """Award an achievement (one-time). Pays reward, applies perk, announces in channel if given."""
+    if ach_id not in ACHIEVEMENTS:
+        return False
+    if _user_has_achievement(user_id, ach_id):
+        return False
+    ach = ACHIEVEMENTS[ach_id]
+    earned = _get_achievements(user_id)
+    earned.append(ach_id)
+
+    # Pay reward
+    reward = ach.get("reward", 0)
+    if reward > 0:
+        economy.add(user_id, reward, f"achievement: {ach_id}")
+
+    # Apply perk
+    perk_key = ach.get("perk")
+    perk_value = ach.get("perk_value", 0)
+    if perk_key:
+        u = economy._user(user_id)
+        perks = u.setdefault("perks", {})
+        # Stack additively
+        perks[perk_key] = perks.get(perk_key, 0) + perk_value
+    economy._save()
+
+    # Announce
+    if channel:
+        try:
+            embed = discord.Embed(
+                title="🏆 ACHIEVEMENT UNLOCKED!",
+                description=f"{ach['emoji']} **{ach['name']}**\n_{ach['description']}_",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="💰 Reward", value=f"+{reward:,} coins", inline=True)
+            if perk_key:
+                embed.add_field(
+                    name="✨ Perk Unlocked",
+                    value=f"+{perk_value}% {_perk_label(perk_key)}",
+                    inline=True,
+                )
+            embed.add_field(name="🏆 User", value=f"<@{user_id}>", inline=False)
+            await channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+
+    # Check completionist trigger
+    if ach_id != "completionist":
+        if len(earned) >= 20 and not _user_has_achievement(user_id, "completionist"):
+            await _grant_achievement(user_id, "completionist", channel=channel)
+    return True
+
+
+def _perk_label(key: str) -> str:
+    return {
+        "daily_bonus_pct":      "daily bonus",
+        "rob_protection_pct":   "rob protection chance",
+        "slots_luck_pct":       "slots luck",
+        "blackjack_payout_pct": "blackjack payout",
+        "fight_armor_pct":      "fight armor (less loss)",
+        "lottery_discount_pct": "lottery discount",
+        "work_bonus_pct":       "work bonus",
+        "wheel_luck_pct":       "wheel luck",
+        "passive_income":       "coins per daily",
+    }.get(key, key)
+
+
+def get_perk(user_id: int, key: str) -> int:
+    """Return the user's stacked perk value for a given key (or 0)."""
+    u = economy._user(user_id)
+    return u.get("perks", {}).get(key, 0)
+
+
+def get_user_badges(user_id: int) -> str:
+    """Return a string of emoji badges the user has earned."""
+    earned = _get_achievements(user_id)
+    badges = []
+    for ach_id in earned:
+        if ach_id in ACHIEVEMENTS:
+            badges.append(ACHIEVEMENTS[ach_id]["emoji"])
+    return "".join(badges)
+
+
+# ── Trigger functions — called by other commands ─────────────────────────────
+async def trigger_balance_check(user_id: int, channel=None):
+    """Run balance-based achievement checks."""
+    bal = economy.balance(user_id)
+    if bal >= 1_000:
+        await _grant_achievement(user_id, "first_grand", channel)
+    if bal >= 10_000:
+        await _grant_achievement(user_id, "ten_grand", channel)
+    if bal >= 100_000:
+        await _grant_achievement(user_id, "hundred_grand", channel)
+    if bal >= 1_000_000:
+        await _grant_achievement(user_id, "millionaire", channel)
+
+
+async def trigger_daily_claim(user_id: int, channel=None):
+    """Track daily streaks. Returns nothing — just side-effects."""
+    counters = _get_counters(user_id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    last_claim = counters.get("last_daily_date", "")
+    if last_claim == today:
+        return  # already counted today
+    if last_claim == yesterday:
+        streak = counters.get("daily_streak", 0) + 1
+    else:
+        streak = 1
+    counters["daily_streak"] = streak
+    counters["last_daily_date"] = today
+    economy._save()
+
+    # First daily
+    await _grant_achievement(user_id, "first_daily", channel)
+    if streak >= 7:
+        await _grant_achievement(user_id, "daily_streak_7", channel)
+
+
+async def trigger_work_used(user_id: int, channel=None):
+    count = _bump_counter(user_id, "work_count")
+    if count >= 25:
+        await _grant_achievement(user_id, "workhorse", channel)
+
+
+async def trigger_game_win(user_id: int, game: str, channel=None):
+    """Generic per-game win counter."""
+    count = _bump_counter(user_id, f"{game}_wins")
+    if game == "duel" and count >= 1:
+        await _grant_achievement(user_id, "first_blood", channel)
+    elif game == "fight" and count >= 10:
+        await _grant_achievement(user_id, "fight_champ", channel)
+    elif game == "shootout" and count >= 1:
+        await _grant_achievement(user_id, "shootout_winner", channel)
+    elif game == "gun" and count >= 1:
+        await _grant_achievement(user_id, "russian_winner", channel)
+    elif game == "heist" and count >= 5:
+        await _grant_achievement(user_id, "heist_legend", channel)
+    elif game == "crime" and count >= 25:
+        await _grant_achievement(user_id, "criminal_mind", channel)
+    elif game == "rob" and count >= 10:
+        await _grant_achievement(user_id, "successful_thief", channel)
+    elif game == "lawsuit" and count >= 3:
+        await _grant_achievement(user_id, "court_winner", channel)
+
+
+async def trigger_event(user_id: int, event: str, channel=None):
+    """Special one-off events."""
+    if event == "slots_jackpot":
+        await _grant_achievement(user_id, "first_jackpot", channel)
+    elif event == "slots_diamonds":
+        await _grant_achievement(user_id, "diamond_hands", channel)
+    elif event == "blackjack_natural":
+        await _grant_achievement(user_id, "blackjack_natural", channel)
+    elif event == "lottery_won":
+        await _grant_achievement(user_id, "lottery_winner", channel)
+    elif event == "got_robbed":
+        c = _bump_counter(user_id, "robbed_count")
+        if c >= 5:
+            await _grant_achievement(user_id, "victim", channel)
+    elif event == "married":
+        await _grant_achievement(user_id, "married", channel)
+    elif event == "divorced":
+        await _grant_achievement(user_id, "divorced", channel)
+    elif event == "tarot_read":
+        c = _bump_counter(user_id, "tarot_count")
+        if c >= 10:
+            await _grant_achievement(user_id, "fortune_teller", channel)
+    elif event == "bomb_passed":
+        c = _bump_counter(user_id, "bomb_passes")
+        if c >= 5:
+            await _grant_achievement(user_id, "bomb_passer", channel)
+    elif event == "wheel_jackpot":
+        await _grant_achievement(user_id, "wheel_jackpot", channel)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏆 ACHIEVEMENT SYSTEM
+# Tracks milestones across all commands. Unlocks stored per-user in economy.json.
+# Each achievement: id, name, emoji, description, reward (coins).
+# ─────────────────────────────────────────────────────────────────────────────
+
+ACHIEVEMENTS = {
+    # ── Money milestones ─────────────────────────────────────────────────────
+    "broke":         {"emoji":"🥺", "name":"Rock Bottom",        "desc":"Hit 0 coins",                              "reward":50},
+    "first_grand":   {"emoji":"💵", "name":"First Grand",        "desc":"Earned 1,000 total coins",                 "reward":100},
+    "rich":          {"emoji":"💰", "name":"Rich",                "desc":"Reach a balance of 10,000",                "reward":500},
+    "millionaire":   {"emoji":"💎", "name":"Millionaire",         "desc":"Reach a balance of 1,000,000",             "reward":10000},
+    "frugal":        {"emoji":"🏦", "name":"Frugal",              "desc":"Earn 50,000 total over your lifetime",     "reward":1000},
+
+    # ── Daily login ──────────────────────────────────────────────────────────
+    "first_daily":   {"emoji":"📅", "name":"Showed Up",           "desc":"Claimed your first /daily",                "reward":50},
+    "daily_streak_7":{"emoji":"🔥", "name":"On Fire",              "desc":"7-day daily streak",                       "reward":500},
+    "daily_streak_30":{"emoji":"🌟","name":"Habitual",            "desc":"30-day daily streak",                      "reward":2500},
+
+    # ── Game wins ────────────────────────────────────────────────────────────
+    "first_win":     {"emoji":"🥇", "name":"First Blood",         "desc":"Win your first game",                      "reward":100},
+    "ten_wins":      {"emoji":"🏅", "name":"Veteran",             "desc":"Win 10 games",                             "reward":300},
+    "fifty_wins":    {"emoji":"🎖️", "name":"Champion",            "desc":"Win 50 games",                             "reward":1000},
+    "hundred_wins":  {"emoji":"👑", "name":"Legendary",           "desc":"Win 100 games",                            "reward":5000},
+
+    # ── Game losses (lol) ────────────────────────────────────────────────────
+    "first_loss":    {"emoji":"💀", "name":"Welcome to the Club", "desc":"Lose your first game",                     "reward":25},
+    "loss_streak":   {"emoji":"😭", "name":"Pure Pain",            "desc":"Lose 10 games in a row",                   "reward":500},
+
+    # ── Specific game achievements ───────────────────────────────────────────
+    "blackjack_win": {"emoji":"🃏", "name":"21",                   "desc":"Win a /blackjack hand",                    "reward":100},
+    "natural_21":    {"emoji":"♠️", "name":"Natural",              "desc":"Hit a natural blackjack",                  "reward":500},
+    "slots_jackpot": {"emoji":"🎰", "name":"Jackpot!",            "desc":"Hit a slots jackpot (3x match)",           "reward":1000},
+    "slots_diamond": {"emoji":"💎", "name":"Diamond Hands",       "desc":"Hit 3x💎 on slots",                         "reward":5000},
+    "lottery_winner":{"emoji":"🎟️", "name":"Lucky One",           "desc":"Win the daily lottery",                    "reward":2000},
+    "fight_won":     {"emoji":"🥊", "name":"Heavyweight",          "desc":"Win a /fight",                             "reward":200},
+    "fight_streak_3":{"emoji":"🏆", "name":"Undefeated",           "desc":"Win 3 fights in a row",                    "reward":1500},
+    "duel_won":      {"emoji":"🔫", "name":"Quick Draw",           "desc":"Win a /duel",                              "reward":150},
+    "shootout_won":  {"emoji":"🚪", "name":"Last Door Standing",  "desc":"Win a /shootout",                          "reward":500},
+    "russian_winner":{"emoji":"🎯", "name":"Lucky Survivor",      "desc":"Win at /gun",                              "reward":300},
+    "bomb_passer":   {"emoji":"💣", "name":"Hot Hands",            "desc":"Pass a bomb in /bomb",                     "reward":50},
+    "bomb_caught":   {"emoji":"💥", "name":"Boom Goes the Dynamite","desc":"Get blown up by /bomb",                  "reward":100},
+    "heist_success": {"emoji":"💰", "name":"Bank Job",             "desc":"Pull off a successful /heist",             "reward":300},
+    "heist_caught":  {"emoji":"🚔", "name":"Cuffed",               "desc":"Get caught on a /heist",                   "reward":50},
+    "connect4_won":  {"emoji":"🟡", "name":"4 in a Row",           "desc":"Win at /connect4",                         "reward":200},
+    "quest_winner":  {"emoji":"🗡️", "name":"Adventurer",          "desc":"Win a /quest",                             "reward":300},
+    "wheel_jackpot": {"emoji":"🎡", "name":"Spin to Win",          "desc":"Hit the wheel jackpot",                    "reward":1500},
+
+    # ── Crime & rob ──────────────────────────────────────────────────────────
+    "first_robbery": {"emoji":"🦝", "name":"Sticky Fingers",       "desc":"Successfully rob someone",                 "reward":150},
+    "rob_caught":    {"emoji":"👮", "name":"On Probation",         "desc":"Get caught robbing",                       "reward":50},
+    "crime_streak":  {"emoji":"🦹", "name":"Career Criminal",      "desc":"Win 5 /crime in a row",                    "reward":750},
+
+    # ── Social ───────────────────────────────────────────────────────────────
+    "married":       {"emoji":"💍", "name":"Locked Down",          "desc":"Got married via /marry",                   "reward":500},
+    "divorced":      {"emoji":"💔", "name":"Free Again",           "desc":"Got divorced",                             "reward":200},
+    "rich_friends":  {"emoji":"💸", "name":"Generous",             "desc":"Send 5,000+ coins via /pay",               "reward":300},
+    "victim":        {"emoji":"😢", "name":"The Mark",             "desc":"Got robbed by another user",               "reward":75},
+    "court_winner":  {"emoji":"⚖️", "name":"Order in the Court",  "desc":"Win a /lawsuit",                           "reward":300},
+
+    # ── AI command users ─────────────────────────────────────────────────────
+    "first_roast":   {"emoji":"🔥", "name":"Roasted",              "desc":"Got roasted by /roast",                    "reward":50},
+    "tarot_reader":  {"emoji":"🔮", "name":"Mystic",               "desc":"Got a /tarot reading",                     "reward":50},
+    "analyzed":      {"emoji":"🔍", "name":"Self-Aware",           "desc":"Ran /analyze on yourself",                 "reward":50},
+
+    # ── Shop ─────────────────────────────────────────────────────────────────
+    "first_role":    {"emoji":"🎨", "name":"Drip",                 "desc":"Buy a colored role",                       "reward":250},
+    "perm_role":     {"emoji":"♾️", "name":"Permanent Drip",       "desc":"Buy a PERMANENT colored role",             "reward":1000},
+    "protector":     {"emoji":"🛡️", "name":"Untouchable",         "desc":"Buy /protect for the first time",          "reward":150},
+    "megaphone":     {"emoji":"📢", "name":"Loudmouth",            "desc":"Use /megaphone for the first time",        "reward":300},
+
+    # ── Hidden / fun ─────────────────────────────────────────────────────────
+    "lucky_7":       {"emoji":"7️⃣", "name":"Triple 7s",            "desc":"Hit 3x7️⃣ on slots",                        "reward":2500},
+    "lieordie_pro":  {"emoji":"🤥", "name":"Detector",             "desc":"Win 10 /lieordie rounds",                  "reward":500},
+    "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
+}
+
+
+def _get_achievements(user_id: int) -> set:
+    """Get the set of achievement IDs the user has unlocked."""
+    u = economy._user(user_id)
+    return set(u.setdefault("achievements", []))
+
+
+def _get_counters(user_id: int) -> dict:
+    """Get the user's progression counters (used for streaks, totals, etc.)."""
+    u = economy._user(user_id)
+    return u.setdefault("counters", {})
+
+
+def _save_user_data():
+    economy._save()
+
+
+# Pending achievement notifications, batched per user so they don't spam channels
+PENDING_ACHIEVEMENTS: dict[int, list[str]] = defaultdict(list)
+
+
+async def _grant_achievement(user_id: int, ach_id: str, channel: discord.abc.Messageable | None = None):
+    """Grant an achievement if not already earned. Pays reward + queues notification."""
+    if ach_id not in ACHIEVEMENTS:
+        return False
+    earned = _get_achievements(user_id)
+    if ach_id in earned:
+        return False
+
+    ach = ACHIEVEMENTS[ach_id]
+    u = economy._user(user_id)
+    u.setdefault("achievements", []).append(ach_id)
+    economy.add(user_id, ach["reward"], f"achievement {ach_id}")
+    _save_user_data()
+    log.info("Achievement %s granted to %s", ach_id, user_id)
+
+    # Send notification immediately if channel given
+    if channel is not None:
+        try:
+            await channel.send(
+                f"🎉 {ach['emoji']} **ACHIEVEMENT UNLOCKED**: {ach['name']}\n"
+                f"<@{user_id}> earned **{ach['name']}** — _{ach['desc']}_\n"
+                f"💰 +{ach['reward']:,} coins!",
+                allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=user_id)]) if False else discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+
+    # Check for completionist meta-achievement
+    if ach_id != "completionist" and len(_get_achievements(user_id)) >= 25:
+        await _grant_achievement(user_id, "completionist", channel)
+
+    return True
+
+
+def _bump_counter(user_id: int, key: str, by: int = 1) -> int:
+    """Increment a counter and return the new value."""
+    counters = _get_counters(user_id)
+    counters[key] = counters.get(key, 0) + by
+    _save_user_data()
+    return counters[key]
+
+
+def _set_counter(user_id: int, key: str, value):
+    counters = _get_counters(user_id)
+    counters[key] = value
+    _save_user_data()
+
+
+def _reset_counter(user_id: int, key: str):
+    counters = _get_counters(user_id)
+    counters[key] = 0
+    _save_user_data()
+
+
+# ── Trigger functions called by game commands ───────────────────────────────
+
+async def trigger_game_win(user_id: int, game: str, channel=None):
+    """Call after any game win. Updates counters and grants achievements."""
+    wins = _bump_counter(user_id, "total_wins")
+    _bump_counter(user_id, f"wins_{game}")
+    _reset_counter(user_id, "loss_streak")
+
+    if wins == 1:
+        await _grant_achievement(user_id, "first_win", channel)
+    if wins >= 10:
+        await _grant_achievement(user_id, "ten_wins", channel)
+    if wins >= 50:
+        await _grant_achievement(user_id, "fifty_wins", channel)
+    if wins >= 100:
+        await _grant_achievement(user_id, "hundred_wins", channel)
+
+    # Game-specific
+    game_map = {
+        "blackjack": "blackjack_win",
+        "fight": "fight_won",
+        "duel": "duel_won",
+        "shootout": "shootout_won",
+        "gun": "russian_winner",
+        "connect4": "connect4_won",
+        "quest": "quest_winner",
+    }
+    if game in game_map:
+        await _grant_achievement(user_id, game_map[game], channel)
+
+    # Fight win streak
+    if game == "fight":
+        streak = _bump_counter(user_id, "fight_win_streak")
+        if streak >= 3:
+            await _grant_achievement(user_id, "fight_streak_3", channel)
+    else:
+        # If they win something else, fight streak still counts as fights only
+        pass
+
+    # Crime streak
+    if game == "crime":
+        streak = _bump_counter(user_id, "crime_win_streak")
+        if streak >= 5:
+            await _grant_achievement(user_id, "crime_streak", channel)
+
+    # Lieordie wins
+    if game == "lieordie":
+        if wins_lod := _get_counters(user_id).get("wins_lieordie", 0):
+            if wins_lod >= 10:
+                await _grant_achievement(user_id, "lieordie_pro", channel)
+
+
+async def trigger_game_loss(user_id: int, game: str, channel=None):
+    losses = _bump_counter(user_id, "total_losses")
+    if losses == 1:
+        await _grant_achievement(user_id, "first_loss", channel)
+
+    streak = _bump_counter(user_id, "loss_streak")
+    if streak >= 10:
+        await _grant_achievement(user_id, "loss_streak", channel)
+
+    # Reset relevant win streaks
+    if game == "fight":
+        _set_counter(user_id, "fight_win_streak", 0)
+    if game == "crime":
+        _set_counter(user_id, "crime_win_streak", 0)
+
+
+async def trigger_balance_check(user_id: int, channel=None):
+    """Call whenever balance changes. Checks money milestones."""
+    bal = economy.balance(user_id)
+    if bal == 0:
+        await _grant_achievement(user_id, "broke", channel)
+    if bal >= 10_000:
+        await _grant_achievement(user_id, "rich", channel)
+    if bal >= 1_000_000:
+        await _grant_achievement(user_id, "millionaire", channel)
+
+    # Total earned over lifetime
+    earned = economy._user(user_id).get("stats", {}).get("total_earned", 0)
+    if earned >= 1000:
+        await _grant_achievement(user_id, "first_grand", channel)
+    if earned >= 50_000:
+        await _grant_achievement(user_id, "frugal", channel)
+
+
+async def trigger_daily_claim(user_id: int, channel=None):
+    """Track daily claim streaks."""
+    counters = _get_counters(user_id)
+    last_claim = counters.get("last_daily_claim", 0)
+    now = time.time()
+
+    # First daily ever
+    if last_claim == 0:
+        await _grant_achievement(user_id, "first_daily", channel)
+
+    # Streak: if last claim was within 25 hours but more than 23, count as continuing streak
+    if last_claim and (23 * 3600) <= (now - last_claim) <= (49 * 3600):
+        streak = _bump_counter(user_id, "daily_streak")
+    else:
+        # Either first claim or broken streak
+        _set_counter(user_id, "daily_streak", 1)
+        streak = 1
+
+    _set_counter(user_id, "last_daily_claim", now)
+
+    if streak >= 7:
+        await _grant_achievement(user_id, "daily_streak_7", channel)
+    if streak >= 30:
+        await _grant_achievement(user_id, "daily_streak_30", channel)
+
+
+# ── Convenience: a single hook to call from anywhere ─────────────────────────
+
+async def check_event(user_id: int, event: str, channel=None, **kwargs):
+    """Generic event hook for misc one-off achievements."""
+    table = {
+        "natural_21":         "natural_21",
+        "slots_jackpot":      "slots_jackpot",
+        "slots_diamond":      "slots_diamond",
+        "lucky_7":            "lucky_7",
+        "lottery_won":        "lottery_winner",
+        "wheel_jackpot":      "wheel_jackpot",
+        "bomb_passed":        "bomb_passer",
+        "bomb_caught":        "bomb_caught",
+        "heist_success":      "heist_success",
+        "heist_caught":       "heist_caught",
+        "rob_success":        "first_robbery",
+        "rob_caught":         "rob_caught",
+        "got_robbed":         "victim",
+        "married":            "married",
+        "divorced":           "divorced",
+        "court_won":          "court_winner",
+        "got_roasted":        "first_roast",
+        "got_tarot":          "tarot_reader",
+        "got_analyzed":       "analyzed",
+        "bought_role":        "first_role",
+        "bought_perm_role":   "perm_role",
+        "bought_protect":     "protector",
+        "bought_megaphone":   "megaphone",
+    }
+    if event in table:
+        await _grant_achievement(user_id, table[event], channel)
+
+    # Special handling for /pay
+    if event == "paid_amount":
+        amount = kwargs.get("amount", 0)
+        total = _bump_counter(user_id, "total_paid", amount)
+        if total >= 5000:
+            await _grant_achievement(user_id, "rich_friends", channel)
 
 
 def fmt_cooldown(seconds: int) -> str:
@@ -1618,6 +2318,8 @@ async def duel_command(interaction: discord.Interaction, opponent: discord.Membe
     new_bal = economy.add(winner.id, duel_prize, "duel win")
     economy.record_win(winner.id)
     economy.record_loss(loser.id)
+    await trigger_game_win(winner.id, "duel", channel=interaction.channel)
+    await trigger_balance_check(winner.id, channel=interaction.channel)
     final = (
         f"🎩 **DUEL RESULT** 🎩\n\n"
         f"{random.choice(flavors)}\n\n"
@@ -1728,6 +2430,8 @@ async def gun_command(
     for p in players:
         if p.id != winner.id:
             economy.record_loss(p.id)
+    await trigger_game_win(winner.id, "gun", channel=interaction.channel)
+    await trigger_balance_check(winner.id, channel=interaction.channel)
     final = (
         f"🎯 **GAME OVER**\n\n"
         + "\n".join(log_lines[-8:])
@@ -1821,6 +2525,8 @@ async def heist_command(
         loot_emoji, loot_name = random.choice(HEIST_LOOT)
         economy.add(p.id, amount, "heist payout")
         economy.record_win(p.id)
+        await trigger_game_win(p.id, "heist", channel=interaction.channel)
+        await trigger_balance_check(p.id, channel=interaction.channel)
         payouts.append((p, amount, loot_emoji, loot_name))
         total += amount
 
@@ -2102,6 +2808,10 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
             f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
             f"Balance: **{new_bal:,}**"
         )
+        await trigger_event(user.id, "slots_jackpot", channel=interaction.channel)
+        if symbol == "💎":
+            await trigger_event(user.id, "slots_diamonds", channel=interaction.channel)
+        await trigger_balance_check(user.id, channel=interaction.channel)
     elif final_reels[0] == final_reels[1] or final_reels[1] == final_reels[2] or final_reels[0] == final_reels[2]:
         # Pair: bet × 1.5 (small profit)
         pair_symbol = max(set(final_reels), key=final_reels.count)
@@ -2115,13 +2825,27 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
             f"Balance: **{new_bal:,}**"
         )
     else:
-        economy.record_loss(user.id)
-        new_bal = economy.balance(user.id)
-        result = (
-            f"## 💸 NO MATCH 💸\n\n"
-            f"{user.mention} lost **{bet:,}** coins.\n"
-            f"Balance: **{new_bal:,}**"
-        )
+        # Apply slots luck perk for retroactive pair check
+        slots_luck_pct = get_perk(user.id, "slots_luck_pct")
+        if slots_luck_pct and random.randint(1, 100) <= slots_luck_pct:
+            # Pity pair payout
+            winnings = int(bet * 1.5)
+            new_bal = economy.add(user.id, winnings, "slots luck pity")
+            economy.record_win(user.id)
+            result = (
+                f"## 🍀 LUCKY! 🍀\n\n"
+                f"{user.mention}'s luck activated.\n"
+                f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
+                f"Balance: **{new_bal:,}**"
+            )
+        else:
+            economy.record_loss(user.id)
+            new_bal = economy.balance(user.id)
+            result = (
+                f"## 💸 NO MATCH 💸\n\n"
+                f"{user.mention} lost **{bet:,}** coins.\n"
+                f"Balance: **{new_bal:,}**"
+            )
 
     final_display = render(final_reels, "🎰 RESULT 🎰") + "\n\n" + result
     try:
@@ -2141,14 +2865,23 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
     target = user or interaction.user
     bal = economy.balance(target.id)
     stats = economy.stats(target.id)
-    embed = discord.Embed(
-        title=f"{COIN_EMOJI} {target.display_name}'s Wallet",
-        color=discord.Color.gold(),
-    )
+    badges = get_user_badges(target.id)
+    earned_count = len(_get_achievements(target.id))
+
+    title = f"{COIN_EMOJI} {target.display_name}'s Wallet"
+    if badges:
+        title = f"{badges} {target.display_name}"
+
+    embed = discord.Embed(title=title, color=discord.Color.gold())
     embed.add_field(name="Balance", value=f"**{bal:,}** coins", inline=False)
     embed.add_field(name="Wins", value=str(stats.get("games_won", 0)), inline=True)
     embed.add_field(name="Losses", value=str(stats.get("games_lost", 0)), inline=True)
     embed.add_field(name="Total Earned", value=f"{stats.get('total_earned',0):,}", inline=True)
+    embed.add_field(
+        name=f"🏆 Achievements ({earned_count}/{len(ACHIEVEMENTS)})",
+        value=(badges or "_none yet — try /achievements_"),
+        inline=False,
+    )
     await interaction.response.send_message(embed=embed)
 
 
@@ -2180,12 +2913,22 @@ async def daily_command(interaction: discord.Interaction):
     await asyncio.sleep(0.9)
     await edit("✨ *...*")
     await asyncio.sleep(0.7)
-    new_bal = economy.add(user.id, reward, "daily")
+    # Apply daily_bonus_pct perk + passive_income perk
+    bonus_pct = get_perk(user.id, "daily_bonus_pct")
+    passive = get_perk(user.id, "passive_income")
+    final_reward = int(reward * (1 + bonus_pct / 100)) + passive
+    new_bal = economy.add(user.id, final_reward, "daily")
+    bonus_text = ""
+    if bonus_pct or passive:
+        bonus_text = f"\n_(+{bonus_pct}% bonus, +{passive} passive)_"
     await edit(
         f"🎁 **DAILY REWARD!**\n\n"
-        f"You found {COIN_EMOJI} **{reward:,}** coins!\n"
+        f"You found {COIN_EMOJI} **{final_reward:,}** coins!{bonus_text}\n"
         f"Balance: **{new_bal:,}**"
     )
+    # Achievements
+    await trigger_daily_claim(user.id, channel=interaction.channel)
+    await trigger_balance_check(user.id, channel=interaction.channel)
 
 
 @tree.command(name="weekly", description="Claim your weekly coin reward (bigger but rarer).")
@@ -2261,6 +3004,9 @@ async def work_command(interaction: discord.Interaction):
 
     emoji, job = random.choice(WORK_JOBS)
     reward = random.randint(WORK_MIN, WORK_MAX)
+    work_bonus_pct = get_perk(user.id, "work_bonus_pct")
+    if work_bonus_pct:
+        reward = int(reward * (1 + work_bonus_pct / 100))
     economy.set_cooldown(user.id, "work")
 
     await edit(f"{emoji} *Clocking in at {job}...*")
@@ -2275,6 +3021,8 @@ async def work_command(interaction: discord.Interaction):
         f"You worked at *{job}* and earned {COIN_EMOJI} **{reward:,}** coins.\n"
         f"Balance: **{new_bal:,}**"
     )
+    await trigger_work_used(user.id, channel=interaction.channel)
+    await trigger_balance_check(user.id, channel=interaction.channel)
 
 
 @tree.command(name="beg", description="Beg for spare change. Sometimes you get nothing.")
@@ -2385,6 +3133,15 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
     await edit(f"🦝 *reaching into the wallet...*")
     await asyncio.sleep(1.5)
 
+    # Apply rob protection perk on target
+    target_protection_pct = get_perk(target.id, "rob_protection_pct")
+    if target_protection_pct and random.randint(1, 100) <= target_protection_pct:
+        await edit(
+            f"🛡️ **{target.mention}'s instincts kicked in.**\n\n"
+            f"They sensed the threat. {user.mention} bailed empty-handed."
+        )
+        return
+
     if random.random() < ROB_SUCCESS_CHANCE:
         # Success
         pct = random.uniform(ROB_PERCENT_MIN, ROB_PERCENT_MAX)
@@ -2396,6 +3153,9 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
             f"{user.mention} stole **{amount:,}** coins from {target.mention}!\n"
             f"{user.display_name}'s balance: **{new_bal:,}**"
         )
+        await trigger_game_win(user.id, "rob", channel=interaction.channel)
+        await trigger_event(target.id, "got_robbed", channel=interaction.channel)
+        await trigger_balance_check(user.id, channel=interaction.channel)
     else:
         # Caught — pay a fine
         fine = random.randint(ROB_FINE_MIN, ROB_FINE_MAX)
@@ -2463,7 +3223,9 @@ async def leaderboard_command(interaction: discord.Interaction):
         except Exception:
             name = f"User {uid}"
         prefix = medals[i] if i < 3 else f"`#{i+1}`"
-        lines.append(f"{prefix} **{name}** — {COIN_EMOJI} {data.get('balance', 0):,}")
+        badges = get_user_badges(int(uid))
+        badge_str = f" {badges}" if badges else ""
+        lines.append(f"{prefix} **{name}**{badge_str} — {COIN_EMOJI} {data.get('balance', 0):,}")
 
     embed = discord.Embed(
         title="🏆 Richest Users",
@@ -2711,8 +3473,9 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
 
     # Natural blackjack on the deal?
     if player_total == 21:
-        # Pay 2.5x for natural
-        winnings = int(bet * 2.5)
+        # Pay 2.5x for natural (plus blackjack_payout_pct perk)
+        bj_perk = get_perk(user.id, "blackjack_payout_pct")
+        winnings = int(bet * (2.5 + bj_perk / 100))
         economy.add(user.id, winnings, "blackjack natural")
         economy.record_win(user.id)
         del active_blackjack[user.id]
@@ -2725,6 +3488,8 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
             f"Won **{winnings:,}** coins!\n"
             f"Balance: **{new_bal:,}**"
         )
+        await trigger_event(user.id, "blackjack_natural", channel=interaction.channel)
+        await trigger_balance_check(user.id, channel=interaction.channel)
         return
 
     view = BlackjackView(user.id, bet)
@@ -2800,6 +3565,8 @@ async def crime_command(interaction: discord.Interaction):
         economy.record_win(user.id)
         result = f"💰 **+{amount:,} coins**\nBalance: **{new_bal:,}**"
         header = "## 🦹 CRIME SUCCESSFUL"
+        await trigger_game_win(user.id, "crime", channel=interaction.channel)
+        await trigger_balance_check(user.id, channel=interaction.channel)
     else:
         fine = min(random.randint(100, 400), economy.balance(user.id))
         new_bal = economy.add(user.id, -fine, "crime failed")
@@ -2859,6 +3626,10 @@ class MarryView(discord.ui.View):
         bonus = 1000
         economy.add(self.proposer_id, bonus, "wedding gift")
         economy.add(self.target_id, bonus, "wedding gift")
+        # Achievements
+        chan = interaction.channel
+        await trigger_event(self.proposer_id, "married", channel=chan)
+        await trigger_event(self.target_id, "married", channel=chan)
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
@@ -2964,6 +3735,7 @@ async def divorce_command(interaction: discord.Interaction):
     bal = economy.balance(user.id)
     actual = min(cost, bal)
     economy.add(user.id, -actual, "divorce")
+    await trigger_event(user.id, "divorced", channel=interaction.channel)
 
     del marriages[str(user.id)]
     if str(spouse_id) in marriages:
@@ -3026,8 +3798,15 @@ async def wheel_command(interaction: discord.Interaction):
         await edit(f"🎡 *slowing...*\n\n> {sample['label']}")
         await asyncio.sleep(0.5)
 
-    # Pick weighted outcome
+    # Pick weighted outcome with wheel_luck_pct perk
     weights = [o["weight"] for o in WHEEL_OUTCOMES]
+    luck_pct = get_perk(user.id, "wheel_luck_pct")
+    if luck_pct:
+        # Boost positive outcomes by perk percentage
+        weights = [
+            int(w * (1 + luck_pct / 100)) if WHEEL_OUTCOMES[i]["type"] in ("gain", "double") else w
+            for i, w in enumerate(weights)
+        ]
     outcome = random.choices(WHEEL_OUTCOMES, weights=weights, k=1)[0]
 
     label = outcome["label"]
@@ -3035,6 +3814,9 @@ async def wheel_command(interaction: discord.Interaction):
     if outcome["type"] == "gain":
         new_bal = economy.add(user.id, outcome["amount"], "wheel gain")
         result_text = f"You gained **{outcome['amount']:,}** coins!\nBalance: **{new_bal:,}**"
+        if outcome["amount"] >= 5000:
+            await trigger_event(user.id, "wheel_jackpot", channel=interaction.channel)
+        await trigger_balance_check(user.id, channel=interaction.channel)
     elif outcome["type"] == "loss":
         actual = min(outcome["amount"], economy.balance(user.id))
         new_bal = economy.add(user.id, -actual, "wheel loss")
@@ -3575,6 +4357,9 @@ async def lottery_command(interaction: discord.Interaction, tickets: int = 0):
         return
 
     cost = tickets * LOTTERY_TICKET_PRICE
+    discount_pct = get_perk(user.id, "lottery_discount_pct")
+    if discount_pct:
+        cost = int(cost * (1 - discount_pct / 100))
     bal = economy.balance(user.id)
     if bal < cost:
         await interaction.response.send_message(
@@ -3636,6 +4421,13 @@ async def lottery_drawing_scheduler():
             # Pay out
             economy.add(int(winner_uid), jackpot, "lottery jackpot")
             economy.record_win(int(winner_uid))
+            # Try to grant achievement (no channel ref handy here but channel below works)
+            try:
+                if channel:
+                    await trigger_event(int(winner_uid), "lottery_won", channel=channel)
+                    await trigger_balance_check(int(winner_uid), channel=channel)
+            except Exception:
+                pass
             data["history"] = data.get("history", [])
             data["history"].append({
                 "winner_id": winner_uid,
@@ -4545,6 +5337,8 @@ async def _run_shootout(interaction: discord.Interaction, lobby: dict, buy_in: i
     winner = players[0]
     economy.add(winner, pot, "shootout win")
     economy.record_win(winner)
+    await trigger_game_win(winner, "shootout", channel=channel)
+    await trigger_balance_check(winner, channel=channel)
     new_bal = economy.balance(winner)
     await channel.send(
         f"# 🏆 SHOOTOUT CHAMPION 🏆\n\n"
@@ -4674,6 +5468,8 @@ class BombPassModal(discord.ui.Modal, title="💣 Pass the Bomb"):
 
         bomb["holder_id"] = target_id
         bomb["passes"] = bomb.get("passes", 0) + 1
+        # Track who passed the bomb (for achievement)
+        await trigger_event(interaction.user.id, "bomb_passed", channel=interaction.channel)
         await interaction.response.send_message(
             f"💣 {interaction.user.mention} passed the bomb to {target.mention}!\n"
             f"⏰ Time remaining: ~**{int(bomb['expires_at'] - time.time())}s**\n"
@@ -5301,9 +6097,17 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
 
     # Pay the fighter wager pot to the winner (2x their wager)
     fighter_payout = fight["wager"] * 2
+    # Apply fight_armor_pct perk on loser — they get a partial wager refund
+    armor = get_perk(loser_id, "fight_armor_pct")
+    if armor:
+        refund = int(fight["wager"] * armor / 100)
+        if refund > 0:
+            economy.add(loser_id, refund, "fight armor refund")
     economy.add(winner_id, fighter_payout, "fight win")
     economy.record_win(winner_id)
     economy.record_loss(loser_id)
+    await trigger_game_win(winner_id, "fight", channel=channel)
+    await trigger_balance_check(winner_id, channel=channel)
 
     # ── Resolve spectator bets (parimutuel) ───────────────────────────────────
     a_pool = sum(b["amount"] for b in fight["bets"].values() if b["side"] == "a")
@@ -5473,6 +6277,7 @@ async def tarot_command(interaction: discord.Interaction):
         f"{reading}"
     )
     await edit(final)
+    await trigger_event(user.id, "tarot_read", channel=interaction.channel)
 
 
 # ── ⚖️ /lawsuit — sue a user, AI judges, real damages ───────────────────────
@@ -5595,6 +6400,8 @@ async def lawsuit_command(interaction: discord.Interaction, defendant: discord.M
         actual = min(amount, economy.balance(defendant.id))
         economy.add(defendant.id, -actual, "lawsuit damages")
         economy.add(plaintiff.id, actual, "lawsuit award")
+        await trigger_game_win(plaintiff.id, "lawsuit", channel=interaction.channel)
+        await trigger_balance_check(plaintiff.id, channel=interaction.channel)
         verdict_line = (
             f"# 🏆 PLAINTIFF WINS\n"
             f"{defendant.mention} owes {plaintiff.mention} **{actual:,}** coins in damages."
@@ -5879,6 +6686,67 @@ async def _resolve_lieordie(interaction: discord.Interaction, channel_id: str):
     ACTIVE_LIEORDIE.pop(channel_id, None)
 
 
+# ── 🏆 /achievements ─────────────────────────────────────────────────────────
+@tree.command(name="achievements", description="See your earned achievements + perks.")
+@discord.app_commands.describe(user="Whose achievements to view (defaults to you)")
+async def achievements_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    earned = _get_achievements(target.id)
+    perks = economy._user(target.id).get("perks", {})
+
+    badges = get_user_badges(target.id)
+    title = f"🏆 {target.display_name}'s Achievements"
+    if badges:
+        title = f"{badges} {target.display_name}'s Achievements"
+
+    embed = discord.Embed(
+        title=title,
+        description=f"**Earned: {len(earned)}/{len(ACHIEVEMENTS)}**",
+        color=discord.Color.gold(),
+    )
+
+    earned_text = []
+    locked_text = []
+    for ach_id, ach in ACHIEVEMENTS.items():
+        line = f"{ach['emoji']} **{ach['name']}** — _{ach['description']}_"
+        if ach.get("perk"):
+            line += f"\n   ↳ Perk: +{ach['perk_value']}% {_perk_label(ach['perk'])}"
+        if ach_id in earned:
+            earned_text.append(line)
+        else:
+            locked_text.append(f"🔒 **{ach['name']}** — _{ach['description']}_")
+
+    if earned_text:
+        # Discord field limit is 1024 chars, so chunk if needed
+        chunk = ""
+        for line in earned_text:
+            if len(chunk) + len(line) + 2 > 1000:
+                embed.add_field(name="✅ Earned", value=chunk, inline=False)
+                chunk = ""
+            chunk += line + "\n\n"
+        if chunk:
+            embed.add_field(name="✅ Earned", value=chunk.strip(), inline=False)
+    else:
+        embed.add_field(name="✅ Earned", value="_none yet — start playing!_", inline=False)
+
+    if locked_text and len(earned) < len(ACHIEVEMENTS):
+        # Show only first ~10 locked to keep it clean
+        locked_show = locked_text[:10]
+        more = len(locked_text) - len(locked_show)
+        locked_value = "\n".join(locked_show)
+        if more > 0:
+            locked_value += f"\n_...and {more} more_"
+        embed.add_field(name="🔒 Locked", value=locked_value[:1020], inline=False)
+
+    if perks:
+        perks_lines = "\n".join(
+            f"+{v}% {_perk_label(k)}" for k, v in perks.items()
+        )
+        embed.add_field(name="✨ Active Perks", value=perks_lines, inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -5896,6 +6764,14 @@ async def commands_command(interaction: discord.Interaction):
             "`/leaderboard` Richest users"
         ),
         inline=False
+    )
+    embed.add_field(
+        name="🏆 PROGRESSION",
+        value=(
+            "`/achievements` View earned badges + perks\n"
+            "_25 achievements with permanent perks. Badges show on /balance and /leaderboard._"
+        ),
+        inline=False,
     )
     embed.add_field(
         name="🛒 SHOP & REDEEM",
@@ -6143,6 +7019,8 @@ PREFIX_COMMANDS = {
     "sue":          ("lawsuit",       [{"name":"defendant","type":"user","required":True},{"name":"claim","type":"rest_str","required":True}]),
     "tarot":        ("tarot",         []),
     "analyze":      ("analyze",       []),
+    "achievements": ("achievements",  [{"name":"user","type":"user","required":False,"default":None}]),
+    "ach":          ("achievements",  [{"name":"user","type":"user","required":False,"default":None}]),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
