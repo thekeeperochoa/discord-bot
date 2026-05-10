@@ -7819,6 +7819,572 @@ async def claimquest_command(interaction: discord.Interaction):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏢 BUSINESSES SYSTEM
+# Buy multiple businesses, hire employees, collect passive income,
+# face risks, sabotage rivals.
+# ─────────────────────────────────────────────────────────────────────────────
+BUSINESSES_FILE = MEMORY_DIR / "businesses.json"
+
+# Business types: cost, base hourly income, max employees, tier (cost scales with quantity)
+BUSINESS_TYPES = {
+    "lemonade": {
+        "emoji": "🍋", "name": "Lemonade Stand",
+        "cost": 2_000, "income_per_hour": 30, "max_employees": 1, "tier": 1,
+        "desc": "A humble beginning. Quick to start.",
+    },
+    "foodtruck": {
+        "emoji": "🚚", "name": "Food Truck",
+        "cost": 10_000, "income_per_hour": 120, "max_employees": 2, "tier": 2,
+        "desc": "Mobile and profitable.",
+    },
+    "barbershop": {
+        "emoji": "💈", "name": "Barbershop",
+        "cost": 25_000, "income_per_hour": 250, "max_employees": 3, "tier": 2,
+        "desc": "Always in demand.",
+    },
+    "cafe": {
+        "emoji": "☕", "name": "Coffee Shop",
+        "cost": 50_000, "income_per_hour": 450, "max_employees": 4, "tier": 3,
+        "desc": "Caffeine addicts pay rent.",
+    },
+    "gym": {
+        "emoji": "💪", "name": "Gym",
+        "cost": 80_000, "income_per_hour": 650, "max_employees": 5, "tier": 3,
+        "desc": "People pay to suffer.",
+    },
+    "nightclub": {
+        "emoji": "🎵", "name": "Nightclub",
+        "cost": 150_000, "income_per_hour": 1_200, "max_employees": 6, "tier": 4,
+        "desc": "Bottles and bouncers.",
+    },
+    "casino": {
+        "emoji": "🎰", "name": "Casino",
+        "cost": 300_000, "income_per_hour": 2_500, "max_employees": 8, "tier": 5,
+        "desc": "The house always wins.",
+    },
+    "techstartup": {
+        "emoji": "💻", "name": "Tech Startup",
+        "cost": 500_000, "income_per_hour": 4_000, "max_employees": 10, "tier": 5,
+        "desc": "Burn cash. Promise the future.",
+    },
+}
+
+# Tier 1: cost stays. Higher tiers: cost increases 50% per additional business owned.
+BUSINESS_QUANTITY_MULTIPLIER = 1.5
+# Employee gives 15% income boost per employee (capped by max_employees)
+EMPLOYEE_INCOME_BOOST = 0.15
+# Employee earns 30% of business income share (per employee)
+EMPLOYEE_PAY_SHARE = 0.30
+# Maximum hours of unclaimed income (caps idle accumulation)
+BUSINESS_MAX_IDLE_HOURS = 24
+# Sabotage costs and effects
+SABOTAGE_COST = 1_500
+SABOTAGE_COOLDOWN_HOURS = 6
+SABOTAGE_DAMAGE_HOURS = 6  # business produces 0 for this long after sabotage
+SABOTAGE_FAIL_FINE = 800   # pay this if caught sabotaging
+SABOTAGE_SUCCESS_CHANCE = 0.55
+
+
+def _load_businesses() -> dict:
+    if BUSINESSES_FILE.exists():
+        try:
+            with open(BUSINESSES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_businesses(data: dict):
+    with open(BUSINESSES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _user_businesses(user_id: int) -> list:
+    """Return list of this user's businesses."""
+    data = _load_businesses()
+    return data["users"].get(str(user_id), [])
+
+
+def _business_cost(user_id: int, biz_type: str) -> int:
+    """Quantity-scaled cost for buying ANOTHER business of this tier+."""
+    info = BUSINESS_TYPES[biz_type]
+    base = info["cost"]
+    same_tier_owned = sum(
+        1 for b in _user_businesses(user_id)
+        if BUSINESS_TYPES.get(b["type"], {}).get("tier") == info["tier"]
+    )
+    return int(base * (BUSINESS_QUANTITY_MULTIPLIER ** same_tier_owned))
+
+
+def _business_income_per_hour(biz: dict) -> int:
+    """Compute current per-hour income for a single business (counting employees)."""
+    info = BUSINESS_TYPES.get(biz["type"])
+    if not info:
+        return 0
+    base = info["income_per_hour"]
+    employees = len(biz.get("employees", []))
+    boost = 1 + employees * EMPLOYEE_INCOME_BOOST
+    return int(base * boost)
+
+
+def _business_pending_income(biz: dict) -> int:
+    """How much this business has produced since last collection (capped)."""
+    # Sabotage: if damaged_until > now, no income during that window
+    now = time.time()
+    last_collected = biz.get("last_collected", biz.get("purchased_at", now))
+    damaged_until = biz.get("damaged_until", 0)
+
+    # Effective start of earning is max(last_collected, damaged_until_end if it applies during the period)
+    effective_start = max(last_collected, damaged_until) if damaged_until > last_collected else last_collected
+    hours = (now - effective_start) / 3600
+    if hours <= 0:
+        return 0
+    hours = min(hours, BUSINESS_MAX_IDLE_HOURS)
+    return int(_business_income_per_hour(biz) * hours)
+
+
+# ── /buybusiness ─────────────────────────────────────────────────────────────
+@tree.command(name="buybusiness", description="Buy a business. Earn passive income.")
+@discord.app_commands.describe(business_type="Which business to buy")
+@discord.app_commands.choices(
+    business_type=[
+        discord.app_commands.Choice(
+            name=f"{b['emoji']} {b['name']} — {b['cost']:,} coins ({b['income_per_hour']}/hr)",
+            value=k,
+        )
+        for k, b in BUSINESS_TYPES.items()
+    ]
+)
+async def buybusiness_command(
+    interaction: discord.Interaction,
+    business_type: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    biz_type = business_type.value
+    if biz_type not in BUSINESS_TYPES:
+        await interaction.response.send_message("Invalid business type.", ephemeral=True)
+        return
+
+    cost = _business_cost(user.id, biz_type)
+    bal = economy.balance(user.id)
+    if bal < cost:
+        await interaction.response.send_message(
+            f"❌ Need **{cost:,}** coins (price scales with quantity owned). You have **{bal:,}**.",
+            ephemeral=True,
+        )
+        return
+
+    info = BUSINESS_TYPES[biz_type]
+    economy.add(user.id, -cost, f"bought {biz_type}")
+
+    data = _load_businesses()
+    user_bizs = data["users"].setdefault(str(user.id), [])
+    new_biz = {
+        "id": f"{biz_type}_{int(time.time())}_{random.randint(1000,9999)}",
+        "type": biz_type,
+        "purchased_at": time.time(),
+        "last_collected": time.time(),
+        "employees": [],         # list of user_ids
+        "damaged_until": 0,      # sabotage damage timer
+        "lifetime_earned": 0,
+    }
+    user_bizs.append(new_biz)
+    _save_businesses(data)
+
+    await interaction.response.send_message(
+        f"# {info['emoji']} BUSINESS ACQUIRED\n\n"
+        f"You bought a **{info['name']}** for **{cost:,}** coins.\n"
+        f"💰 Income: **{info['income_per_hour']:,}** coins/hour\n"
+        f"👥 Max employees: **{info['max_employees']}**\n"
+        f"📋 _{info['desc']}_\n\n"
+        f"Use `/businesses` to manage, `/collectbusiness` to claim earnings."
+    )
+
+
+# ── /businesses ──────────────────────────────────────────────────────────────
+@tree.command(name="businesses", description="View your business portfolio.")
+@discord.app_commands.describe(user="Whose businesses to view (defaults to you)")
+async def businesses_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    user_bizs = _user_businesses(target.id)
+
+    if not user_bizs:
+        await interaction.response.send_message(
+            f"{target.mention} doesn't own any businesses. Buy one with `/buybusiness`.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"🏢 {target.display_name}'s Portfolio",
+        color=discord.Color.dark_green(),
+    )
+
+    total_hourly = 0
+    total_pending = 0
+    total_lifetime = 0
+    for biz in user_bizs:
+        info = BUSINESS_TYPES.get(biz["type"], {"emoji":"🏢","name":"Unknown","max_employees":0})
+        hourly = _business_income_per_hour(biz)
+        pending = _business_pending_income(biz)
+        employees = biz.get("employees", [])
+        damaged = biz.get("damaged_until", 0) > time.time()
+        status = "🚨 SABOTAGED" if damaged else "✅ Running"
+        emp_str = f"{len(employees)}/{info.get('max_employees',0)}"
+
+        embed.add_field(
+            name=f"{info['emoji']} {info['name']}",
+            value=(
+                f"Status: {status}\n"
+                f"Income: **{hourly:,}**/hr\n"
+                f"Employees: {emp_str}\n"
+                f"Pending: **{pending:,}** coins\n"
+                f"Lifetime: {biz.get('lifetime_earned', 0):,}"
+            ),
+            inline=True,
+        )
+        total_hourly += hourly
+        total_pending += pending
+        total_lifetime += biz.get("lifetime_earned", 0)
+
+    embed.add_field(
+        name="📊 TOTALS",
+        value=(
+            f"Hourly: **{total_hourly:,}**\n"
+            f"Pending: **{total_pending:,}**\n"
+            f"Lifetime: **{total_lifetime:,}**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Collect with /collectbusiness")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /collectbusiness ─────────────────────────────────────────────────────────
+@tree.command(name="collectbusiness", description="Collect earnings from all your businesses.")
+async def collectbusiness_command(interaction: discord.Interaction):
+    user = interaction.user
+    data = _load_businesses()
+    user_bizs = data["users"].get(str(user.id), [])
+    if not user_bizs:
+        await interaction.response.send_message("You don't own any businesses.", ephemeral=True)
+        return
+
+    total_collected = 0
+    employee_payouts: dict[int, int] = {}  # user_id -> total paid
+    lines = []
+
+    for biz in user_bizs:
+        info = BUSINESS_TYPES.get(biz["type"], {"emoji":"🏢","name":"Unknown"})
+        pending = _business_pending_income(biz)
+        if pending <= 0:
+            continue
+
+        # Pay employees first
+        employees = biz.get("employees", [])
+        employee_pool = int(pending * EMPLOYEE_PAY_SHARE * (len(employees) / max(1, BUSINESS_TYPES[biz['type']]['max_employees'])))
+        per_employee = employee_pool // max(1, len(employees)) if employees else 0
+        owner_take = pending - (per_employee * len(employees))
+
+        for emp_id in employees:
+            economy.add(emp_id, per_employee, f"wages: {biz['type']}")
+            employee_payouts[emp_id] = employee_payouts.get(emp_id, 0) + per_employee
+
+        biz["last_collected"] = time.time()
+        biz["lifetime_earned"] = biz.get("lifetime_earned", 0) + pending
+        total_collected += owner_take
+
+        lines.append(f"{info['emoji']} **{info['name']}** — owner: {owner_take:,} | employees: {per_employee * len(employees):,}")
+
+    _save_businesses(data)
+
+    if total_collected <= 0 and not employee_payouts:
+        await interaction.response.send_message(
+            "💤 No earnings to collect yet. Be patient.", ephemeral=True
+        )
+        return
+
+    new_bal = economy.add(user.id, total_collected, "business collect")
+
+    # Track achievements/tournament
+    track_quest_progress(user.id, "coins_earned", total_collected)
+    add_tournament_score(user.id, coins_earned=total_collected)
+    await trigger_balance_check(user.id, channel=interaction.channel)
+
+    response = (
+        f"# 💰 PAYDAY!\n\n"
+        + "\n".join(lines)
+        + f"\n\n**Owner take:** {total_collected:,} coins"
+    )
+    if employee_payouts:
+        emp_lines = "\n".join(f"• <@{uid}>: {amt:,}" for uid, amt in employee_payouts.items())
+        response += f"\n\n**👥 Employees paid:**\n{emp_lines}"
+    response += f"\n\nBalance: **{new_bal:,}**"
+
+    if len(response) > 2000:
+        response = response[:1990] + "..."
+
+    await interaction.response.send_message(
+        response,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ── /hire ────────────────────────────────────────────────────────────────────
+@tree.command(name="hire", description="Hire another user to work at one of your businesses.")
+@discord.app_commands.describe(employee="Who to hire", business_type="Which business")
+@discord.app_commands.choices(
+    business_type=[
+        discord.app_commands.Choice(name=f"{b['emoji']} {b['name']}", value=k)
+        for k, b in BUSINESS_TYPES.items()
+    ]
+)
+async def hire_command(
+    interaction: discord.Interaction,
+    employee: discord.Member,
+    business_type: discord.app_commands.Choice[str],
+):
+    owner = interaction.user
+    if employee.id == owner.id:
+        await interaction.response.send_message("Can't hire yourself.", ephemeral=True)
+        return
+    if employee.bot:
+        await interaction.response.send_message("Can't hire bots.", ephemeral=True)
+        return
+
+    data = _load_businesses()
+    user_bizs = data["users"].get(str(owner.id), [])
+    biz_type = business_type.value
+
+    # Find first business of this type with room
+    matching = [b for b in user_bizs if b["type"] == biz_type]
+    if not matching:
+        await interaction.response.send_message(
+            f"You don't own a {BUSINESS_TYPES[biz_type]['name']}.", ephemeral=True
+        )
+        return
+
+    info = BUSINESS_TYPES[biz_type]
+    biz = None
+    for b in matching:
+        if len(b.get("employees", [])) < info["max_employees"] and employee.id not in b.get("employees", []):
+            biz = b
+            break
+
+    if biz is None:
+        await interaction.response.send_message(
+            f"All your {info['name']}s are fully staffed or already employ {employee.mention}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    biz.setdefault("employees", []).append(employee.id)
+    _save_businesses(data)
+
+    await interaction.response.send_message(
+        f"👥 {employee.mention} was hired at {owner.mention}'s {info['emoji']} **{info['name']}**!\n"
+        f"💼 Employees boost income by **15% each**.\n"
+        f"💰 They'll earn a share when {owner.display_name} runs `/collectbusiness`.",
+        allowed_mentions=discord.AllowedMentions(users=[employee]),
+    )
+
+
+# ── /fire ────────────────────────────────────────────────────────────────────
+@tree.command(name="fire", description="Fire an employee from one of your businesses.")
+@discord.app_commands.describe(employee="Who to fire")
+async def fire_command(interaction: discord.Interaction, employee: discord.Member):
+    owner = interaction.user
+    data = _load_businesses()
+    user_bizs = data["users"].get(str(owner.id), [])
+
+    fired_from = []
+    for biz in user_bizs:
+        if employee.id in biz.get("employees", []):
+            biz["employees"].remove(employee.id)
+            fired_from.append(BUSINESS_TYPES.get(biz["type"], {}).get("name", "?"))
+
+    if not fired_from:
+        await interaction.response.send_message(
+            f"{employee.mention} doesn't work for you.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    _save_businesses(data)
+    await interaction.response.send_message(
+        f"🚪 {employee.mention} was fired from {', '.join(fired_from)}.",
+        allowed_mentions=discord.AllowedMentions(users=[employee]),
+    )
+
+
+# ── /sabotage ────────────────────────────────────────────────────────────────
+@tree.command(name="sabotage", description="Sabotage another user's business. Risky.")
+@discord.app_commands.describe(target="Whose business to sabotage", business_type="Which business of theirs")
+@discord.app_commands.choices(
+    business_type=[
+        discord.app_commands.Choice(name=f"{b['emoji']} {b['name']}", value=k)
+        for k, b in BUSINESS_TYPES.items()
+    ]
+)
+async def sabotage_command(
+    interaction: discord.Interaction,
+    target: discord.Member,
+    business_type: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    if target.id == user.id:
+        await interaction.response.send_message("Can't sabotage yourself.", ephemeral=True)
+        return
+    if target.bot:
+        await interaction.response.send_message("Bots don't have businesses.", ephemeral=True)
+        return
+
+    # Cooldown
+    counters = _get_counters(user.id)
+    last_sabotage = counters.get("last_sabotage", 0)
+    cd_seconds = SABOTAGE_COOLDOWN_HOURS * 3600
+    if time.time() - last_sabotage < cd_seconds:
+        remaining = int(cd_seconds - (time.time() - last_sabotage))
+        await interaction.response.send_message(
+            f"⏰ You're laying low. Try again in **{fmt_cooldown(remaining)}**.",
+            ephemeral=True,
+        )
+        return
+
+    if economy.balance(user.id) < SABOTAGE_COST:
+        await interaction.response.send_message(
+            f"❌ Sabotage costs **{SABOTAGE_COST:,}** coins.", ephemeral=True
+        )
+        return
+
+    # Find target business
+    data = _load_businesses()
+    target_bizs = data["users"].get(str(target.id), [])
+    biz_type = business_type.value
+    matching = [b for b in target_bizs if b["type"] == biz_type and b.get("damaged_until", 0) <= time.time()]
+    if not matching:
+        info = BUSINESS_TYPES[biz_type]
+        await interaction.response.send_message(
+            f"❌ {target.mention} doesn't own a healthy {info['name']}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    biz = matching[0]
+    info = BUSINESS_TYPES[biz_type]
+
+    economy.add(user.id, -SABOTAGE_COST, "sabotage attempt")
+    counters["last_sabotage"] = time.time()
+    economy._save()
+
+    await interaction.response.defer()
+
+    silent = discord.AllowedMentions.none()
+    async def edit(content):
+        try:
+            await interaction.edit_original_response(content=content, allowed_mentions=silent)
+        except Exception:
+            pass
+
+    await edit(f"🦝 *{user.mention} sneaks into {target.mention}'s {info['name']}...*")
+    await asyncio.sleep(1.5)
+    await edit(f"🦝 *planting evidence...*")
+    await asyncio.sleep(1.5)
+    await edit(f"🦝 *covering tracks...*")
+    await asyncio.sleep(1.5)
+
+    if random.random() < SABOTAGE_SUCCESS_CHANCE:
+        # Success — damage the business
+        biz["damaged_until"] = time.time() + SABOTAGE_DAMAGE_HOURS * 3600
+        _save_businesses(data)
+        await interaction.edit_original_response(
+            content=(
+                f"# 💣 SABOTAGE SUCCESSFUL\n\n"
+                f"{user.mention} sabotaged {target.mention}'s {info['emoji']} **{info['name']}**!\n"
+                f"⏰ It will produce **NOTHING** for the next **{SABOTAGE_DAMAGE_HOURS} hours**."
+            ),
+            allowed_mentions=discord.AllowedMentions(users=[target]),
+        )
+    else:
+        # Caught
+        fine = min(SABOTAGE_FAIL_FINE, economy.balance(user.id))
+        economy.add(user.id, -fine, "sabotage caught")
+        # Compensation to target
+        comp = fine // 2
+        if comp > 0:
+            economy.add(target.id, comp, "sabotage compensation")
+        await interaction.edit_original_response(
+            content=(
+                f"# 🚨 YOU GOT CAUGHT\n\n"
+                f"{target.mention}'s security caught {user.mention} red-handed!\n"
+                f"💸 Paid **{fine:,}** in fines. {target.display_name} got **{comp:,}** in compensation."
+            ),
+            allowed_mentions=discord.AllowedMentions(users=[target]),
+        )
+
+
+# ── Background task: random business events (IRS, fire, etc.) ────────────────
+async def business_events_scheduler():
+    """Periodically rolls random events on businesses."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        # Check every 2 hours
+        await asyncio.sleep(2 * 3600)
+        try:
+            data = _load_businesses()
+            cfg = load_config()
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
+
+            for uid, bizs in data["users"].items():
+                if not bizs:
+                    continue
+                # 8% chance any user gets an event
+                if random.random() > 0.08:
+                    continue
+                biz = random.choice(bizs)
+                if biz.get("damaged_until", 0) > time.time():
+                    continue  # already damaged
+                info = BUSINESS_TYPES.get(biz["type"], {"emoji":"🏢","name":"?"})
+
+                event = random.choice([
+                    ("🔥", "fire broke out", 6, 0.5),    # 6h damage, 50% pending lost
+                    ("🚨", "got robbed", 3, 0.3),         # 3h damage, 30% lost
+                    ("📋", "IRS audit", 8, 0.0),          # 8h damage no $ loss
+                    ("💧", "plumbing burst", 4, 0.2),
+                    ("⚡", "electrical failure", 5, 0.1),
+                    ("🦠", "health code violation", 6, 0.4),
+                ])
+                emoji, desc, hours, loss_pct = event
+                biz["damaged_until"] = time.time() + hours * 3600
+
+                # Steal/burn some pending income
+                pending = _business_pending_income(biz)
+                lost = int(pending * loss_pct)
+                if lost > 0:
+                    biz["last_collected"] = time.time()  # zero out pending
+
+                if channel:
+                    try:
+                        await channel.send(
+                            f"{emoji} **EVENT:** <@{uid}>'s {info['emoji']} **{info['name']}** {desc}!\n"
+                            f"⏰ Closed for **{hours} hours**."
+                            + (f"\n💸 Lost **{lost:,}** coins of pending income." if lost > 0 else ""),
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except Exception:
+                        pass
+
+            _save_businesses(data)
+        except Exception as e:
+            log.exception("business_events_scheduler: %s", e)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -7858,6 +8424,18 @@ async def commands_command(interaction: discord.Interaction):
             "`/feed` Feed your pet (50 coins)\n"
             "`/collect` Claim earnings\n"
             "`/abandon` Give up your pet"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏢 BUSINESSES",
+        value=(
+            "`/buybusiness` Buy a business (8 types)\n"
+            "`/businesses` Your portfolio\n"
+            "`/collectbusiness` Claim earnings\n"
+            "`/hire` Hire an employee\n"
+            "`/fire` Fire an employee\n"
+            "`/sabotage` Sabotage a rival (risky!)"
         ),
         inline=False,
     )
@@ -7946,6 +8524,7 @@ async def on_ready():
     client.loop.create_task(lottery_drawing_scheduler())
     client.loop.create_task(tournament_scheduler())
     client.loop.create_task(random_event_scheduler())
+    client.loop.create_task(business_events_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8126,6 +8705,16 @@ PREFIX_COMMANDS = {
     "quests":       ("quests",        []),
     "claimquest":   ("claimquest",    []),
     "claim":        ("claimquest",    []),
+    "buybusiness":  ("buybusiness",   [{"name":"business_type","type":"str","required":True}]),
+    "buybiz":       ("buybusiness",   [{"name":"business_type","type":"str","required":True}]),
+    "businesses":   ("businesses",    [{"name":"user","type":"user","required":False,"default":None}]),
+    "biz":          ("businesses",    [{"name":"user","type":"user","required":False,"default":None}]),
+    "collectbusiness":("collectbusiness", []),
+    "collectbiz":   ("collectbusiness", []),
+    "payday":       ("collectbusiness", []),
+    "hire":         ("hire",          [{"name":"employee","type":"user","required":True},{"name":"business_type","type":"str","required":True}]),
+    "fire":         ("fire",          [{"name":"employee","type":"user","required":True}]),
+    "sabotage":     ("sabotage",      [{"name":"target","type":"user","required":True},{"name":"business_type","type":"str","required":True}]),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
@@ -8232,6 +8821,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["pet_type"] = discord.app_commands.Choice(name=pet_type, value=pet_type)
+
+    if slash_name in ("buybusiness", "hire", "sabotage"):
+        # These take a business_type Choice
+        biz_type = kwargs.get("business_type", "").lower()
+        if biz_type not in BUSINESS_TYPES:
+            await message.channel.send(
+                f"❌ Business types: {', '.join(BUSINESS_TYPES.keys())}"
+            )
+            return True
+        kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
 
     # Build a fake interaction and invoke the underlying callback
     fake = _PrefixInteraction(message)
