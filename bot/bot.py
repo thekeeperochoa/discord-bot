@@ -1014,6 +1014,39 @@ async def tournament_scheduler():
                 announcements.append(
                     f"{medals[i]} <@{uid}> — **{prize:,}** coins (score: {tournament_score(stats):,})"
                 )
+                # DM the winner
+                try:
+                    dm_embed = discord.Embed(
+                        title=f"{medals[i]} TOURNAMENT WINNER!",
+                        description=(
+                            f"You placed **#{i+1}** in this week's tournament!\n"
+                            f"💰 Prize: **{prize:,}** coins\n"
+                            f"🏆 Score: **{tournament_score(stats):,}**"
+                        ),
+                        color=discord.Color.gold(),
+                    )
+                    await send_dm(int(uid), "tournament", embed=dm_embed)
+                except Exception:
+                    pass
+
+            # DM all other participants with their rank
+            for i, (uid, stats) in enumerate(ranked[3:], start=4):
+                try:
+                    dm_embed = discord.Embed(
+                        title="🏆 TOURNAMENT RESULTS",
+                        description=(
+                            f"You placed **#{i}** in this week's tournament.\n"
+                            f"📊 Score: **{tournament_score(stats):,}**\n"
+                            f"💰 Coins earned: {stats['coins_earned']:,}\n"
+                            f"🎮 Games won: {stats['games_won']}\n"
+                            f"⌨️ Commands used: {stats['commands_used']}\n\n"
+                            f"_Top 3 win prizes. Grind harder next week!_"
+                        ),
+                        color=discord.Color.blue(),
+                    )
+                    await send_dm(int(uid), "tournament", embed=dm_embed)
+                except Exception:
+                    pass
 
             # Save to history & reset
             data["history"].append({
@@ -3709,6 +3742,20 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
             await claim_bounty(user.id, target.id, interaction.channel)
         except Exception:
             pass
+        # DM the victim
+        try:
+            embed = discord.Embed(
+                title="💸 YOU GOT ROBBED",
+                description=(
+                    f"**{user.display_name}** robbed you for **{amount:,}** coins.\n"
+                    f"Your new balance: **{economy.balance(target.id):,}**\n\n"
+                    f"_Consider buying `/protect` to prevent future robberies._"
+                ),
+                color=discord.Color.dark_red(),
+            )
+            await send_dm(target.id, "rob", embed=embed)
+        except Exception:
+            pass
     else:
         # Caught — pay a fine
         fine = random.randint(ROB_FINE_MIN, ROB_FINE_MAX)
@@ -5022,6 +5069,20 @@ async def lottery_drawing_scheduler():
                             f"🎰 **<@{winner_uid}>'s lottery multiplier activated! +{bonus:,} bonus coins!**",
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
+            except Exception:
+                pass
+            # DM the winner
+            try:
+                embed = discord.Embed(
+                    title="🎰 YOU WON THE LOTTERY!",
+                    description=(
+                        f"You just won **{jackpot:,}** coins in the daily lottery!\n"
+                        f"💰 New balance: **{economy.balance(int(winner_uid)):,}**\n\n"
+                        f"_Buy more tickets with `/lottery` for tomorrow's drawing._"
+                    ),
+                    color=discord.Color.gold(),
+                )
+                await send_dm(int(winner_uid), "lottery", embed=embed)
             except Exception:
                 pass
             # Try to grant achievement (no channel ref handy here but channel below works)
@@ -8618,6 +8679,14 @@ async def rep_command(interaction: discord.Interaction, user: discord.Member, re
         msg,
         allowed_mentions=discord.AllowedMentions(users=[user]),
     )
+    # DM the recipient
+    try:
+        dm_msg = f"👍 **{giver.display_name}** gave you +1 rep!\n📊 Your total rep: **{new_rep}**"
+        if reason:
+            dm_msg += f"\n💬 _\"{reason[:200]}\"_"
+        await send_dm(user.id, "rep", content=dm_msg)
+    except Exception:
+        pass
 
 
 @tree.command(name="reputation", description="Check a user's reputation.")
@@ -9337,6 +9406,20 @@ async def sabotage_command(
             ),
             allowed_mentions=discord.AllowedMentions(users=[target]),
         )
+        # DM the victim
+        try:
+            embed = discord.Embed(
+                title="🚨 YOUR BUSINESS WAS SABOTAGED",
+                description=(
+                    f"**{user.display_name}** sabotaged your {info['emoji']} **{info['name']}**.\n"
+                    f"⏰ It will produce nothing for the next **{SABOTAGE_DAMAGE_HOURS} hours**.\n\n"
+                    f"_Buy `/insurance` to prevent future sabotage attempts._"
+                ),
+                color=discord.Color.dark_red(),
+            )
+            await send_dm(target.id, "business", embed=embed)
+        except Exception:
+            pass
     else:
         # Caught
         fine = min(SABOTAGE_FAIL_FINE, economy.balance(user.id))
@@ -9409,6 +9492,21 @@ async def business_events_scheduler():
                         )
                     except Exception:
                         pass
+                # DM the owner
+                try:
+                    dm_embed = discord.Embed(
+                        title=f"{emoji} BUSINESS EVENT",
+                        description=(
+                            f"Your {info['emoji']} **{info['name']}** {desc}.\n"
+                            f"⏰ Closed for **{hours} hours**."
+                            + (f"\n💸 Lost **{lost:,}** coins." if lost > 0 else "")
+                            + "\n\n_Buy `/insurance` to prevent future events._"
+                        ),
+                        color=discord.Color.orange(),
+                    )
+                    await send_dm(int(uid), "business", embed=dm_embed)
+                except Exception:
+                    pass
 
             _save_businesses(data)
         except Exception as e:
@@ -9687,6 +9785,42 @@ async def repay_command(interaction: discord.Interaction):
     )
 
 
+async def pet_starving_scheduler():
+    """DM pet owners when their pet is going hungry (every 4h, max 1 DM/day per user)."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(4 * 3600)
+        try:
+            pets = _load_pets()
+            for uid, pet in pets.items():
+                hunger = _pet_hunger(pet)
+                if hunger >= 30:
+                    continue
+                # Don't spam — max 1 hunger DM per day per user
+                last_dm = pet.get("last_hunger_dm", 0)
+                if time.time() - last_dm < 24 * 3600:
+                    continue
+                info = PET_TYPES.get(pet["type"], {"emoji":"🐾","name":"?"})
+                state = "starving" if hunger == 0 else ("very hungry" if hunger < 15 else "hungry")
+                try:
+                    embed = discord.Embed(
+                        title=f"🍖 PET {state.upper()}",
+                        description=(
+                            f"{info['emoji']} **{pet['name']}** is {state}. Hunger: **{hunger}/100**.\n\n"
+                            f"_Run `/feed` or buy `/petfood` for a 7-day bundle._"
+                        ),
+                        color=discord.Color.orange(),
+                    )
+                    sent = await send_dm(int(uid), "pet", embed=embed)
+                    if sent:
+                        pet["last_hunger_dm"] = time.time()
+                except Exception:
+                    pass
+            _save_pets(pets)
+        except Exception as e:
+            log.exception("pet_starving_scheduler: %s", e)
+
+
 async def loan_shark_scheduler():
     """Background task: charge defaulted loans periodically."""
     await client.wait_until_ready()
@@ -9700,6 +9834,23 @@ async def loan_shark_scheduler():
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
             changed = False
             for uid, loan in list(loans["users"].items()):
+                # Send "due soon" warning if loan due within 2h and not already warned
+                time_until_due = loan["due_at"] - now
+                if 0 < time_until_due < 7200 and not loan.get("warning_sent"):
+                    loan["warning_sent"] = True
+                    changed = True
+                    try:
+                        embed = discord.Embed(
+                            title="⏰ LOAN DUE SOON",
+                            description=(
+                                f"Your loan of **{loan['owe']:,}** coins is due in **{fmt_cooldown(int(time_until_due))}**.\n\n"
+                                f"_Run `/repay` to pay it off and avoid 10%/hr penalties._"
+                            ),
+                            color=discord.Color.gold(),
+                        )
+                        await send_dm(int(uid), "loan", embed=embed)
+                    except Exception:
+                        pass
                 if loan["due_at"] < now:
                     # Default — apply 10% interest per hour overdue, taken from balance or business pending
                     overdue_hours = (now - loan["due_at"]) / 3600
@@ -9719,6 +9870,20 @@ async def loan_shark_scheduler():
                                 )
                             except Exception:
                                 pass
+                        # DM the defaulter
+                        try:
+                            embed = discord.Embed(
+                                title="💸 LOAN OVERDUE",
+                                description=(
+                                    f"You missed your loan deadline. The loan shark took **{actual:,}** coins.\n"
+                                    f"You still owe **{loan['owe']:,}** coins total.\n\n"
+                                    f"_Run `/repay` to pay it off before more penalties hit._"
+                                ),
+                                color=discord.Color.dark_red(),
+                            )
+                            await send_dm(int(uid), "loan", embed=embed)
+                        except Exception:
+                            pass
                         loan["due_at"] = now + 3600  # next charge in 1h
                         changed = True
                     else:
@@ -9771,6 +9936,21 @@ async def bounty_command(interaction: discord.Interaction, target: discord.Membe
         f"Whoever beats {target.display_name} in `/fight`, `/duel`, or `/rob` claims it.",
         allowed_mentions=discord.AllowedMentions(users=[target]),
     )
+    # DM the target
+    try:
+        embed = discord.Embed(
+            title="💀 BOUNTY PLACED ON YOU",
+            description=(
+                f"**{user.display_name}** put a **{amount:,}** coin bounty on you.\n"
+                f"💀 Total bounty on your head: **{total_on_target:,}** coins\n\n"
+                f"Anyone who beats you in `/fight`, `/duel`, or `/rob` claims it.\n"
+                f"_Watch your back._"
+            ),
+            color=discord.Color.dark_red(),
+        )
+        await send_dm(target.id, "bounty", embed=embed)
+    except Exception:
+        pass
 
 
 @tree.command(name="bounties", description="See all active bounties.")
@@ -9937,6 +10117,142 @@ def has_heist_tools(user_id: int) -> bool:
     return _user_is_active(user_id, "heist_tools_until")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 📬 DM NOTIFICATIONS
+# Sends DMs for important per-user events. Users can opt-out per category.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Notification categories with default state (all on by default)
+DM_CATEGORIES = {
+    "bounty":     "💀 Bounty placed on you",
+    "rob":        "💸 You got robbed",
+    "business":   "🏢 Your business sabotaged or event hit",
+    "loan":       "💸 Loan due / overdue warnings",
+    "pet":        "🐶 Pet starving",
+    "lottery":    "🎰 You won the lottery",
+    "rep":        "👍 Someone gave you rep",
+    "tournament": "🏆 Tournament results",
+}
+
+
+def _dm_enabled(user_id: int, category: str) -> bool:
+    """Check if user wants DMs for a category. Defaults to ON."""
+    u = economy._user(user_id)
+    settings = u.get("dm_settings", {})
+    # Special "all off" flag overrides
+    if settings.get("_all_off"):
+        return False
+    return settings.get(category, True)  # default True
+
+
+async def send_dm(user_id: int, category: str, content: str = None, embed: discord.Embed = None) -> bool:
+    """Send a DM to a user if they have that category enabled.
+    Returns True if sent, False if blocked/disabled/DMs closed."""
+    if not _dm_enabled(user_id, category):
+        return False
+    try:
+        user = await client.fetch_user(user_id)
+        if user is None:
+            return False
+        kwargs = {}
+        if content:
+            kwargs["content"] = content
+        if embed:
+            kwargs["embed"] = embed
+        await user.send(**kwargs)
+        return True
+    except discord.Forbidden:
+        # User has DMs closed — don't crash
+        return False
+    except Exception as e:
+        log.warning("DM to %s failed: %s", user_id, e)
+        return False
+
+
+@tree.command(name="notifications", description="Toggle which DM notifications you receive from Jordan.")
+async def notifications_command(interaction: discord.Interaction):
+    user = interaction.user
+    u = economy._user(user.id)
+    settings = u.setdefault("dm_settings", {})
+
+    embed = discord.Embed(
+        title="📬 DM Notifications",
+        description="Toggle which events DM you. Click a button to flip its state.\n_Default: all enabled._",
+        color=discord.Color.blurple(),
+    )
+    if settings.get("_all_off"):
+        embed.add_field(name="⚠️ All notifications", value="**OFF** — click 'Enable all' to receive any DMs.", inline=False)
+    else:
+        lines = []
+        for key, label in DM_CATEGORIES.items():
+            state = "✅" if settings.get(key, True) else "❌"
+            lines.append(f"{state} {label}")
+        embed.add_field(name="Current settings", value="\n".join(lines), inline=False)
+
+    view = NotificationsView(user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class NotificationsView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        # Make a button for each category
+        for i, (key, label) in enumerate(DM_CATEGORIES.items()):
+            short = label.split(" ", 1)[1][:30] if " " in label else label
+            btn = discord.ui.Button(
+                label=short,
+                emoji=label.split(" ")[0],
+                style=discord.ButtonStyle.secondary,
+                row=i // 4,
+            )
+            btn.callback = self._make_toggle(key, short)
+            self.add_item(btn)
+        # Master toggles
+        all_on = discord.ui.Button(label="Enable all", style=discord.ButtonStyle.success, row=2)
+        all_on.callback = self._all_on
+        self.add_item(all_on)
+        all_off = discord.ui.Button(label="Disable all", style=discord.ButtonStyle.danger, row=2)
+        all_off.callback = self._all_off
+        self.add_item(all_off)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your settings.", ephemeral=True)
+            return False
+        return True
+
+    def _make_toggle(self, key: str, label: str):
+        async def cb(interaction: discord.Interaction):
+            u = economy._user(self.user_id)
+            settings = u.setdefault("dm_settings", {})
+            # If master "off" was on, un-set that and turn this one on
+            if settings.get("_all_off"):
+                settings.pop("_all_off", None)
+                for k in DM_CATEGORIES:
+                    settings[k] = False
+                settings[key] = True
+            else:
+                current = settings.get(key, True)
+                settings[key] = not current
+            economy._save()
+            state = "ON ✅" if settings.get(key, True) else "OFF ❌"
+            await interaction.response.send_message(f"{label}: **{state}**", ephemeral=True)
+        return cb
+
+    async def _all_on(self, interaction: discord.Interaction):
+        u = economy._user(self.user_id)
+        u["dm_settings"] = {}  # empty = all defaults (true)
+        economy._save()
+        await interaction.response.send_message("✅ All DM notifications enabled.", ephemeral=True)
+
+    async def _all_off(self, interaction: discord.Interaction):
+        u = economy._user(self.user_id)
+        u["dm_settings"] = {"_all_off": True}
+        economy._save()
+        await interaction.response.send_message("❌ All DM notifications disabled.", ephemeral=True)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -9988,6 +10304,14 @@ async def commands_command(interaction: discord.Interaction):
             "`/hire` Hire an employee\n"
             "`/fire` Fire an employee\n"
             "`/sabotage` Sabotage a rival (risky!)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📬 DMS & SETTINGS",
+        value=(
+            "`/notifications` Toggle which events DM you\n"
+            "_Default: all DMs on (bounties, sabotage, loans, lottery wins, etc)_"
         ),
         inline=False,
     )
@@ -10096,6 +10420,7 @@ async def on_ready():
     client.loop.create_task(random_event_scheduler())
     client.loop.create_task(business_events_scheduler())
     client.loop.create_task(loan_shark_scheduler())
+    client.loop.create_task(pet_starving_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10299,6 +10624,9 @@ PREFIX_COMMANDS = {
     "upgradebusiness":("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
     "upgrade":      ("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
     "heisttools":   ("heisttools",    []),
+    "notifications":("notifications", []),
+    "notif":        ("notifications", []),
+    "dms":          ("notifications", []),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
