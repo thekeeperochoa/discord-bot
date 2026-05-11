@@ -338,6 +338,44 @@ economy = Economy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 📅 PERSISTENT SCHEDULER STATE
+# Tracks which date each scheduler last fired, so they don't double-fire
+# after bot restarts (Railway redeploys, crashes, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+SCHEDULER_STATE_FILE = MEMORY_DIR / "scheduler_state.json"
+
+
+def _load_scheduler_state() -> dict:
+    if SCHEDULER_STATE_FILE.exists():
+        try:
+            with open(SCHEDULER_STATE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_scheduler_state(data: dict):
+    try:
+        with open(SCHEDULER_STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("Failed to save scheduler state: %s", e)
+
+
+def get_last_fire(scheduler_name: str) -> str:
+    """Returns the last YYYY-MM-DD this scheduler fired (or '')."""
+    state = _load_scheduler_state()
+    return state.get(scheduler_name, "")
+
+
+def set_last_fire(scheduler_name: str, date_str: str):
+    state = _load_scheduler_state()
+    state[scheduler_name] = date_str
+    _save_scheduler_state(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🏆 ACHIEVEMENTS SYSTEM
 # Visible badges, one-time coin rewards, permanent perks.
 # Stored alongside economy data (in the user record).
@@ -939,7 +977,6 @@ def tournament_score(stats: dict) -> int:
 async def tournament_scheduler():
     """Background task: every Monday at recap hour, distribute prizes and reset."""
     await client.wait_until_ready()
-    last_reset_date = None
     while not client.is_closed():
         await asyncio.sleep(600)  # check every 10 min
         cfg = load_config()
@@ -949,9 +986,10 @@ async def tournament_scheduler():
         if now.weekday() != 0 or now.hour != target_hour:
             continue
         today_str = now.strftime("%Y-%m-%d")
-        if last_reset_date == today_str:
+        if get_last_fire("tournament") == today_str:
             continue
-        last_reset_date = today_str
+        # Mark fired FIRST to prevent races
+        set_last_fire("tournament", today_str)
 
         try:
             data = _load_tournament()
@@ -1878,7 +1916,6 @@ async def silence_checker():
 async def daily_recap_scheduler():
     """Posts a daily recap at the configured UTC hour."""
     await client.wait_until_ready()
-    last_posted_date = None
     while not client.is_closed():
         await asyncio.sleep(300)  # check every 5 min
         cfg = load_config()
@@ -1890,12 +1927,15 @@ async def daily_recap_scheduler():
         target_hour = cfg.get("daily_recap_hour_utc", 4)
         now = datetime.now(timezone.utc)
 
-        # Only fire within the configured hour, and only once per day
+        # Only fire within the configured hour, and only once per day (persistent)
         if now.hour != target_hour:
             continue
         today_str = now.strftime("%Y-%m-%d")
-        if last_posted_date == today_str:
+        if get_last_fire("daily_recap") == today_str:
             continue
+
+        # Mark fired FIRST to prevent race conditions
+        set_last_fire("daily_recap", today_str)
 
         # Recap the PREVIOUS day's messages
         yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1903,7 +1943,6 @@ async def daily_recap_scheduler():
         logs = daily_log.read_day(recap_channel_id, yesterday)
         if len(logs) < 10:
             log.info("Not enough messages for recap (%d), skipping", len(logs))
-            last_posted_date = today_str
             continue
 
         # Format for AI
@@ -1936,7 +1975,6 @@ async def daily_recap_scheduler():
                         for i in range(0, len(recap), 1990):
                             await channel.send(recap[i:i+1990])
                     log.info("Posted daily recap for %s", yesterday)
-                    last_posted_date = today_str
         except Exception as e:
             log.exception("Daily recap failed: %s", e)
 
@@ -4940,7 +4978,6 @@ async def lottery_command(interaction: discord.Interaction, tickets: int = 0):
 async def lottery_drawing_scheduler():
     """Runs lottery drawing once per day at the configured recap hour."""
     await client.wait_until_ready()
-    last_drawn_date = None
     while not client.is_closed():
         await asyncio.sleep(300)  # check every 5 min
         cfg = load_config()
@@ -4949,13 +4986,14 @@ async def lottery_drawing_scheduler():
         if now.hour != target_hour:
             continue
         today_str = now.strftime("%Y-%m-%d")
-        if last_drawn_date == today_str:
+        if get_last_fire("lottery") == today_str:
             continue
+        # Mark fired FIRST to prevent races on redeploy
+        set_last_fire("lottery", today_str)
 
         try:
             data = _load_lottery()
             if not data["tickets"]:
-                last_drawn_date = today_str
                 continue
 
             # Build weighted draw — each user weighted by their ticket count
@@ -4963,7 +5001,6 @@ async def lottery_drawing_scheduler():
             for uid, count in data["tickets"].items():
                 entries.extend([uid] * count)
             if not entries:
-                last_drawn_date = today_str
                 continue
             winner_uid = random.choice(entries)
             jackpot = data["jackpot"]
@@ -5024,7 +5061,6 @@ async def lottery_drawing_scheduler():
                     log.warning("Lottery announce failed: %s", e)
 
             log.info("Lottery drawn: %s won %s", winner_uid, jackpot)
-            last_drawn_date = today_str
         except Exception as e:
             log.exception("Lottery drawing error: %s", e)
 
