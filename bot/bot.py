@@ -4926,7 +4926,7 @@ async def lottery_drawing_scheduler():
 # ── 🛒 /shop — interactive shop hub ──────────────────────────────────────────
 
 class ShopMainView(discord.ui.View):
-    """Top-level shop menu — buttons for each category."""
+    """Top-level shop menu — buttons for each category. Page 1 of 3."""
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
         self.user_id = user_id
@@ -5064,6 +5064,10 @@ class ShopMainView(discord.ui.View):
             embed=embed, view=ShopBusinessView(self.user_id, page=0)
         )
 
+    @discord.ui.button(label="Page 2 ▶", style=discord.ButtonStyle.secondary, row=2)
+    async def page2_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_page2(interaction, self.user_id, edit=True)
+
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
@@ -5074,6 +5078,481 @@ class ShopMainView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(embed=embed, view=None)
+
+
+class ShopPage2View(discord.ui.View):
+    """Page 2 — Boosts & Cosmetics."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="VIP Badge", style=discord.ButtonStyle.primary, emoji="💎", row=0)
+    async def vip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if _user_is_active(self.user_id, "vip_until"):
+            remaining = _user_active_remaining(self.user_id, "vip_until")
+            await interaction.response.send_message(
+                f"💎 Already VIP for **{fmt_cooldown(remaining)}**.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < VIP_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{VIP_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -VIP_PRICE, "vip (shop)")
+        _user_set_until(self.user_id, "vip_until", VIP_DURATION_DAYS * 24)
+        await interaction.response.send_message(
+            f"💎 **VIP activated** for {VIP_DURATION_DAYS} days! Badge shows on `/balance` and `/leaderboard`."
+        )
+
+    @discord.ui.button(label="Custom Title", style=discord.ButtonStyle.primary, emoji="🏷️", row=0)
+    async def title_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if economy.balance(self.user_id) < CUSTOM_TITLE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{CUSTOM_TITLE_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(ShopTitleModal(self.user_id))
+
+    @discord.ui.button(label="XP Boost", style=discord.ButtonStyle.primary, emoji="⚡", row=0)
+    async def xpboost_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if _user_is_active(self.user_id, "xp_boost_until"):
+            remaining = _user_active_remaining(self.user_id, "xp_boost_until")
+            await interaction.response.send_message(
+                f"⚡ XP boost active for **{fmt_cooldown(remaining)}** more.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < XP_BOOST_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{XP_BOOST_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -XP_BOOST_PRICE, "xp boost (shop)")
+        _user_set_until(self.user_id, "xp_boost_until", XP_BOOST_DURATION_HOURS)
+        await interaction.response.send_message(
+            f"⚡ **2x XP boost activated** for {XP_BOOST_DURATION_HOURS} hours!"
+        )
+
+    @discord.ui.button(label="Insurance", style=discord.ButtonStyle.success, emoji="🛡️", row=1)
+    async def insurance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if _user_is_active(self.user_id, "insurance_until"):
+            remaining = _user_active_remaining(self.user_id, "insurance_until")
+            await interaction.response.send_message(
+                f"🛡️ Already insured for **{fmt_cooldown(remaining)}**.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < INSURANCE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{INSURANCE_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -INSURANCE_PRICE, "insurance (shop)")
+        _user_set_until(self.user_id, "insurance_until", INSURANCE_DURATION_HOURS)
+        await interaction.response.send_message(
+            f"🛡️ **Business insurance activated** for {INSURANCE_DURATION_HOURS} hours. "
+            f"Blocks sabotage and random events."
+        )
+
+    @discord.ui.button(label="Heist Tools", style=discord.ButtonStyle.danger, emoji="🦝", row=1)
+    async def heist_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if _user_is_active(self.user_id, "heist_tools_until"):
+            remaining = _user_active_remaining(self.user_id, "heist_tools_until")
+            await interaction.response.send_message(
+                f"🦝 Heist tools active for **{fmt_cooldown(remaining)}** more.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < HEIST_TOOLS_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{HEIST_TOOLS_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -HEIST_TOOLS_PRICE, "heist tools (shop)")
+        _user_set_until(self.user_id, "heist_tools_until", HEIST_TOOLS_DURATION_HOURS)
+        await interaction.response.send_message(
+            f"🦝 **Heist tools equipped** — +{int(HEIST_TOOLS_BOOST*100)}% rob success for {HEIST_TOOLS_DURATION_HOURS}h!"
+        )
+
+    @discord.ui.button(label="Lottery 2x", style=discord.ButtonStyle.secondary, emoji="🎰", row=1)
+    async def lotmult_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        u = economy._user(self.user_id)
+        if u.get("lottery_mult", 1) > 1:
+            await interaction.response.send_message(
+                "🎰 You already have a lottery multiplier ready.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < LOTTERY_MULT_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{LOTTERY_MULT_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -LOTTERY_MULT_PRICE, "lottery mult (shop)")
+        u["lottery_mult"] = 2
+        economy._save()
+        await interaction.response.send_message(
+            f"🎰 **2x multiplier active** on your next lottery win!"
+        )
+
+    @discord.ui.button(label="◀ Page 1", style=discord.ButtonStyle.secondary, row=2)
+    async def page1_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+    @discord.ui.button(label="Page 3 ▶", style=discord.ButtonStyle.secondary, row=2)
+    async def page3_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_page3(interaction, self.user_id, edit=True)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
+    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="🛒 Shop closed",
+            description="Come back anytime with `/shop`.",
+            color=discord.Color.greyple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+class ShopPage3View(discord.ui.View):
+    """Page 3 — Risk & Utility."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Take Out Loan", style=discord.ButtonStyle.danger, emoji="💸", row=0)
+    async def loan_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        loans = _load_json_file(LOANS_FILE, {"users": {}})
+        if str(self.user_id) in loans["users"]:
+            existing = loans["users"][str(self.user_id)]
+            remaining = max(0, existing["due_at"] - time.time())
+            await interaction.response.send_message(
+                f"❌ You owe **{existing['owe']:,}** coins. Due in **{fmt_cooldown(int(remaining))}**.\n"
+                f"Repay with `/repay`.",
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(
+            title="💸 Loan Shark",
+            description=(
+                "Borrow coins now, pay more later. **Miss the deadline and the shark drains 10% per hour.**\n\n"
+                + "\n".join(
+                    f"💰 **{amt:,}** → owe **{owe:,}** in {hrs}h"
+                    for amt, (_, owe, hrs) in LOAN_AMOUNTS.items()
+                )
+            ),
+            color=discord.Color.dark_red(),
+        )
+        embed.set_footer(text=f"💰 Your balance: {economy.balance(self.user_id):,}")
+        await interaction.response.edit_message(embed=embed, view=ShopLoanView(self.user_id))
+
+    @discord.ui.button(label="Place Bounty", style=discord.ButtonStyle.danger, emoji="💰", row=0)
+    async def bounty_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if economy.balance(self.user_id) < BOUNTY_MIN:
+            await interaction.response.send_message(
+                f"❌ Min bounty is **{BOUNTY_MIN}** coins.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(ShopBountyModal(self.user_id))
+
+    @discord.ui.button(label="Pet Food (7d)", style=discord.ButtonStyle.success, emoji="🍖", row=0)
+    async def petfood_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pets = _load_pets()
+        if str(self.user_id) not in pets:
+            await interaction.response.send_message(
+                "❌ You don't have a pet. Adopt one first.", ephemeral=True
+            )
+            return
+        if economy.balance(self.user_id) < PET_FOOD_BUNDLE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{PET_FOOD_BUNDLE_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        economy.add(self.user_id, -PET_FOOD_BUNDLE_PRICE, "pet food bundle (shop)")
+        pet = pets[str(self.user_id)]
+        pet["last_fed"] = time.time() + PET_FOOD_BUNDLE_DAYS * 24 * 3600
+        pet["xp"] = pet.get("xp", 0) + 50
+        _save_pets(pets)
+        info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+        await interaction.response.send_message(
+            f"🍖 **{info['emoji']} {pet['name']}** is fed for **{PET_FOOD_BUNDLE_DAYS} days**! (+50 XP bonus)"
+        )
+
+    @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.success, emoji="📈", row=1)
+    async def upgrade_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_bizs = _user_businesses(self.user_id)
+        if not user_bizs:
+            await interaction.response.send_message(
+                "❌ You don't own any businesses to upgrade.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title="📈 Upgrade a Business",
+            description=(
+                f"Each upgrade adds **+{int(BUSINESS_UPGRADE_BOOST*100)}%** permanent income.\n"
+                f"Max **{BUSINESS_UPGRADE_MAX_LEVEL}** levels per business.\n"
+                f"Cost: **{BUSINESS_UPGRADE_PRICE_PER_LEVEL:,}** × next level.\n\n"
+                "Pick which business type:"
+            ),
+            color=discord.Color.dark_green(),
+        )
+        embed.set_footer(text=f"💰 Your balance: {economy.balance(self.user_id):,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopUpgradeBusinessView(self.user_id)
+        )
+
+    @discord.ui.button(label="◀ Page 2", style=discord.ButtonStyle.secondary, row=2)
+    async def page2_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_shop_page2(interaction, self.user_id, edit=True)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
+    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="🛒 Shop closed",
+            description="Come back anytime with `/shop`.",
+            color=discord.Color.greyple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+# ── Modals & sub-views for Page 2/3 ─────────────────────────────────────────
+class ShopTitleModal(discord.ui.Modal, title=f"Buy Custom Title"):
+    new_title = discord.ui.TextInput(
+        label=f"Your title (max 24 chars)",
+        placeholder="e.g. Degenerate King",
+        required=True,
+        max_length=24,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if economy.balance(self.user_id) < CUSTOM_TITLE_PRICE:
+            await interaction.response.send_message(
+                f"❌ Need **{CUSTOM_TITLE_PRICE:,}** coins.", ephemeral=True
+            )
+            return
+        text = str(self.new_title).strip().replace("@everyone", "").replace("@here", "")[:24]
+        if not text:
+            await interaction.response.send_message("❌ Title can't be empty.", ephemeral=True)
+            return
+        economy.add(self.user_id, -CUSTOM_TITLE_PRICE, "custom title (shop)")
+        u = economy._user(self.user_id)
+        u["custom_title"] = text
+        economy._save()
+        await interaction.response.send_message(
+            f"🏷️ Your title is now: **{text}**"
+        )
+
+
+class ShopBountyModal(discord.ui.Modal, title="Place a Bounty"):
+    target_input = discord.ui.TextInput(
+        label="Target (@mention or username)",
+        placeholder="e.g. @someuser",
+        required=True,
+        max_length=100,
+    )
+    amount_input = discord.ui.TextInput(
+        label=f"Amount (min {BOUNTY_MIN} coins)",
+        placeholder="e.g. 1000",
+        required=True,
+        max_length=10,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Parse target
+        target_str = str(self.target_input).strip()
+        target_id = None
+        m = re.match(r"<@!?(\d+)>", target_str)
+        if m:
+            target_id = int(m.group(1))
+        else:
+            name = target_str.lstrip("@").lower()
+            if interaction.guild:
+                for member in interaction.guild.members:
+                    if name in (member.display_name.lower(), member.name.lower()):
+                        target_id = member.id
+                        break
+        if not target_id:
+            await interaction.response.send_message("❌ Couldn't find that user.", ephemeral=True)
+            return
+        if target_id == self.user_id:
+            await interaction.response.send_message("Can't bounty yourself.", ephemeral=True)
+            return
+        target_member = interaction.guild.get_member(target_id) if interaction.guild else None
+        if not target_member or target_member.bot:
+            await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+            return
+        # Parse amount
+        try:
+            amount = int(str(self.amount_input).strip())
+        except ValueError:
+            await interaction.response.send_message("❌ Amount must be a number.", ephemeral=True)
+            return
+        if amount < BOUNTY_MIN:
+            await interaction.response.send_message(f"❌ Min bounty is **{BOUNTY_MIN}** coins.", ephemeral=True)
+            return
+        if economy.balance(self.user_id) < amount:
+            await interaction.response.send_message(
+                f"❌ You only have **{economy.balance(self.user_id):,}** coins.", ephemeral=True
+            )
+            return
+
+        bounties = _load_json_file(BOUNTIES_FILE, {"targets": {}})
+        economy.add(self.user_id, -amount, "bounty placed (shop)")
+        targets = bounties["targets"].setdefault(str(target_id), [])
+        targets.append({
+            "placer_id": self.user_id,
+            "amount": amount,
+            "placed_at": time.time(),
+        })
+        _save_json_file(BOUNTIES_FILE, bounties)
+        total_on_target = sum(b["amount"] for b in targets)
+        await interaction.response.send_message(
+            f"# 💰 BOUNTY PLACED\n\n"
+            f"<@{self.user_id}> put a **{amount:,}** coin bounty on {target_member.mention}!\n"
+            f"💀 Total on {target_member.display_name}: **{total_on_target:,}**",
+            allowed_mentions=discord.AllowedMentions(users=[target_member]),
+        )
+
+
+class ShopLoanView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        for amt in LOAN_AMOUNTS:
+            cost, owe, hrs = LOAN_AMOUNTS[amt]
+            btn = discord.ui.Button(
+                label=f"{amt:,} → owe {owe:,}",
+                style=discord.ButtonStyle.danger,
+                emoji="💸",
+            )
+            btn.callback = self._make_callback(amt)
+            self.add_item(btn)
+        back = discord.ui.Button(label="◀ Back", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = self._back_callback
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    def _make_callback(self, amount):
+        async def cb(interaction: discord.Interaction):
+            loans = _load_json_file(LOANS_FILE, {"users": {}})
+            if str(self.user_id) in loans["users"]:
+                await interaction.response.send_message(
+                    "❌ You already have a loan. Repay it first.", ephemeral=True
+                )
+                return
+            cost, owe, hours = LOAN_AMOUNTS[amount]
+            economy.add(self.user_id, amount, "loan borrow (shop)")
+            loans["users"][str(self.user_id)] = {
+                "borrowed": amount,
+                "owe": owe,
+                "due_at": time.time() + hours * 3600,
+                "borrowed_at": time.time(),
+            }
+            _save_json_file(LOANS_FILE, loans)
+            await interaction.response.send_message(
+                f"# 💸 LOAN APPROVED\n\n"
+                f"Borrowed **{amount:,}** coins. Owe **{owe:,}** in **{hours}h**.\n"
+                f"Use `/repay` to pay back."
+            )
+        return cb
+
+    async def _back_callback(self, interaction: discord.Interaction):
+        await _show_shop_page3(interaction, self.user_id, edit=True)
+
+
+class ShopUpgradeBusinessView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        # Only show buttons for businesses the user actually owns
+        owned_types = set(b["type"] for b in _user_businesses(user_id))
+        for biz_type in BUSINESS_TYPES:
+            if biz_type not in owned_types:
+                continue
+            info = BUSINESS_TYPES[biz_type]
+            # Find lowest-level instance to upgrade
+            matching = [b for b in _user_businesses(user_id) if b["type"] == biz_type]
+            matching.sort(key=lambda b: b.get("upgrade_level", 0))
+            biz = matching[0]
+            current_level = biz.get("upgrade_level", 0)
+            if current_level >= BUSINESS_UPGRADE_MAX_LEVEL:
+                continue
+            cost = BUSINESS_UPGRADE_PRICE_PER_LEVEL * (current_level + 1)
+            btn = discord.ui.Button(
+                label=f"{info['name']} L{current_level+1} ({cost:,})",
+                emoji=info["emoji"],
+                style=discord.ButtonStyle.success,
+            )
+            btn.callback = self._make_callback(biz_type)
+            self.add_item(btn)
+        back = discord.ui.Button(label="◀ Back", style=discord.ButtonStyle.secondary, row=4)
+        back.callback = self._back_callback
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    def _make_callback(self, biz_type: str):
+        async def cb(interaction: discord.Interaction):
+            data = _load_businesses()
+            user_bizs = data["users"].get(str(self.user_id), [])
+            matching = [b for b in user_bizs if b["type"] == biz_type]
+            matching.sort(key=lambda b: b.get("upgrade_level", 0))
+            if not matching:
+                await interaction.response.send_message("❌ No business to upgrade.", ephemeral=True)
+                return
+            biz = matching[0]
+            current_level = biz.get("upgrade_level", 0)
+            if current_level >= BUSINESS_UPGRADE_MAX_LEVEL:
+                await interaction.response.send_message("❌ Already maxed.", ephemeral=True)
+                return
+            cost = BUSINESS_UPGRADE_PRICE_PER_LEVEL * (current_level + 1)
+            if economy.balance(self.user_id) < cost:
+                await interaction.response.send_message(
+                    f"❌ Need **{cost:,}** coins.", ephemeral=True
+                )
+                return
+            economy.add(self.user_id, -cost, "business upgrade (shop)")
+            biz["upgrade_level"] = current_level + 1
+            _save_businesses(data)
+            info = BUSINESS_TYPES[biz_type]
+            boost = (current_level + 1) * BUSINESS_UPGRADE_BOOST * 100
+            await interaction.response.send_message(
+                f"📈 **{info['emoji']} {info['name']}** upgraded to **Level {current_level+1}**!\n"
+                f"💰 Total boost: **+{int(boost)}%** income."
+            )
+        return cb
+
+    async def _back_callback(self, interaction: discord.Interaction):
+        await _show_shop_page3(interaction, self.user_id, edit=True)
 
 
 def shop_back_button():
@@ -5481,7 +5960,7 @@ async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: 
     user = interaction.guild.get_member(user_id) if interaction.guild else None
     name = user.display_name if user else "You"
     embed = discord.Embed(
-        title="🛒 SHOP",
+        title="🛒 SHOP — Page 1/3 (Essentials)",
         description=(
             f"Welcome, **{name}**. Pick a category below.\n\n"
             f"🎨 **Colored Role** — {ROLE_PRICES['24h']:,}–{ROLE_PRICES['perm']:,} coins\n"
@@ -5489,12 +5968,59 @@ async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: 
             f"📢 **Megaphone (@here)** — {MEGAPHONE_PRICE:,} coins\n"
             f"🎰 **Lottery Tickets** — {LOTTERY_TICKET_PRICE:,} coins each\n"
             f"🐶 **Adopt a Pet** — {PET_ADOPT_COST:,} coins\n"
-            f"🏢 **Buy a Business** — 2,000+ coins (passive income!)"
+            f"🏢 **Buy a Business** — 2,000+ coins (passive income!)\n\n"
+            f"_Click ▶ for more boosts, cosmetics, loans, bounties..._"
         ),
         color=discord.Color.gold(),
     )
     embed.set_footer(text=f"💰 Your balance: {bal:,}")
     view = ShopMainView(user_id)
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+async def _show_shop_page2(interaction: discord.Interaction, user_id: int, edit: bool = False):
+    bal = economy.balance(user_id)
+    user = interaction.guild.get_member(user_id) if interaction.guild else None
+    name = user.display_name if user else "You"
+    embed = discord.Embed(
+        title="🛒 SHOP — Page 2/3 (Boosts & Cosmetics)",
+        description=(
+            f"💎 **VIP Badge** — {VIP_PRICE:,} coins ({VIP_DURATION_DAYS}d badge next to your name)\n"
+            f"🏷️ **Custom Title** — {CUSTOM_TITLE_PRICE:,} coins (shown on /balance & /leaderboard)\n"
+            f"⚡ **XP Boost** — {XP_BOOST_PRICE:,} coins (2x XP for {XP_BOOST_DURATION_HOURS}h)\n"
+            f"🛡️ **Business Insurance** — {INSURANCE_PRICE:,} coins ({INSURANCE_DURATION_HOURS}h sabotage/event immunity)\n"
+            f"🦝 **Heist Tools** — {HEIST_TOOLS_PRICE:,} coins (+{int(HEIST_TOOLS_BOOST*100)}% rob success for {HEIST_TOOLS_DURATION_HOURS}h)\n"
+            f"🎰 **Lottery 2x** — {LOTTERY_MULT_PRICE:,} coins (next lottery win pays double)"
+        ),
+        color=discord.Color.purple(),
+    )
+    embed.set_footer(text=f"💰 Your balance: {bal:,}")
+    view = ShopPage2View(user_id)
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+async def _show_shop_page3(interaction: discord.Interaction, user_id: int, edit: bool = False):
+    bal = economy.balance(user_id)
+    user = interaction.guild.get_member(user_id) if interaction.guild else None
+    name = user.display_name if user else "You"
+    embed = discord.Embed(
+        title="🛒 SHOP — Page 3/3 (Risk & Utility)",
+        description=(
+            f"💸 **Loan Shark** — borrow 1k/5k/25k now, owe more later\n"
+            f"💰 **Place Bounty** — put a hit on a user (min {BOUNTY_MIN}). Anyone who beats them in PvP claims it.\n"
+            f"🍖 **Pet Food Bundle** — {PET_FOOD_BUNDLE_PRICE:,} coins ({PET_FOOD_BUNDLE_DAYS}d auto-feed, discounted)\n"
+            f"📈 **Upgrade Business** — {BUSINESS_UPGRADE_PRICE_PER_LEVEL:,}+ coins (+{int(BUSINESS_UPGRADE_BOOST*100)}% permanent income per level, max {BUSINESS_UPGRADE_MAX_LEVEL})"
+        ),
+        color=discord.Color.dark_red(),
+    )
+    embed.set_footer(text=f"💰 Your balance: {bal:,}")
+    view = ShopPage3View(user_id)
     if edit:
         await interaction.response.edit_message(embed=embed, view=view)
     else:
