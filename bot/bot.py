@@ -4976,6 +4976,55 @@ class ShopMainView(discord.ui.View):
             embed=embed, view=ShopLotteryView(self.user_id)
         )
 
+    @discord.ui.button(label="Pets", style=discord.ButtonStyle.primary, emoji="🐶", row=1)
+    async def pets_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = economy.balance(self.user_id)
+        pets = _load_pets()
+        has_pet = str(self.user_id) in pets
+
+        desc_lines = [
+            f"Adopt a pet for **{PET_ADOPT_COST:,}** coins.",
+            "Pets earn passive coins, level up, need feeding.",
+            "",
+        ]
+        if has_pet:
+            p = pets[str(self.user_id)]
+            info = PET_TYPES.get(p["type"], {"emoji":"🐾","name":"?"})
+            desc_lines.append(f"❌ You already have **{info['emoji']} {p['name']}**. Use `/abandon` first to adopt a new one.")
+        else:
+            desc_lines.append("Pick a pet type below:")
+
+        embed = discord.Embed(
+            title="🐶 Adopt a Pet",
+            description="\n".join(desc_lines),
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopPetView(self.user_id, has_pet=has_pet)
+        )
+
+    @discord.ui.button(label="Businesses", style=discord.ButtonStyle.success, emoji="🏢", row=1)
+    async def businesses_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = economy.balance(self.user_id)
+        user_bizs = _user_businesses(self.user_id)
+        total_hourly = sum(_business_income_per_hour(b) for b in user_bizs)
+
+        embed = discord.Embed(
+            title="🏢 Buy a Business",
+            description=(
+                "Businesses earn passive income 24/7.\n"
+                "Hire employees with `/hire` to boost income.\n"
+                f"_Same-tier purchases cost {int((BUSINESS_QUANTITY_MULTIPLIER-1)*100)}% more each._\n\n"
+                f"📊 You own **{len(user_bizs)}** businesses earning **{total_hourly:,}/hr**"
+            ),
+            color=discord.Color.dark_green(),
+        )
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopBusinessView(self.user_id, page=0)
+        )
+
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
@@ -5399,7 +5448,9 @@ async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: 
             f"🎨 **Colored Role** — {ROLE_PRICES['24h']:,}–{ROLE_PRICES['perm']:,} coins\n"
             f"🛡️ **Rob Immunity (12h)** — {PROTECT_PRICE:,} coins\n"
             f"📢 **Megaphone (@here)** — {MEGAPHONE_PRICE:,} coins\n"
-            f"🎰 **Lottery Tickets** — {LOTTERY_TICKET_PRICE:,} coins each"
+            f"🎰 **Lottery Tickets** — {LOTTERY_TICKET_PRICE:,} coins each\n"
+            f"🐶 **Adopt a Pet** — {PET_ADOPT_COST:,} coins\n"
+            f"🏢 **Buy a Business** — 2,000+ coins (passive income!)"
         ),
         color=discord.Color.gold(),
     )
@@ -5409,6 +5460,222 @@ async def _show_shop_main(interaction: discord.Interaction, user_id: int, edit: 
         await interaction.response.edit_message(embed=embed, view=view)
     else:
         await interaction.response.send_message(embed=embed, view=view)
+
+
+# ── 🐶 Shop: Pet Adoption ────────────────────────────────────────────────────
+class ShopPetView(discord.ui.View):
+    """Pick a pet type. Each button opens a name modal."""
+    def __init__(self, user_id: int, has_pet: bool = False):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        # Build buttons for each pet type
+        for i, (key, info) in enumerate(PET_TYPES.items()):
+            btn = discord.ui.Button(
+                label=info["name"],
+                emoji=info["emoji"],
+                style=discord.ButtonStyle.primary,
+                row=i // 4,
+                disabled=has_pet,
+            )
+            btn.callback = self._make_callback(key)
+            self.add_item(btn)
+        # Back button
+        back = discord.ui.Button(label="Back to Shop", style=discord.ButtonStyle.secondary, emoji="◀️", row=2)
+        back.callback = self._back_callback
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    def _make_callback(self, pet_type: str):
+        async def cb(interaction: discord.Interaction):
+            # Check balance & pet ownership first
+            if economy.balance(self.user_id) < PET_ADOPT_COST:
+                await interaction.response.send_message(
+                    f"❌ Need **{PET_ADOPT_COST:,}** coins.", ephemeral=True
+                )
+                return
+            pets = _load_pets()
+            if str(self.user_id) in pets:
+                await interaction.response.send_message(
+                    "❌ You already have a pet. Abandon it first.", ephemeral=True
+                )
+                return
+            await interaction.response.send_modal(PetNameModal(self.user_id, pet_type))
+        return cb
+
+    async def _back_callback(self, interaction: discord.Interaction):
+        await _show_shop_main(interaction, self.user_id, edit=True)
+
+
+class PetNameModal(discord.ui.Modal, title="Name your pet"):
+    pet_name = discord.ui.TextInput(
+        label="Pet name",
+        placeholder="e.g. Buddy",
+        required=True,
+        max_length=30,
+    )
+
+    def __init__(self, user_id: int, pet_type: str):
+        super().__init__()
+        self.user_id = user_id
+        self.pet_type = pet_type
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Re-check (race protection)
+        if economy.balance(self.user_id) < PET_ADOPT_COST:
+            await interaction.response.send_message(
+                f"❌ Need **{PET_ADOPT_COST:,}** coins.", ephemeral=True
+            )
+            return
+        pets = _load_pets()
+        if str(self.user_id) in pets:
+            await interaction.response.send_message("❌ You already have a pet.", ephemeral=True)
+            return
+
+        name = str(self.pet_name).strip()[:30]
+        if not name:
+            await interaction.response.send_message("❌ Give your pet a name.", ephemeral=True)
+            return
+
+        economy.add(self.user_id, -PET_ADOPT_COST, "pet adoption (shop)")
+        info = PET_TYPES[self.pet_type]
+        pets[str(self.user_id)] = {
+            "type": self.pet_type,
+            "name": name,
+            "xp": 0,
+            "last_fed": time.time(),
+            "last_collected": time.time(),
+            "adopted_at": time.time(),
+        }
+        _save_pets(pets)
+        await interaction.response.send_message(
+            f"# {info['emoji']} You adopted **{name}** the {info['name']}!\n\n"
+            f"💰 Earns **{PET_DAILY_INCOME_BASE}** coins per level per day\n"
+            f"🍖 Feed daily with `/feed` so they don't starve\n"
+            f"📊 Check stats with `/pet`\n"
+            f"💎 Collect earnings with `/collect`"
+        )
+
+
+# ── 🏢 Shop: Business Purchase ───────────────────────────────────────────────
+class ShopBusinessView(discord.ui.View):
+    """Paginated list of business types with buy buttons."""
+    PER_PAGE = 4  # 4 buttons + back/page nav
+
+    def __init__(self, user_id: int, page: int = 0):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.page = page
+        biz_keys = list(BUSINESS_TYPES.keys())
+        start = page * self.PER_PAGE
+        page_keys = biz_keys[start:start + self.PER_PAGE]
+
+        for i, key in enumerate(page_keys):
+            info = BUSINESS_TYPES[key]
+            cost = _business_cost(user_id, key)
+            btn = discord.ui.Button(
+                label=f"{info['name']} ({cost:,})",
+                emoji=info["emoji"],
+                style=discord.ButtonStyle.success,
+                row=i,
+            )
+            btn.callback = self._make_callback(key)
+            self.add_item(btn)
+
+        # Nav row (row 4 is buttons row max so use proper rows)
+        nav_row = (self.PER_PAGE - 1) // 5 + 1
+        if page > 0:
+            prev_btn = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=4)
+            prev_btn.callback = self._prev_callback
+            self.add_item(prev_btn)
+        total_pages = (len(biz_keys) + self.PER_PAGE - 1) // self.PER_PAGE
+        if page + 1 < total_pages:
+            next_btn = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, row=4)
+            next_btn.callback = self._next_callback
+            self.add_item(next_btn)
+        back = discord.ui.Button(label="Back to Shop", style=discord.ButtonStyle.secondary, emoji="◀️", row=4)
+        back.callback = self._back_callback
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your shop.", ephemeral=True)
+            return False
+        return True
+
+    def _make_callback(self, biz_type: str):
+        async def cb(interaction: discord.Interaction):
+            cost = _business_cost(self.user_id, biz_type)
+            bal = economy.balance(self.user_id)
+            if bal < cost:
+                await interaction.response.send_message(
+                    f"❌ Need **{cost:,}** coins. You have **{bal:,}**.", ephemeral=True
+                )
+                return
+
+            info = BUSINESS_TYPES[biz_type]
+            economy.add(self.user_id, -cost, f"bought {biz_type} (shop)")
+            data = _load_businesses()
+            user_bizs = data["users"].setdefault(str(self.user_id), [])
+            user_bizs.append({
+                "id": f"{biz_type}_{int(time.time())}_{random.randint(1000,9999)}",
+                "type": biz_type,
+                "purchased_at": time.time(),
+                "last_collected": time.time(),
+                "employees": [],
+                "damaged_until": 0,
+                "lifetime_earned": 0,
+            })
+            _save_businesses(data)
+            new_bal = economy.balance(self.user_id)
+            await interaction.response.send_message(
+                f"# {info['emoji']} BUSINESS ACQUIRED\n\n"
+                f"Bought **{info['name']}** for **{cost:,}** coins.\n"
+                f"💰 Income: **{info['income_per_hour']:,}**/hr\n"
+                f"👥 Max employees: **{info['max_employees']}**\n\n"
+                f"Use `/businesses` to manage, `/collectbusiness` to claim earnings.\n"
+                f"Balance: **{new_bal:,}**"
+            )
+        return cb
+
+    async def _prev_callback(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🏢 Buy a Business",
+            description=(
+                "Businesses earn passive income 24/7.\n"
+                "Hire employees with `/hire` to boost income.\n"
+                f"_Same-tier purchases cost {int((BUSINESS_QUANTITY_MULTIPLIER-1)*100)}% more each._"
+            ),
+            color=discord.Color.dark_green(),
+        )
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopBusinessView(self.user_id, page=self.page - 1)
+        )
+
+    async def _next_callback(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🏢 Buy a Business",
+            description=(
+                "Businesses earn passive income 24/7.\n"
+                "Hire employees with `/hire` to boost income.\n"
+                f"_Same-tier purchases cost {int((BUSINESS_QUANTITY_MULTIPLIER-1)*100)}% more each._"
+            ),
+            color=discord.Color.dark_green(),
+        )
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"💰 Your balance: {bal:,}")
+        await interaction.response.edit_message(
+            embed=embed, view=ShopBusinessView(self.user_id, page=self.page + 1)
+        )
+
+    async def _back_callback(self, interaction: discord.Interaction):
+        await _show_shop_main(interaction, self.user_id, edit=True)
 
 
 @tree.command(name="shop", description="Browse the shop with interactive buttons.")
