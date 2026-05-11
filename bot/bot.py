@@ -620,10 +620,21 @@ def get_user_badges(user_id: int) -> str:
     """Return a string of emoji badges the user has earned."""
     earned = _get_achievements(user_id)
     badges = []
+    # VIP badge first if active
+    if is_vip(user_id):
+        badges.append("💎")
     for ach_id in earned:
         if ach_id in ACHIEVEMENTS:
             badges.append(ACHIEVEMENTS[ach_id]["emoji"])
     return "".join(badges)
+
+
+def get_user_name_display(user_id: int, display_name: str) -> str:
+    """Format display name with custom title if set."""
+    title = get_custom_title(user_id)
+    if title:
+        return f"{display_name} [{title}]"
+    return display_name
 
 
 # ── Trigger functions — called by other commands ─────────────────────────────
@@ -772,6 +783,8 @@ def add_xp(user_id: int, amount: int) -> tuple[int, int, bool]:
 
 async def grant_xp(user_id: int, amount: int, channel=None):
     """Grant XP and announce level-up if it happens."""
+    # Apply XP boost item
+    amount = amount * xp_multiplier(user_id)
     new_xp, new_level, leveled = add_xp(user_id, amount)
     if leveled and channel:
         # Award level-up bonus + apply level-based perks
@@ -2732,6 +2745,11 @@ async def duel_command(interaction: discord.Interaction, opponent: discord.Membe
     new_bal = economy.add(winner.id, duel_prize, "duel win")
     economy.record_win(winner.id)
     economy.record_loss(loser.id)
+    # Claim any bounty on the loser
+    try:
+        await claim_bounty(winner.id, loser.id, interaction.channel)
+    except Exception:
+        pass
     await trigger_game_win(winner.id, "duel", channel=interaction.channel)
     await trigger_balance_check(winner.id, channel=interaction.channel)
     final = (
@@ -3560,7 +3578,7 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
         )
         return
 
-    if random.random() < ROB_SUCCESS_CHANCE:
+    if random.random() < ROB_SUCCESS_CHANCE + (HEIST_TOOLS_BOOST if has_heist_tools(user.id) else 0):
         # Success
         pct = random.uniform(ROB_PERCENT_MIN, ROB_PERCENT_MAX)
         amount = max(1, int(target_bal * pct))
@@ -3574,6 +3592,11 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
         await trigger_game_win(user.id, "rob", channel=interaction.channel)
         await trigger_event(target.id, "got_robbed", channel=interaction.channel)
         await trigger_balance_check(user.id, channel=interaction.channel)
+        # Claim any bounty on the victim
+        try:
+            await claim_bounty(user.id, target.id, interaction.channel)
+        except Exception:
+            pass
     else:
         # Caught — pay a fine
         fine = random.randint(ROB_FINE_MIN, ROB_FINE_MAX)
@@ -4842,6 +4865,22 @@ async def lottery_drawing_scheduler():
             # Pay out
             economy.add(int(winner_uid), jackpot, "lottery jackpot")
             economy.record_win(int(winner_uid))
+            # Apply lottery multiplier item if present
+            try:
+                winner_u = economy._user(int(winner_uid))
+                mult = winner_u.get("lottery_mult", 1)
+                if mult > 1:
+                    bonus = jackpot * (mult - 1)
+                    economy.add(int(winner_uid), bonus, "lottery multiplier")
+                    winner_u["lottery_mult"] = 1  # consumed
+                    economy._save()
+                    if channel:
+                        await channel.send(
+                            f"🎰 **<@{winner_uid}>'s lottery multiplier activated! +{bonus:,} bonus coins!**",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+            except Exception:
+                pass
             # Try to grant achievement (no channel ref handy here but channel below works)
             try:
                 if channel:
@@ -6843,6 +6882,11 @@ async def _run_fight(interaction: discord.Interaction, channel_id: str):
     economy.add(winner_id, fighter_payout, "fight win")
     economy.record_win(winner_id)
     economy.record_loss(loser_id)
+    # Claim any bounty on the loser
+    try:
+        await claim_bounty(winner_id, loser_id, channel)
+    except Exception:
+        pass
     await trigger_game_win(winner_id, "fight", channel=channel)
     await trigger_balance_check(winner_id, channel=channel)
 
@@ -8186,13 +8230,14 @@ def _business_cost(user_id: int, biz_type: str) -> int:
 
 
 def _business_income_per_hour(biz: dict) -> int:
-    """Compute current per-hour income for a single business (counting employees)."""
+    """Compute current per-hour income for a single business (counting employees + upgrades)."""
     info = BUSINESS_TYPES.get(biz["type"])
     if not info:
         return 0
     base = info["income_per_hour"]
     employees = len(biz.get("employees", []))
-    boost = 1 + employees * EMPLOYEE_INCOME_BOOST
+    upgrade_level = biz.get("upgrade_level", 0)
+    boost = 1 + employees * EMPLOYEE_INCOME_BOOST + upgrade_level * BUSINESS_UPGRADE_BOOST
     return int(base * boost)
 
 
@@ -8542,6 +8587,20 @@ async def sabotage_command(
         )
         return
 
+    # Insurance protection blocks sabotage entirely
+    if has_insurance(target.id):
+        # Charge user, give them a useless attempt
+        economy.add(user.id, -SABOTAGE_COST, "sabotage attempt (insured)")
+        counters = _get_counters(user.id)
+        counters["last_sabotage"] = time.time()
+        economy._save()
+        await interaction.response.send_message(
+            f"🛡️ {target.mention}'s business is **INSURED**. Your sabotage attempt failed silently.\n"
+            f"You lost **{SABOTAGE_COST:,}** coins on the attempt.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
     biz = matching[0]
     info = BUSINESS_TYPES[biz_type]
 
@@ -8611,6 +8670,9 @@ async def business_events_scheduler():
             for uid, bizs in data["users"].items():
                 if not bizs:
                     continue
+                # Insurance blocks events
+                if has_insurance(int(uid)):
+                    continue
                 # 8% chance any user gets an event
                 if random.random() > 0.08:
                     continue
@@ -8650,6 +8712,554 @@ async def business_events_scheduler():
             _save_businesses(data)
         except Exception as e:
             log.exception("business_events_scheduler: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛒 EXPANDED SHOP ITEMS
+# Insurance, VIP, XP boost, custom titles, lottery multiplier, loans,
+# bounties, pet food bundle, business upgrades, heist tools
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Prices & timings ────────────────────────────────────────────────────────
+INSURANCE_PRICE = 3_000
+INSURANCE_DURATION_HOURS = 48
+VIP_PRICE = 5_000
+VIP_DURATION_DAYS = 7
+XP_BOOST_PRICE = 1_500
+XP_BOOST_DURATION_HOURS = 24
+CUSTOM_TITLE_PRICE = 2_500
+LOTTERY_MULT_PRICE = 1_000  # Applies to NEXT lottery win
+LOAN_AMOUNTS = {  # amount -> (cost_to_borrow, repay_total, hours_to_repay)
+    1000:  (1000, 1200,  24),
+    5000:  (5000, 6500,  48),
+    25000: (25000, 35000, 72),
+}
+BOUNTY_MIN = 500
+PET_FOOD_BUNDLE_PRICE = 250  # vs 7 × 50 = 350 (28% discount)
+PET_FOOD_BUNDLE_DAYS = 7
+BUSINESS_UPGRADE_PRICE_PER_LEVEL = 5_000
+BUSINESS_UPGRADE_BOOST = 0.10  # +10% income per upgrade level
+BUSINESS_UPGRADE_MAX_LEVEL = 5
+HEIST_TOOLS_PRICE = 2_000
+HEIST_TOOLS_DURATION_HOURS = 24
+HEIST_TOOLS_BOOST = 0.20  # +20% rob success chance
+
+BOUNTIES_FILE = MEMORY_DIR / "bounties.json"
+LOANS_FILE = MEMORY_DIR / "loans.json"
+
+
+def _load_json_file(path, default):
+    if path.exists():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default
+
+
+def _save_json_file(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# Helpers for time-based item activations stored in user record
+def _user_set_until(user_id: int, key: str, hours: float):
+    u = economy._user(user_id)
+    u[key] = time.time() + hours * 3600
+    economy._save()
+
+
+def _user_is_active(user_id: int, key: str) -> bool:
+    u = economy._user(user_id)
+    return u.get(key, 0) > time.time()
+
+
+def _user_active_remaining(user_id: int, key: str) -> int:
+    u = economy._user(user_id)
+    return max(0, int(u.get(key, 0) - time.time()))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛡️ /insurance — protect business from events & sabotage
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="insurance", description="Buy 48h business insurance — blocks sabotage and event damage.")
+async def insurance_command(interaction: discord.Interaction):
+    user = interaction.user
+    if _user_is_active(user.id, "insurance_until"):
+        remaining = _user_active_remaining(user.id, "insurance_until")
+        await interaction.response.send_message(
+            f"🛡️ You already have insurance for **{fmt_cooldown(remaining)}**.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < INSURANCE_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{INSURANCE_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -INSURANCE_PRICE, "insurance")
+    _user_set_until(user.id, "insurance_until", INSURANCE_DURATION_HOURS)
+    await interaction.response.send_message(
+        f"# 🛡️ INSURANCE ACTIVE\n\n"
+        f"For the next **{INSURANCE_DURATION_HOURS} hours**, your businesses are immune to "
+        f"sabotage and random events.\n\n"
+        f"Balance: **{economy.balance(user.id):,}**"
+    )
+
+
+def has_insurance(user_id: int) -> bool:
+    return _user_is_active(user_id, "insurance_until")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💎 /vip — weekly cosmetic badge
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="vip", description="Buy a VIP badge — glowing 💎 next to your name for 7 days.")
+async def vip_command(interaction: discord.Interaction):
+    user = interaction.user
+    if _user_is_active(user.id, "vip_until"):
+        remaining = _user_active_remaining(user.id, "vip_until")
+        await interaction.response.send_message(
+            f"💎 You're already VIP for **{fmt_cooldown(remaining)}**.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < VIP_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{VIP_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -VIP_PRICE, "vip")
+    _user_set_until(user.id, "vip_until", VIP_DURATION_DAYS * 24)
+    await interaction.response.send_message(
+        f"# 💎 VIP ACTIVATED\n\n"
+        f"{user.mention} is now VIP for **{VIP_DURATION_DAYS} days**!\n"
+        f"💎 badge will appear next to your name everywhere."
+    )
+
+
+def is_vip(user_id: int) -> bool:
+    return _user_is_active(user_id, "vip_until")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚡ /xpboost — 2x XP for 24h
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="xpboost", description="Buy a 2x XP boost for 24 hours.")
+async def xpboost_command(interaction: discord.Interaction):
+    user = interaction.user
+    if _user_is_active(user.id, "xp_boost_until"):
+        remaining = _user_active_remaining(user.id, "xp_boost_until")
+        await interaction.response.send_message(
+            f"⚡ XP boost active for **{fmt_cooldown(remaining)}** more.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < XP_BOOST_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{XP_BOOST_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -XP_BOOST_PRICE, "xp boost")
+    _user_set_until(user.id, "xp_boost_until", XP_BOOST_DURATION_HOURS)
+    await interaction.response.send_message(
+        f"# ⚡ XP BOOST ACTIVE\n\n"
+        f"For the next **{XP_BOOST_DURATION_HOURS} hours**, you earn **2x XP** from messages and commands."
+    )
+
+
+def xp_multiplier(user_id: int) -> int:
+    return 2 if _user_is_active(user_id, "xp_boost_until") else 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏷️ /title — set or buy a custom title
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="title", description="Set or buy a custom title (shown on /balance and /leaderboard).")
+@discord.app_commands.describe(new_title="Your custom title (max 24 chars). Leave empty to view yours.")
+async def title_command(interaction: discord.Interaction, new_title: str = None):
+    user = interaction.user
+    u = economy._user(user.id)
+    current = u.get("custom_title", "")
+
+    if new_title is None:
+        if current:
+            await interaction.response.send_message(
+                f"🏷️ Your title: **{current}**\nUse `/title new_title:...` to change. "
+                f"Each new title costs **{CUSTOM_TITLE_PRICE:,}** coins."
+            )
+        else:
+            await interaction.response.send_message(
+                f"You have no custom title. Set one with `/title new_title:Your Title Here` "
+                f"for **{CUSTOM_TITLE_PRICE:,}** coins."
+            )
+        return
+
+    title_text = new_title.strip()[:24]
+    if not title_text:
+        await interaction.response.send_message("Title can't be empty.", ephemeral=True)
+        return
+    # Block @everyone-style abuse
+    title_text = title_text.replace("@everyone", "").replace("@here", "")
+
+    if economy.balance(user.id) < CUSTOM_TITLE_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{CUSTOM_TITLE_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+
+    economy.add(user.id, -CUSTOM_TITLE_PRICE, "custom title")
+    u["custom_title"] = title_text
+    economy._save()
+    await interaction.response.send_message(
+        f"🏷️ Your title is now: **{title_text}**"
+    )
+
+
+def get_custom_title(user_id: int) -> str:
+    return economy._user(user_id).get("custom_title", "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎰 /lotterymult — 2x next lottery win (one-shot)
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="lotterymult", description="Buy a 2x multiplier on your next lottery win (one-time use).")
+async def lotterymult_command(interaction: discord.Interaction):
+    user = interaction.user
+    u = economy._user(user.id)
+    if u.get("lottery_mult", 1) > 1:
+        await interaction.response.send_message(
+            "🎰 You already have a lottery multiplier ready for your next win.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < LOTTERY_MULT_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{LOTTERY_MULT_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -LOTTERY_MULT_PRICE, "lottery multiplier")
+    u["lottery_mult"] = 2
+    economy._save()
+    await interaction.response.send_message(
+        f"# 🎰 LOTTERY MULTIPLIER ACTIVE\n\n"
+        f"If you win the next lottery drawing, you'll receive **2x** the jackpot!\n"
+        f"Active until you win a lottery."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💸 /loan — borrow coins now, pay more later
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="loan", description="Borrow coins from the loan shark. Owe more later.")
+@discord.app_commands.describe(amount="How much to borrow")
+@discord.app_commands.choices(
+    amount=[
+        discord.app_commands.Choice(name=f"{k:,} → owe {v[1]:,} in {v[2]}h", value=k)
+        for k, v in LOAN_AMOUNTS.items()
+    ]
+)
+async def loan_command(interaction: discord.Interaction, amount: discord.app_commands.Choice[int]):
+    user = interaction.user
+    loans = _load_json_file(LOANS_FILE, {"users": {}})
+    if str(user.id) in loans["users"]:
+        existing = loans["users"][str(user.id)]
+        remaining = max(0, existing["due_at"] - time.time())
+        await interaction.response.send_message(
+            f"❌ You already have a loan of **{existing['owe']:,}** coins. "
+            f"Due in **{fmt_cooldown(int(remaining))}**. Repay with `/repay`.",
+            ephemeral=True,
+        )
+        return
+
+    borrow_amount = amount.value
+    cost, owe, hours = LOAN_AMOUNTS[borrow_amount]
+    economy.add(user.id, borrow_amount, "loan borrow")
+    loans["users"][str(user.id)] = {
+        "borrowed": borrow_amount,
+        "owe": owe,
+        "due_at": time.time() + hours * 3600,
+        "borrowed_at": time.time(),
+    }
+    _save_json_file(LOANS_FILE, loans)
+    await interaction.response.send_message(
+        f"# 💸 LOAN APPROVED\n\n"
+        f"You received **{borrow_amount:,}** coins.\n"
+        f"You owe the loan shark **{owe:,}** coins in **{hours} hours**.\n"
+        f"⚠️ Miss the deadline → lose all coins to interest until paid.\n\n"
+        f"Repay anytime with `/repay`."
+    )
+
+
+@tree.command(name="repay", description="Repay your loan.")
+async def repay_command(interaction: discord.Interaction):
+    user = interaction.user
+    loans = _load_json_file(LOANS_FILE, {"users": {}})
+    if str(user.id) not in loans["users"]:
+        await interaction.response.send_message("You don't have an active loan.", ephemeral=True)
+        return
+    loan = loans["users"][str(user.id)]
+    owe = loan["owe"]
+    if economy.balance(user.id) < owe:
+        await interaction.response.send_message(
+            f"❌ You owe **{owe:,}** coins but only have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+    economy.add(user.id, -owe, "loan repay")
+    del loans["users"][str(user.id)]
+    _save_json_file(LOANS_FILE, loans)
+    await interaction.response.send_message(
+        f"💸 Loan repaid. **{owe:,}** coins gone. The loan shark nods respectfully.\n"
+        f"Balance: **{economy.balance(user.id):,}**"
+    )
+
+
+async def loan_shark_scheduler():
+    """Background task: charge defaulted loans periodically."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(3600)  # every hour
+        try:
+            loans = _load_json_file(LOANS_FILE, {"users": {}})
+            now = time.time()
+            cfg = load_config()
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
+            changed = False
+            for uid, loan in list(loans["users"].items()):
+                if loan["due_at"] < now:
+                    # Default — apply 10% interest per hour overdue, taken from balance or business pending
+                    overdue_hours = (now - loan["due_at"]) / 3600
+                    if overdue_hours < 1:
+                        continue
+                    penalty = int(loan["owe"] * 0.1)
+                    bal = economy.balance(int(uid))
+                    actual = min(penalty, bal)
+                    if actual > 0:
+                        economy.add(int(uid), -actual, "loan default penalty")
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"💸 **LOAN SHARK COLLECTS**\n"
+                                    f"<@{uid}> defaulted on their loan. Lost **{actual:,}** coins.",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                        loan["due_at"] = now + 3600  # next charge in 1h
+                        changed = True
+                    else:
+                        # Broke — wipe loan (loan shark gives up)
+                        del loans["users"][uid]
+                        changed = True
+            if changed:
+                _save_json_file(LOANS_FILE, loans)
+        except Exception as e:
+            log.exception("loan_shark_scheduler: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💰 /bounty — put a bounty on a user
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="bounty", description="Place a bounty on a user. Whoever beats them in PvP wins it.")
+@discord.app_commands.describe(target="Who to put a bounty on", amount="How many coins (min 500)")
+async def bounty_command(interaction: discord.Interaction, target: discord.Member, amount: int):
+    user = interaction.user
+    if target.id == user.id:
+        await interaction.response.send_message("Can't bounty yourself.", ephemeral=True)
+        return
+    if target.bot:
+        await interaction.response.send_message("Can't bounty a bot.", ephemeral=True)
+        return
+    if amount < BOUNTY_MIN:
+        await interaction.response.send_message(f"❌ Min bounty is **{BOUNTY_MIN}** coins.", ephemeral=True)
+        return
+    if economy.balance(user.id) < amount:
+        await interaction.response.send_message(
+            f"❌ You only have **{economy.balance(user.id):,}** coins.", ephemeral=True
+        )
+        return
+
+    bounties = _load_json_file(BOUNTIES_FILE, {"targets": {}})
+    economy.add(user.id, -amount, "bounty placed")
+    targets = bounties["targets"].setdefault(str(target.id), [])
+    targets.append({
+        "placer_id": user.id,
+        "amount": amount,
+        "placed_at": time.time(),
+    })
+    _save_json_file(BOUNTIES_FILE, bounties)
+
+    total_on_target = sum(b["amount"] for b in targets)
+    await interaction.response.send_message(
+        f"# 💰 BOUNTY PLACED\n\n"
+        f"{user.mention} put a **{amount:,}** coin bounty on {target.mention}!\n"
+        f"💀 Total bounty on {target.display_name}: **{total_on_target:,}** coins\n\n"
+        f"Whoever beats {target.display_name} in `/fight`, `/duel`, or `/rob` claims it.",
+        allowed_mentions=discord.AllowedMentions(users=[target]),
+    )
+
+
+@tree.command(name="bounties", description="See all active bounties.")
+async def bounties_command(interaction: discord.Interaction):
+    bounties = _load_json_file(BOUNTIES_FILE, {"targets": {}})
+    if not bounties["targets"]:
+        await interaction.response.send_message("No active bounties.", ephemeral=True)
+        return
+    lines = []
+    sorted_targets = sorted(
+        bounties["targets"].items(),
+        key=lambda x: sum(b["amount"] for b in x[1]),
+        reverse=True,
+    )
+    for uid, blist in sorted_targets[:15]:
+        total = sum(b["amount"] for b in blist)
+        lines.append(f"💀 <@{uid}> — **{total:,}** coins ({len(blist)} bounty{'s' if len(blist) != 1 else ''})")
+
+    embed = discord.Embed(
+        title="💰 ACTIVE BOUNTIES",
+        description="\n".join(lines),
+        color=discord.Color.dark_red(),
+    )
+    embed.set_footer(text="Beat them in /fight, /duel, or /rob to claim.")
+    await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def claim_bounty(winner_id: int, loser_id: int, channel) -> int:
+    """Called by fight/duel/rob handlers. Pays out all bounties on loser to winner. Returns total."""
+    bounties = _load_json_file(BOUNTIES_FILE, {"targets": {}})
+    targets = bounties["targets"].get(str(loser_id))
+    if not targets:
+        return 0
+    total = sum(b["amount"] for b in targets)
+    if total <= 0:
+        return 0
+    economy.add(winner_id, total, "bounty claim")
+    del bounties["targets"][str(loser_id)]
+    _save_json_file(BOUNTIES_FILE, bounties)
+    try:
+        if channel:
+            await channel.send(
+                f"💀 **BOUNTY CLAIMED!**\n"
+                f"<@{winner_id}> collected **{total:,}** coins for taking down <@{loser_id}>.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+    except Exception:
+        pass
+    return total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🍖 /petfood — feed pet for 7 days (auto)
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="petfood", description="Buy a 7-day food bundle for your pet (auto-feeds, discounted).")
+async def petfood_command(interaction: discord.Interaction):
+    user = interaction.user
+    pets = _load_pets()
+    if str(user.id) not in pets:
+        await interaction.response.send_message("You don't have a pet.", ephemeral=True)
+        return
+    if economy.balance(user.id) < PET_FOOD_BUNDLE_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{PET_FOOD_BUNDLE_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -PET_FOOD_BUNDLE_PRICE, "pet food bundle")
+    pet = pets[str(user.id)]
+    # Push last_fed forward by 7 days
+    pet["last_fed"] = time.time() + PET_FOOD_BUNDLE_DAYS * 24 * 3600
+    pet["xp"] = pet.get("xp", 0) + 50  # bonus XP for the bundle
+    _save_pets(pets)
+    info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+    await interaction.response.send_message(
+        f"# 🍖 PET FOOD BUNDLE PURCHASED\n\n"
+        f"{info['emoji']} **{pet['name']}** is fed for the next **{PET_FOOD_BUNDLE_DAYS} days**!\n"
+        f"Bonus: +50 XP from the great meal."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📈 /upgradebusiness — permanently boost a single business
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="upgradebusiness", description="Permanently upgrade ONE of your businesses (+10% income per level).")
+@discord.app_commands.describe(business_type="Which business type to upgrade")
+@discord.app_commands.choices(
+    business_type=[
+        discord.app_commands.Choice(name=f"{b['emoji']} {b['name']}", value=k)
+        for k, b in BUSINESS_TYPES.items()
+    ]
+)
+async def upgradebusiness_command(
+    interaction: discord.Interaction,
+    business_type: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    data = _load_businesses()
+    user_bizs = data["users"].get(str(user.id), [])
+    biz_type = business_type.value
+
+    matching = [b for b in user_bizs if b["type"] == biz_type]
+    if not matching:
+        await interaction.response.send_message(
+            f"❌ You don't own a {BUSINESS_TYPES[biz_type]['name']}.", ephemeral=True
+        )
+        return
+
+    # Pick the lowest-level instance to upgrade
+    matching.sort(key=lambda b: b.get("upgrade_level", 0))
+    biz = matching[0]
+    current_level = biz.get("upgrade_level", 0)
+    if current_level >= BUSINESS_UPGRADE_MAX_LEVEL:
+        await interaction.response.send_message(
+            f"❌ This business is maxed at level {BUSINESS_UPGRADE_MAX_LEVEL}.", ephemeral=True
+        )
+        return
+    cost = BUSINESS_UPGRADE_PRICE_PER_LEVEL * (current_level + 1)
+    if economy.balance(user.id) < cost:
+        await interaction.response.send_message(
+            f"❌ Upgrade level {current_level + 1} costs **{cost:,}** coins.", ephemeral=True
+        )
+        return
+
+    economy.add(user.id, -cost, "business upgrade")
+    biz["upgrade_level"] = current_level + 1
+    _save_businesses(data)
+    info = BUSINESS_TYPES[biz_type]
+    boost_total = (current_level + 1) * BUSINESS_UPGRADE_BOOST * 100
+    await interaction.response.send_message(
+        f"# 📈 BUSINESS UPGRADED\n\n"
+        f"{info['emoji']} **{info['name']}** upgraded to **Level {current_level + 1}**!\n"
+        f"💰 Total boost: **+{int(boost_total)}%** income.\n"
+        f"Cost: **{cost:,}** coins.\n"
+        f"_Max upgrade level: {BUSINESS_UPGRADE_MAX_LEVEL}_"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🦝 /heisttools — 24h /rob success boost
+# ─────────────────────────────────────────────────────────────────────────────
+@tree.command(name="heisttools", description="Buy heist tools — +20% rob success rate for 24h.")
+async def heisttools_command(interaction: discord.Interaction):
+    user = interaction.user
+    if _user_is_active(user.id, "heist_tools_until"):
+        remaining = _user_active_remaining(user.id, "heist_tools_until")
+        await interaction.response.send_message(
+            f"🦝 Heist tools active for **{fmt_cooldown(remaining)}** more.", ephemeral=True
+        )
+        return
+    if economy.balance(user.id) < HEIST_TOOLS_PRICE:
+        await interaction.response.send_message(
+            f"❌ Costs **{HEIST_TOOLS_PRICE:,}** coins.", ephemeral=True
+        )
+        return
+    economy.add(user.id, -HEIST_TOOLS_PRICE, "heist tools")
+    _user_set_until(user.id, "heist_tools_until", HEIST_TOOLS_DURATION_HOURS)
+    await interaction.response.send_message(
+        f"# 🦝 HEIST TOOLS EQUIPPED\n\n"
+        f"For the next **{HEIST_TOOLS_DURATION_HOURS} hours**, your `/rob` success rate is boosted by **+{int(HEIST_TOOLS_BOOST*100)}%**."
+    )
+
+
+def has_heist_tools(user_id: int) -> bool:
+    return _user_is_active(user_id, "heist_tools_until")
 
 
 @tree.command(name="commands", description="List all available bot commands.")
@@ -8713,7 +9323,25 @@ async def commands_command(interaction: discord.Interaction):
             "`/buyrole` Colored Discord role\n"
             "`/protect` 12h rob immunity\n"
             "`/megaphone` Channel-wide announcement\n"
-            "`/lottery` Buy tickets / view jackpot"
+            "`/lottery` Buy tickets / view jackpot\n"
+            "`/insurance` 48h business protection\n"
+            "`/vip` 7-day VIP badge 💎\n"
+            "`/xpboost` 2x XP for 24h\n"
+            "`/title` Set custom title\n"
+            "`/lotterymult` 2x next lottery win\n"
+            "`/petfood` 7-day pet food bundle\n"
+            "`/upgradebusiness` Permanent business boost\n"
+            "`/heisttools` +20% rob success 24h"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💰 RISK / PvP",
+        value=(
+            "`/loan` Borrow coins from loan shark\n"
+            "`/repay` Pay back your loan\n"
+            "`/bounty @user amount` Place bounty\n"
+            "`/bounties` See active bounties"
         ),
         inline=False
     )
@@ -8792,6 +9420,7 @@ async def on_ready():
     client.loop.create_task(tournament_scheduler())
     client.loop.create_task(random_event_scheduler())
     client.loop.create_task(business_events_scheduler())
+    client.loop.create_task(loan_shark_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8982,6 +9611,19 @@ PREFIX_COMMANDS = {
     "hire":         ("hire",          [{"name":"employee","type":"user","required":True},{"name":"business_type","type":"str","required":True}]),
     "fire":         ("fire",          [{"name":"employee","type":"user","required":True}]),
     "sabotage":     ("sabotage",      [{"name":"target","type":"user","required":True},{"name":"business_type","type":"str","required":True}]),
+    "insurance":    ("insurance",     []),
+    "vip":          ("vip",           []),
+    "xpboost":      ("xpboost",       []),
+    "title":        ("title",         [{"name":"new_title","type":"rest_str","required":False,"default":None}]),
+    "lotterymult":  ("lotterymult",   []),
+    "loan":         ("loan",          [{"name":"amount","type":"int","required":True}]),
+    "repay":        ("repay",         []),
+    "bounty":       ("bounty",        [{"name":"target","type":"user","required":True},{"name":"amount","type":"int","required":True}]),
+    "bounties":     ("bounties",      []),
+    "petfood":      ("petfood",       []),
+    "upgradebusiness":("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
+    "upgrade":      ("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
+    "heisttools":   ("heisttools",    []),
     "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
     "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
@@ -9098,6 +9740,27 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name == "upgradebusiness":
+        biz_type = kwargs.get("business_type", "").lower()
+        if biz_type not in BUSINESS_TYPES:
+            await message.channel.send(
+                f"❌ Business types: {', '.join(BUSINESS_TYPES.keys())}"
+            )
+            return True
+        kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name == "loan":
+        try:
+            amt = int(kwargs.get("amount", 0))
+        except Exception:
+            amt = 0
+        if amt not in LOAN_AMOUNTS:
+            await message.channel.send(
+                f"❌ Loan amounts: {', '.join(str(a) for a in LOAN_AMOUNTS)}"
+            )
+            return True
+        kwargs["amount"] = discord.app_commands.Choice(name=str(amt), value=amt)
 
     # Build a fake interaction and invoke the underlying callback
     fake = _PrefixInteraction(message)
