@@ -215,6 +215,9 @@ COOLDOWNS = {
     "work":   45 * 60,
     "rob":    2 * 3600,
     "beg":    10 * 60,
+    "pay":    60,  # 1 min between payments to prevent rapid alt-account farming
+    "crime":  2 * 3600,  # separate from rob for clarity
+    "wheel":  45 * 60,   # separate from work
 }
 
 
@@ -569,23 +572,32 @@ async def _grant_achievement(user_id: int, ach_id: str, channel=None):
     # Announce
     if channel:
         try:
-            embed = discord.Embed(
-                title="🏆 ACHIEVEMENT UNLOCKED!",
-                description=f"{ach['emoji']} **{ach['name']}**\n_{ach['description']}_",
-                color=discord.Color.gold(),
-            )
-            embed.add_field(name="💰 Reward", value=f"+{reward:,} coins", inline=True)
-            if perk_key:
-                embed.add_field(
-                    name="✨ Perk Unlocked",
-                    value=f"+{perk_value}% {_perk_label(perk_key)}",
-                    inline=True,
+            # Reduce spam: only flashy embed for achievements with rewards >= 500 or perks
+            is_major = ach.get("reward", 0) >= 500 or ach.get("perk")
+            if is_major:
+                embed = discord.Embed(
+                    title="🏆 ACHIEVEMENT UNLOCKED!",
+                    description=f"{ach['emoji']} **{ach['name']}**\n_{ach['description']}_",
+                    color=discord.Color.gold(),
                 )
-            embed.add_field(name="🏆 User", value=f"<@{user_id}>", inline=False)
-            await channel.send(
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+                embed.add_field(name="💰 Reward", value=f"+{reward:,} coins", inline=True)
+                if perk_key:
+                    embed.add_field(
+                        name="✨ Perk Unlocked",
+                        value=f"+{perk_value}% {_perk_label(perk_key)}",
+                        inline=True,
+                    )
+                embed.add_field(name="🏆 User", value=f"<@{user_id}>", inline=False)
+                await channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                # Quick text-only announcement for minor achievements
+                await channel.send(
+                    f"🏆 <@{user_id}> earned **{ach['emoji']} {ach['name']}** (+{reward:,} coins)",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except Exception:
             pass
 
@@ -2160,7 +2172,7 @@ async def gather_user_messages(interaction: discord.Interaction, user: discord.M
 
 
 # ── ⚖️ /court ────────────────────────────────────────────────────────────────
-@tree.command(name="court", description="Put a user on trial for a crime. AI judges the case.")
+@tree.command(name="court", description="Criminal trial: charge a user with a crime. Pure roleplay verdict (no $).")
 @discord.app_commands.describe(defendant="Who's on trial?", charge="What are they charged with?")
 async def court_command(interaction: discord.Interaction, defendant: discord.Member, charge: str):
     cfg = load_config()
@@ -2695,7 +2707,7 @@ async def ship_command(interaction: discord.Interaction, user1: str, user2: str)
 
 
 # ── 🔫 /duel ─────────────────────────────────────────────────────────────────
-@tree.command(name="duel", description="Pistol duel between two users at dawn.")
+@tree.command(name="duel", description="Quick 1v1 pistol duel (instant outcome, small wager).")
 @discord.app_commands.describe(opponent="Who do you challenge?")
 async def duel_command(interaction: discord.Interaction, opponent: discord.Member):
     if opponent.id == interaction.user.id:
@@ -2767,7 +2779,7 @@ async def duel_command(interaction: discord.Interaction, opponent: discord.Membe
 
 
 # ── 🎯 /gun (Russian roulette) ───────────────────────────────────────────────
-@tree.command(name="gun", description="Russian roulette. 1 in 6 chance per pull. Last person standing wins.")
+@tree.command(name="gun", description="Russian roulette: 2-4 players take turns. One dies. Last alive wins the pot.")
 @discord.app_commands.describe(player2="Player 2", player3="Player 3 (optional)", player4="Player 4 (optional)")
 async def gun_command(
     interaction: discord.Interaction,
@@ -3300,15 +3312,77 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
     badges = get_user_badges(target.id)
     earned_count = len(_get_achievements(target.id))
 
-    title = f"{COIN_EMOJI} {target.display_name}'s Wallet"
+    # Custom title
+    custom_title = get_custom_title(target.id)
+    title_suffix = f" [{custom_title}]" if custom_title else ""
+
+    title = f"{COIN_EMOJI} {target.display_name}{title_suffix}'s Wallet"
     if badges:
-        title = f"{badges} {target.display_name}"
+        title = f"{badges} {target.display_name}{title_suffix}"
 
     embed = discord.Embed(title=title, color=discord.Color.gold())
-    embed.add_field(name="Balance", value=f"**{bal:,}** coins", inline=False)
+    embed.add_field(name="💰 Balance", value=f"**{bal:,}** coins", inline=False)
     embed.add_field(name="Wins", value=str(stats.get("games_won", 0)), inline=True)
     embed.add_field(name="Losses", value=str(stats.get("games_lost", 0)), inline=True)
     embed.add_field(name="Total Earned", value=f"{stats.get('total_earned',0):,}", inline=True)
+
+    # Pet earnings pending
+    pets = _load_pets()
+    pet = pets.get(str(target.id))
+    if pet:
+        info = PET_TYPES.get(pet["type"], {"emoji":"🐾","name":"?"})
+        level = _pet_level(pet["xp"])
+        hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
+        pending = int(level * PET_DAILY_INCOME_BASE * (hours_since / 24))
+        if _pet_hunger(pet) < 30:
+            pending = pending // 2
+        embed.add_field(
+            name=f"{info['emoji']} Pet",
+            value=f"**{pet['name']}** lvl {level} • Pending: {pending:,}",
+            inline=True,
+        )
+
+    # Business pending
+    user_bizs = _user_businesses(target.id)
+    if user_bizs:
+        total_hourly = sum(_business_income_per_hour(b) for b in user_bizs)
+        total_pending = sum(_business_pending_income(b) for b in user_bizs)
+        embed.add_field(
+            name="🏢 Businesses",
+            value=f"{len(user_bizs)} owned • {total_hourly:,}/hr • Pending: **{total_pending:,}**",
+            inline=True,
+        )
+
+    # XP/Level
+    xp = _get_xp(target.id)
+    level = level_for_xp(xp)
+    embed.add_field(
+        name="📊 Level",
+        value=f"**Lvl {level}** ({xp:,} XP) — _{get_user_title(target.id)}_",
+        inline=True,
+    )
+
+    # Active boosts
+    active_boosts = []
+    if is_vip(target.id):
+        active_boosts.append(f"💎 VIP ({fmt_cooldown(_user_active_remaining(target.id, 'vip_until'))})")
+    if _user_is_active(target.id, "xp_boost_until"):
+        active_boosts.append(f"⚡ 2x XP ({fmt_cooldown(_user_active_remaining(target.id, 'xp_boost_until'))})")
+    if has_insurance(target.id):
+        active_boosts.append(f"🛡️ Insurance ({fmt_cooldown(_user_active_remaining(target.id, 'insurance_until'))})")
+    if has_heist_tools(target.id):
+        active_boosts.append(f"🦝 Heist Tools ({fmt_cooldown(_user_active_remaining(target.id, 'heist_tools_until'))})")
+    if is_protected(target.id):
+        prot_data = _load_protections()
+        remaining = max(0, int(prot_data.get(str(target.id), 0) - time.time()))
+        active_boosts.append(f"🛡️ Rob Immunity ({fmt_cooldown(remaining)})")
+    if active_boosts:
+        embed.add_field(
+            name="✨ Active Boosts",
+            value="\n".join(active_boosts),
+            inline=False,
+        )
+
     embed.add_field(
         name=f"🏆 Achievements ({earned_count}/{len(ACHIEVEMENTS)})",
         value=(badges or "_none yet — try /achievements_"),
@@ -3494,7 +3568,7 @@ async def beg_command(interaction: discord.Interaction):
         await edit(f"😔 {random.choice(flavors)}\n\nYou got **0** coins.")
         return
 
-    reward = random.randint(5, 80)
+    reward = random.randint(50, 250)
     await edit(f"🥺 *begging on the corner...*")
     await asyncio.sleep(1.0)
     await edit(f"🤲 *someone is approaching...*")
@@ -3630,6 +3704,24 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
 
+    # Anti-abuse: max single transfer based on sender balance to prevent silent farming
+    MAX_PAY_AMOUNT = 50_000
+    if amount > MAX_PAY_AMOUNT:
+        await interaction.response.send_message(
+            f"❌ Max single transfer is **{MAX_PAY_AMOUNT:,}** coins. Send multiple payments.",
+            ephemeral=True,
+        )
+        return
+
+    # Anti-abuse: cooldown to prevent rapid alt-account farming
+    pay_cd = economy.get_cooldown_remaining(sender.id, "pay")
+    if pay_cd > 0:
+        await interaction.response.send_message(
+            f"⏰ You can send another payment in **{fmt_cooldown(pay_cd)}**.",
+            ephemeral=True,
+        )
+        return
+
     success = economy.transfer(sender.id, user.id, amount)
     if not success:
         bal = economy.balance(sender.id)
@@ -3639,8 +3731,11 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
         )
         return
 
-    # Quest tracking
+    economy.set_cooldown(sender.id, "pay")
+
+    # Quest tracking + balance check for both parties
     track_quest_progress(sender.id, "coins_given", amount)
+    await trigger_balance_check(user.id, channel=interaction.channel)
 
     sender_bal = economy.balance(sender.id)
     await interaction.response.send_message(
@@ -3712,6 +3807,12 @@ async def bet_command(interaction: discord.Interaction, amount: int):
     if random.random() < 0.5:
         new_bal = economy.add(user.id, amount, "bet win")
         economy.record_win(user.id)
+        # Track quests/tournament
+        track_quest_progress(user.id, "games_won")
+        track_quest_progress(user.id, "games_played")
+        track_quest_progress(user.id, "coins_earned", amount)
+        add_tournament_score(user.id, coins_earned=amount, games_won=1)
+        await trigger_balance_check(user.id, channel=interaction.channel)
         await edit(
             f"## 🎉 YOU WON!\n"
             f"{user.mention} doubled up — gained **{amount:,}** coins!\n"
@@ -3720,6 +3821,7 @@ async def bet_command(interaction: discord.Interaction, amount: int):
     else:
         new_bal = economy.add(user.id, -amount, "bet loss")
         economy.record_loss(user.id)
+        track_quest_progress(user.id, "games_played")
         await edit(
             f"## 💀 YOU LOST!\n"
             f"{user.mention} lost **{amount:,}** coins.\n"
@@ -3934,6 +4036,10 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
         )
         await trigger_event(user.id, "blackjack_natural", channel=interaction.channel)
         await trigger_balance_check(user.id, channel=interaction.channel)
+        track_quest_progress(user.id, "games_won")
+        track_quest_progress(user.id, "games_played")
+        track_quest_progress(user.id, "coins_earned", winnings)
+        add_tournament_score(user.id, coins_earned=winnings, games_won=1)
         return
 
     view = BlackjackView(user.id, bet)
@@ -3953,7 +4059,7 @@ async def crime_command(interaction: discord.Interaction):
     cfg = load_config()
     silent = discord.AllowedMentions.none()
 
-    remaining = economy.get_cooldown_remaining(user.id, "rob")  # share rob cooldown
+    remaining = economy.get_cooldown_remaining(user.id, "crime")
     if remaining > 0:
         await interaction.response.send_message(
             f"🚨 You're laying low. Try again in **{fmt_cooldown(remaining)}**.",
@@ -3969,7 +4075,7 @@ async def crime_command(interaction: discord.Interaction):
         except Exception:
             pass
 
-    economy.set_cooldown(user.id, "rob")
+    economy.set_cooldown(user.id, "crime")
 
     # AI generates the crime story
     success = random.random() < 0.55
@@ -4213,7 +4319,7 @@ WHEEL_OUTCOMES = [
 async def wheel_command(interaction: discord.Interaction):
     user = interaction.user
     silent = discord.AllowedMentions.none()
-    remaining = economy.get_cooldown_remaining(user.id, "work")  # share work cooldown
+    remaining = economy.get_cooldown_remaining(user.id, "wheel")
     if remaining > 0:
         await interaction.response.send_message(
             f"⏰ The wheel needs to cool down. Try again in **{fmt_cooldown(remaining)}**.",
@@ -4221,7 +4327,7 @@ async def wheel_command(interaction: discord.Interaction):
         )
         return
 
-    economy.set_cooldown(user.id, "work")
+    economy.set_cooldown(user.id, "wheel")
     await interaction.response.defer()
 
     async def edit(content):
@@ -7270,7 +7376,7 @@ async def _edit_fight_message(fight: dict, **kwargs):
         log.warning("fight message edit failed: %s", e)
 
 
-@tree.command(name="fight", description="Challenge someone to a 60-second fight. Spectators can bet.")
+@tree.command(name="fight", description="60-second 1v1 fight with spectator betting. Big wagers, full embed animation.")
 @discord.app_commands.describe(opponent="Who you're fighting", wager="Coins each fighter puts up (min 100)")
 async def fight_command(interaction: discord.Interaction, opponent: discord.Member, wager: int = 200):
     challenger = interaction.user
@@ -7615,7 +7721,7 @@ async def tarot_command(interaction: discord.Interaction):
 LAWSUIT_FILING_FEE = 200
 
 
-@tree.command(name="lawsuit", description="Sue another user. AI judge awards (or denies) damages.")
+@tree.command(name="lawsuit", description="Civil trial: sue a user for damages. Real coins change hands.")
 @discord.app_commands.describe(
     defendant="Who you're suing",
     claim="What they did to you",
@@ -7818,6 +7924,12 @@ async def lieordie_command(interaction: discord.Interaction, target: discord.Mem
     cfg = load_config()
     if target.bot:
         await interaction.response.send_message("Can't run this on a bot.", ephemeral=True)
+        return
+    # Anti-abuse: can't run on self (would let users vote on themselves for guaranteed wins via alts)
+    if target.id == interaction.user.id:
+        await interaction.response.send_message(
+            "❌ Can't run /lieordie on yourself.", ephemeral=True
+        )
         return
     channel_id = str(interaction.channel_id)
     if channel_id in ACTIVE_LIEORDIE and not ACTIVE_LIEORDIE[channel_id].get("ended"):
