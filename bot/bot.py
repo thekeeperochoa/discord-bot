@@ -4925,6 +4925,33 @@ async def lottery_drawing_scheduler():
 
 # ── 🛒 /shop — interactive shop hub ──────────────────────────────────────────
 
+# ── Shop item prices/timings (must be defined before view classes use them) ─
+INSURANCE_PRICE = 3_000
+INSURANCE_DURATION_HOURS = 48
+VIP_PRICE = 5_000
+VIP_DURATION_DAYS = 7
+XP_BOOST_PRICE = 1_500
+XP_BOOST_DURATION_HOURS = 24
+CUSTOM_TITLE_PRICE = 2_500
+LOTTERY_MULT_PRICE = 1_000
+LOAN_AMOUNTS = {
+    1000:  (1000, 1200,  24),
+    5000:  (5000, 6500,  48),
+    25000: (25000, 35000, 72),
+}
+BOUNTY_MIN = 500
+PET_FOOD_BUNDLE_PRICE = 250
+PET_FOOD_BUNDLE_DAYS = 7
+BUSINESS_UPGRADE_PRICE_PER_LEVEL = 5_000
+BUSINESS_UPGRADE_BOOST = 0.10
+BUSINESS_UPGRADE_MAX_LEVEL = 5
+HEIST_TOOLS_PRICE = 2_000
+HEIST_TOOLS_DURATION_HOURS = 24
+HEIST_TOOLS_BOOST = 0.20
+BOUNTIES_FILE = MEMORY_DIR / "bounties.json"
+LOANS_FILE = MEMORY_DIR / "loans.json"
+
+
 class ShopMainView(discord.ui.View):
     """Top-level shop menu — buttons for each category. Page 1 of 3."""
     def __init__(self, user_id: int):
@@ -9244,34 +9271,8 @@ async def business_events_scheduler():
 # 🛒 EXPANDED SHOP ITEMS
 # Insurance, VIP, XP boost, custom titles, lottery multiplier, loans,
 # bounties, pet food bundle, business upgrades, heist tools
+# (Price constants are defined earlier in the file, above ShopMainView.)
 # ─────────────────────────────────────────────────────────────────────────────
-
-# ── Prices & timings ────────────────────────────────────────────────────────
-INSURANCE_PRICE = 3_000
-INSURANCE_DURATION_HOURS = 48
-VIP_PRICE = 5_000
-VIP_DURATION_DAYS = 7
-XP_BOOST_PRICE = 1_500
-XP_BOOST_DURATION_HOURS = 24
-CUSTOM_TITLE_PRICE = 2_500
-LOTTERY_MULT_PRICE = 1_000  # Applies to NEXT lottery win
-LOAN_AMOUNTS = {  # amount -> (cost_to_borrow, repay_total, hours_to_repay)
-    1000:  (1000, 1200,  24),
-    5000:  (5000, 6500,  48),
-    25000: (25000, 35000, 72),
-}
-BOUNTY_MIN = 500
-PET_FOOD_BUNDLE_PRICE = 250  # vs 7 × 50 = 350 (28% discount)
-PET_FOOD_BUNDLE_DAYS = 7
-BUSINESS_UPGRADE_PRICE_PER_LEVEL = 5_000
-BUSINESS_UPGRADE_BOOST = 0.10  # +10% income per upgrade level
-BUSINESS_UPGRADE_MAX_LEVEL = 5
-HEIST_TOOLS_PRICE = 2_000
-HEIST_TOOLS_DURATION_HOURS = 24
-HEIST_TOOLS_BOOST = 0.20  # +20% rob success chance
-
-BOUNTIES_FILE = MEMORY_DIR / "bounties.json"
-LOANS_FILE = MEMORY_DIR / "loans.json"
 
 
 def _load_json_file(path, default):
