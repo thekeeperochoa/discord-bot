@@ -10253,6 +10253,505 @@ class NotificationsView(discord.ui.View):
         await interaction.response.send_message("❌ All DM notifications disabled.", ephemeral=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 💊 DEALER MINI-GAME
+# Buy supply from the plug, sell to NPCs, dodge cops, watch market prices.
+# Pure economy mini-game. No /use commands, no effects, no dosing info.
+# ─────────────────────────────────────────────────────────────────────────────
+DEALER_FILE = MEMORY_DIR / "dealer.json"
+
+# Substance catalog. Prices are PER GRAM in coins.
+# heat = chance of getting caught per sale (out of 100)
+# base_buy/base_sell are baseline prices — market fluctuates ±30% daily
+SUBSTANCES = {
+    "weed": {
+        "emoji": "🌿", "name": "Weed",
+        "base_buy": 50, "base_sell": 90,
+        "heat": 3, "stash_max": 200,
+        "tier": 1, "desc": "Low risk starter product.",
+    },
+    "shrooms": {
+        "emoji": "🍄", "name": "Shrooms",
+        "base_buy": 120, "base_sell": 220,
+        "heat": 4, "stash_max": 100,
+        "tier": 1, "desc": "Boutique market. Steady demand.",
+    },
+    "molly": {
+        "emoji": "💊", "name": "Molly",
+        "base_buy": 180, "base_sell": 380,
+        "heat": 8, "stash_max": 80,
+        "tier": 2, "desc": "Festival favorite. Good margins.",
+    },
+    "addy": {
+        "emoji": "💉", "name": "Addy",
+        "base_buy": 100, "base_sell": 230,
+        "heat": 6, "stash_max": 120,
+        "tier": 2, "desc": "Steady stream of college clients.",
+    },
+    "coke": {
+        "emoji": "❄️", "name": "Coke",
+        "base_buy": 400, "base_sell": 900,
+        "heat": 15, "stash_max": 50,
+        "tier": 3, "desc": "Wall Street loves it. So do the cops.",
+    },
+    "meff": {
+        "emoji": "🔥", "name": "Meff",
+        "base_buy": 250, "base_sell": 700,
+        "heat": 20, "stash_max": 40,
+        "tier": 3, "desc": "Massive markup. Massive heat.",
+    },
+    "ket": {
+        "emoji": "🐴", "name": "Ket",
+        "base_buy": 300, "base_sell": 650,
+        "heat": 10, "stash_max": 60,
+        "tier": 2, "desc": "Niche but consistent.",
+    },
+    "fent": {
+        "emoji": "☠️", "name": "Fent",
+        "base_buy": 1000, "base_sell": 3000,
+        "heat": 35, "stash_max": 20,
+        "tier": 4, "desc": "Highest profit. Highest heat. Don't.",
+    },
+}
+
+# Cooldowns
+SUPPLY_COOLDOWN_MIN = 30  # minutes between /buysupply runs
+SELL_COOLDOWN_MIN = 10    # minutes between /sell runs
+BUST_FINE_PCT = 0.2       # lose 20% of balance when caught
+HEAT_DECAY_PER_HOUR = 5   # heat drops by 5 per hour of inactivity
+HEAT_MAX = 100            # at 100 heat, cops auto-bust next sell
+
+
+def _load_dealer() -> dict:
+    if DEALER_FILE.exists():
+        try:
+            with open(DEALER_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}, "market_date": "", "market_prices": {}}
+
+
+def _save_dealer(data: dict):
+    with open(DEALER_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _get_market_prices() -> dict:
+    """Returns today's market prices for all substances. Refreshes daily."""
+    data = _load_dealer()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if data.get("market_date") != today:
+        new_prices = {}
+        for key, info in SUBSTANCES.items():
+            buy_mult = random.uniform(0.7, 1.3)
+            sell_mult = random.uniform(0.7, 1.3)
+            new_prices[key] = {
+                "buy": int(info["base_buy"] * buy_mult),
+                "sell": int(info["base_sell"] * sell_mult),
+            }
+        data["market_date"] = today
+        data["market_prices"] = new_prices
+        _save_dealer(data)
+    return data["market_prices"]
+
+
+def _get_dealer_record(user_id: int) -> dict:
+    data = _load_dealer()
+    uid = str(user_id)
+    if uid not in data["users"]:
+        data["users"][uid] = {
+            "stash": {},          # substance -> grams
+            "heat": 0,
+            "last_supply": 0,
+            "last_sell": 0,
+            "last_heat_decay": time.time(),
+            "lifetime_sold": 0,
+            "lifetime_profit": 0,
+            "times_busted": 0,
+        }
+        _save_dealer(data)
+    return data["users"][uid]
+
+
+def _decay_heat(record: dict):
+    """Apply hourly heat decay."""
+    last = record.get("last_heat_decay", time.time())
+    hours = (time.time() - last) / 3600
+    if hours > 0:
+        record["heat"] = max(0, record["heat"] - int(hours * HEAT_DECAY_PER_HOUR))
+        record["last_heat_decay"] = time.time()
+
+
+# ── /buysupply ───────────────────────────────────────────────────────────────
+@tree.command(name="buysupply", description="Buy product from the plug. Market prices change daily.")
+@discord.app_commands.describe(substance="What to buy", grams="How many grams")
+@discord.app_commands.choices(
+    substance=[
+        discord.app_commands.Choice(name=f"{s['emoji']} {s['name']}", value=k)
+        for k, s in SUBSTANCES.items()
+    ]
+)
+async def buysupply_command(
+    interaction: discord.Interaction,
+    substance: discord.app_commands.Choice[str],
+    grams: int,
+):
+    user = interaction.user
+    sub_key = substance.value
+    if sub_key not in SUBSTANCES:
+        await interaction.response.send_message("Invalid substance.", ephemeral=True)
+        return
+    if grams <= 0 or grams > 500:
+        await interaction.response.send_message("❌ Grams must be 1–500.", ephemeral=True)
+        return
+
+    info = SUBSTANCES[sub_key]
+    data = _load_dealer()
+    uid = str(user.id)
+    record = data["users"].setdefault(uid, {
+        "stash": {}, "heat": 0, "last_supply": 0, "last_sell": 0,
+        "last_heat_decay": time.time(), "lifetime_sold": 0,
+        "lifetime_profit": 0, "times_busted": 0,
+    })
+
+    # Cooldown
+    cd_remaining = SUPPLY_COOLDOWN_MIN * 60 - (time.time() - record.get("last_supply", 0))
+    if cd_remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ The plug isn't picking up. Try again in **{fmt_cooldown(int(cd_remaining))}**.",
+            ephemeral=True,
+        )
+        return
+
+    # Stash limit check
+    current_grams = record["stash"].get(sub_key, 0)
+    if current_grams + grams > info["stash_max"]:
+        room = info["stash_max"] - current_grams
+        await interaction.response.send_message(
+            f"❌ Stash too full. You can hold **{room}g** more {info['name']} "
+            f"(max {info['stash_max']}g). Sell or get caught with less.",
+            ephemeral=True,
+        )
+        return
+
+    prices = _get_market_prices()
+    buy_price = prices[sub_key]["buy"]
+    total_cost = buy_price * grams
+
+    if economy.balance(user.id) < total_cost:
+        await interaction.response.send_message(
+            f"❌ Need **{total_cost:,}** coins. You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -total_cost, f"supply: {sub_key}")
+    record["stash"][sub_key] = current_grams + grams
+    record["last_supply"] = time.time()
+    _save_dealer(data)
+
+    await interaction.response.send_message(
+        f"# {info['emoji']} SUPPLY ACQUIRED\n\n"
+        f"You bought **{grams}g of {info['name']}** for **{total_cost:,}** coins "
+        f"(**{buy_price}/g** today).\n\n"
+        f"📦 Stash: **{current_grams + grams}g / {info['stash_max']}g**\n"
+        f"💰 Balance: **{economy.balance(user.id):,}**\n\n"
+        f"_Use `/sell` to move product. Watch your heat._"
+    )
+
+
+# ── /sell ────────────────────────────────────────────────────────────────────
+@tree.command(name="sell", description="Sell product to NPC customers. Builds cop heat.")
+@discord.app_commands.describe(substance="What to sell", grams="How many grams")
+@discord.app_commands.choices(
+    substance=[
+        discord.app_commands.Choice(name=f"{s['emoji']} {s['name']}", value=k)
+        for k, s in SUBSTANCES.items()
+    ]
+)
+async def sell_command(
+    interaction: discord.Interaction,
+    substance: discord.app_commands.Choice[str],
+    grams: int,
+):
+    user = interaction.user
+    sub_key = substance.value
+    if sub_key not in SUBSTANCES:
+        await interaction.response.send_message("Invalid substance.", ephemeral=True)
+        return
+    if grams <= 0:
+        await interaction.response.send_message("❌ Grams must be positive.", ephemeral=True)
+        return
+
+    info = SUBSTANCES[sub_key]
+    data = _load_dealer()
+    uid = str(user.id)
+    if uid not in data["users"]:
+        await interaction.response.send_message(
+            "❌ You don't have any product. Buy from `/buysupply` first.", ephemeral=True
+        )
+        return
+    record = data["users"][uid]
+    _decay_heat(record)
+
+    # Cooldown
+    cd_remaining = SELL_COOLDOWN_MIN * 60 - (time.time() - record.get("last_sell", 0))
+    if cd_remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ Customers haven't lined up yet. Try again in **{fmt_cooldown(int(cd_remaining))}**.",
+            ephemeral=True,
+        )
+        return
+
+    current_grams = record["stash"].get(sub_key, 0)
+    if current_grams < grams:
+        await interaction.response.send_message(
+            f"❌ You only have **{current_grams}g** of {info['name']}.", ephemeral=True
+        )
+        return
+
+    # Heat at 100 = auto-bust
+    if record["heat"] >= HEAT_MAX:
+        # Forced bust
+        await _bust_player(interaction, record, data, forced=True)
+        return
+
+    # Roll for cops based on heat + substance heat
+    cop_chance = info["heat"] + (record["heat"] / 5)  # heat scales risk
+    if random.random() * 100 < cop_chance:
+        await _bust_player(interaction, record, data, forced=False)
+        return
+
+    # Successful sale
+    prices = _get_market_prices()
+    sell_price = prices[sub_key]["sell"]
+    total = sell_price * grams
+    record["stash"][sub_key] = current_grams - grams
+    if record["stash"][sub_key] == 0:
+        del record["stash"][sub_key]
+    record["last_sell"] = time.time()
+    # Add heat (more for hot products + bigger sales)
+    heat_gain = max(1, int(info["heat"] * (grams / 10)))
+    record["heat"] = min(HEAT_MAX, record["heat"] + heat_gain)
+    record["lifetime_sold"] = record.get("lifetime_sold", 0) + grams
+    record["lifetime_profit"] = record.get("lifetime_profit", 0) + total
+    _save_dealer(data)
+    new_bal = economy.add(user.id, total, f"sold {sub_key}")
+
+    # Quest tracking
+    track_quest_progress(user.id, "coins_earned", total)
+    add_tournament_score(user.id, coins_earned=total)
+    await trigger_balance_check(user.id, channel=interaction.channel)
+
+    # NPC narration
+    npcs = [
+        "a college kid", "a Wall Street guy in a suit", "a tired nurse",
+        "a sketchy dude in a hoodie", "a soccer mom in a Range Rover",
+        "a tweaker on a bike", "an Uber driver on break", "a sad-looking lawyer",
+        "a hot girl at the bar", "a guy who said 'my buddy sent me'",
+    ]
+    await interaction.response.send_message(
+        f"# 💰 DEAL DONE\n\n"
+        f"Sold **{grams}g of {info['emoji']} {info['name']}** to {random.choice(npcs)} "
+        f"for **{total:,}** coins (**{sell_price}/g**).\n\n"
+        f"📦 Stash: **{current_grams - grams}g / {info['stash_max']}g**\n"
+        f"🔥 Heat: **{record['heat']}/100** _(+{heat_gain})_\n"
+        f"💰 Balance: **{new_bal:,}**"
+    )
+
+
+async def _bust_player(interaction, record, data, forced=False):
+    """Cops catch the player. Lose all stash + a fine."""
+    user = interaction.user
+    stash_grams = sum(record["stash"].values())
+    record["stash"] = {}
+    record["heat"] = 0
+    record["times_busted"] = record.get("times_busted", 0) + 1
+    record["last_sell"] = time.time()
+
+    bal = economy.balance(user.id)
+    fine = int(bal * BUST_FINE_PCT)
+    economy.add(user.id, -fine, "cop fine")
+    _save_dealer(data)
+
+    title = "🚨 BUSTED — HEAT MAXED OUT" if forced else "🚨 BUSTED"
+    flavor = [
+        "Undercover cop. Sting operation. They had your face for weeks.",
+        "Some snitch ratted you out for a plea deal.",
+        "A patrol unit happened to roll up at the wrong moment.",
+        "You sold to a narc. Rookie mistake.",
+        "Surveillance had been tailing you all week.",
+        "Your customer was wearing a wire. Damn.",
+    ]
+    await interaction.response.send_message(
+        f"# {title}\n\n"
+        f"{random.choice(flavor)}\n\n"
+        f"💸 **Lost {stash_grams}g** of product (entire stash).\n"
+        f"⚖️ **Fine:** {fine:,} coins ({int(BUST_FINE_PCT*100)}% of balance)\n"
+        f"🔥 Heat reset to **0** — lay low for a while.\n\n"
+        f"_Balance: **{economy.balance(user.id):,}**_"
+    )
+
+
+# ── /stash ───────────────────────────────────────────────────────────────────
+@tree.command(name="stash", description="View your dealing stash, heat, and stats.")
+@discord.app_commands.describe(user="Whose stash (defaults to you)")
+async def stash_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    data = _load_dealer()
+    record = data["users"].get(str(target.id))
+
+    if not record or (not record.get("stash") and record.get("lifetime_sold", 0) == 0):
+        await interaction.response.send_message(
+            f"{target.mention} isn't in the game. `/buysupply` to start.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    _decay_heat(record)
+    _save_dealer(data)
+    prices = _get_market_prices()
+
+    embed = discord.Embed(
+        title=f"📦 {target.display_name}'s Stash",
+        color=discord.Color.dark_purple(),
+    )
+
+    if record.get("stash"):
+        lines = []
+        total_value = 0
+        for sub_key, grams in record["stash"].items():
+            info = SUBSTANCES.get(sub_key, {"emoji":"❓","name":"?","stash_max":0})
+            value = prices.get(sub_key, {}).get("sell", 0) * grams
+            total_value += value
+            lines.append(
+                f"{info['emoji']} **{info['name']}** — {grams}g / {info['stash_max']}g "
+                f"(worth ~{value:,})"
+            )
+        embed.add_field(name="📦 Inventory", value="\n".join(lines), inline=False)
+        embed.add_field(name="💰 Total Value", value=f"~{total_value:,} coins", inline=True)
+    else:
+        embed.add_field(name="📦 Inventory", value="_Empty. Buy from `/buysupply`._", inline=False)
+
+    heat = record.get("heat", 0)
+    heat_emoji = "🟢" if heat < 30 else ("🟡" if heat < 60 else ("🟠" if heat < 90 else "🔴"))
+    embed.add_field(name=f"{heat_emoji} Heat", value=f"**{heat}/100**", inline=True)
+    embed.add_field(name="💀 Times Busted", value=str(record.get("times_busted", 0)), inline=True)
+    embed.add_field(name="📈 Lifetime Profit", value=f"{record.get('lifetime_profit', 0):,}", inline=True)
+    embed.add_field(name="📊 Lifetime Sold", value=f"{record.get('lifetime_sold', 0):,}g", inline=True)
+    embed.set_footer(text="Use /streetprice to see today's market.")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /streetprice ─────────────────────────────────────────────────────────────
+@tree.command(name="streetprice", description="See today's buy/sell market prices.")
+async def streetprice_command(interaction: discord.Interaction):
+    prices = _get_market_prices()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    lines = []
+    for sub_key, info in SUBSTANCES.items():
+        p = prices.get(sub_key, {})
+        buy = p.get("buy", info["base_buy"])
+        sell = p.get("sell", info["base_sell"])
+        margin = sell - buy
+        margin_pct = int((margin / buy) * 100) if buy > 0 else 0
+        # Indicator: how good today's margin is vs baseline
+        base_margin_pct = int(((info["base_sell"] - info["base_buy"]) / info["base_buy"]) * 100)
+        if margin_pct > base_margin_pct + 15:
+            indicator = "📈"
+        elif margin_pct < base_margin_pct - 15:
+            indicator = "📉"
+        else:
+            indicator = "➖"
+        lines.append(
+            f"{info['emoji']} **{info['name']}** {indicator} — Buy: **{buy}/g** • Sell: **{sell}/g** "
+            f"_(+{margin_pct}% margin, heat {info['heat']})_"
+        )
+
+    embed = discord.Embed(
+        title="📰 STREET PRICES",
+        description="\n".join(lines),
+        color=discord.Color.dark_gold(),
+    )
+    embed.set_footer(text=f"Market updates daily • {today} UTC")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /laylow ──────────────────────────────────────────────────────────────────
+@tree.command(name="laylow", description="Lay low for an hour to reduce heat faster.")
+async def laylow_command(interaction: discord.Interaction):
+    user = interaction.user
+    data = _load_dealer()
+    record = data["users"].get(str(user.id))
+    if not record:
+        await interaction.response.send_message("You're not in the game.", ephemeral=True)
+        return
+    _decay_heat(record)
+    if record["heat"] < 20:
+        await interaction.response.send_message(
+            f"🟢 You're already cool. Heat: **{record['heat']}/100**.",
+            ephemeral=True,
+        )
+        return
+    # Costs 500 coins to lay low — reduces heat by 30
+    LAYLOW_COST = 500
+    if economy.balance(user.id) < LAYLOW_COST:
+        await interaction.response.send_message(
+            f"❌ Laying low costs **{LAYLOW_COST}** coins (cab fares, burner phone, etc).",
+            ephemeral=True,
+        )
+        return
+    economy.add(user.id, -LAYLOW_COST, "laylow")
+    reduction = min(30, record["heat"])
+    record["heat"] = max(0, record["heat"] - 30)
+    _save_dealer(data)
+    await interaction.response.send_message(
+        f"🤫 You ditched the phone and went off the grid. Heat dropped by **{reduction}** to **{record['heat']}/100**.\n"
+        f"💰 Cost: **{LAYLOW_COST}** coins."
+    )
+
+
+# ── /dealers — leaderboard ───────────────────────────────────────────────────
+@tree.command(name="dealers", description="Top dealers by lifetime profit.")
+async def dealers_command(interaction: discord.Interaction):
+    data = _load_dealer()
+    users = data.get("users", {})
+    if not users:
+        await interaction.response.send_message("No dealers in the game yet.", ephemeral=True)
+        return
+
+    ranked = sorted(
+        users.items(),
+        key=lambda x: x[1].get("lifetime_profit", 0),
+        reverse=True,
+    )
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, record) in enumerate(ranked[:10]):
+        prefix = medals[i] if i < 3 else f"`#{i+1}`"
+        try:
+            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+            name = member.display_name if member else f"User {uid}"
+        except Exception:
+            name = f"User {uid}"
+        profit = record.get("lifetime_profit", 0)
+        sold = record.get("lifetime_sold", 0)
+        busts = record.get("times_busted", 0)
+        lines.append(
+            f"{prefix} **{name}** — {profit:,} profit • {sold:,}g sold • {busts} busts"
+        )
+
+    embed = discord.Embed(
+        title="💊 TOP DEALERS",
+        description="\n".join(lines),
+        color=discord.Color.dark_purple(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -10331,6 +10830,18 @@ async def commands_command(interaction: discord.Interaction):
             "`/petfood` 7-day pet food bundle\n"
             "`/upgradebusiness` Permanent business boost\n"
             "`/heisttools` +20% rob success 24h"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💊 DEALER GAME",
+        value=(
+            "`/buysupply` Buy product from the plug\n"
+            "`/sell` Sell to NPCs (builds heat)\n"
+            "`/stash` View inventory, heat, stats\n"
+            "`/streetprice` Today's market prices\n"
+            "`/laylow` Pay 500 to drop heat by 30\n"
+            "`/dealers` Top dealers leaderboard"
         ),
         inline=False
     )
@@ -10624,6 +11135,16 @@ PREFIX_COMMANDS = {
     "upgradebusiness":("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
     "upgrade":      ("upgradebusiness", [{"name":"business_type","type":"str","required":True}]),
     "heisttools":   ("heisttools",    []),
+    "buysupply":    ("buysupply",     [{"name":"substance","type":"str","required":True},{"name":"grams","type":"int","required":True}]),
+    "cop":          ("buysupply",     [{"name":"substance","type":"str","required":True},{"name":"grams","type":"int","required":True}]),
+    "sell":         ("sell",          [{"name":"substance","type":"str","required":True},{"name":"grams","type":"int","required":True}]),
+    "stash":        ("stash",         [{"name":"user","type":"user","required":False,"default":None}]),
+    "streetprice":  ("streetprice",   []),
+    "prices":       ("streetprice",   []),
+    "market":       ("streetprice",   []),
+    "laylow":       ("laylow",        []),
+    "dealers":      ("dealers",       []),
+    "plug":         ("dealers",       []),
     "notifications":("notifications", []),
     "notif":        ("notifications", []),
     "dms":          ("notifications", []),
@@ -10743,6 +11264,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name in ("buysupply", "sell"):
+        # Substance Choice for dealer commands
+        sub_key = kwargs.get("substance", "").lower()
+        if sub_key not in SUBSTANCES:
+            await message.channel.send(
+                f"❌ Substances: {', '.join(SUBSTANCES.keys())}"
+            )
+            return True
+        kwargs["substance"] = discord.app_commands.Choice(name=sub_key, value=sub_key)
 
     if slash_name == "upgradebusiness":
         biz_type = kwargs.get("business_type", "").lower()
