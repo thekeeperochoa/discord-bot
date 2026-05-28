@@ -12307,6 +12307,276 @@ async def setnotifchannel_command(interaction: discord.Interaction, channel: dis
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎭 BOOSTER SIGNATURE REACTIONS
+# Boosters set their OWN signature emoji(s). When anyone REPLIES to the booster,
+# the bot auto-reacts to that reply with the booster's emoji(s).
+# Boosters self-serve their own emoji. Admins can override/remove anyone's.
+# ─────────────────────────────────────────────────────────────────────────────
+AUTOREACT_FILE = MEMORY_DIR / "autoreact.json"
+BOOSTER_ROLE_ID = 1247868962881146972  # Discord booster role
+
+
+def _load_autoreact() -> dict:
+    if AUTOREACT_FILE.exists():
+        try:
+            with open(AUTOREACT_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # signatures: booster_user_id -> list of emoji strings
+    return {"signatures": {}}
+
+
+def _save_autoreact(data: dict):
+    with open(AUTOREACT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _is_booster(member: discord.Member) -> bool:
+    return any(r.id == BOOSTER_ROLE_ID for r in member.roles)
+
+
+def _is_admin(member: discord.Member) -> bool:
+    return (member.guild_permissions.administrator or
+            member.guild_permissions.manage_guild)
+
+
+def _parse_emojis(raw: str) -> list:
+    """Parse a string of emojis (unicode + custom <:name:id>) into a list."""
+    import re
+    emojis = []
+    custom = re.findall(r"<a?:\w+:\d+>", raw)
+    emojis.extend(custom)
+    leftover = re.sub(r"<a?:\w+:\d+>", "", raw)
+    unicode_emojis = re.findall(
+        r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\u2190-\u21FF\u2300-\u23FF\u2B00-\u2BFF]",
+        leftover,
+    )
+    emojis.extend(unicode_emojis)
+    return emojis
+
+
+async def handle_autoreact(message: discord.Message):
+    """If this message replies to a booster who has a signature, react to it."""
+    if not message.reference or not message.reference.message_id:
+        return
+    data = _load_autoreact()
+    signatures = data.get("signatures", {})
+    if not signatures:
+        return
+
+    # Resolve who is being replied to
+    try:
+        replied_to = message.reference.resolved
+        if replied_to is None:
+            replied_to = await message.channel.fetch_message(message.reference.message_id)
+        if not isinstance(replied_to, discord.Message):
+            return
+        booster_id = str(replied_to.author.id)
+    except Exception:
+        return
+
+    emojis = signatures.get(booster_id)
+    if not emojis:
+        return
+
+    # Live booster check — if they lost the role while bot was offline, skip + clean up
+    try:
+        booster_member = message.guild.get_member(int(booster_id)) if message.guild else None
+        if booster_member and not _is_booster(booster_member):
+            # Stale signature — remove it
+            del signatures[booster_id]
+            _save_autoreact(data)
+            return
+    except Exception:
+        pass
+
+    # Don't react to the booster replying to themselves
+    if str(message.author.id) == booster_id:
+        return
+
+    for emoji in emojis:
+        try:
+            await message.add_reaction(emoji)
+            await asyncio.sleep(0.25)
+        except Exception:
+            pass
+
+
+# ── /signature — boosters set their own reaction emoji ───────────────────────
+@tree.command(name="signature", description="\U0001F3AD BOOSTER PERK: set emoji that react to replies you receive.")
+@discord.app_commands.describe(
+    emojis="Emojis to use (space-separated, custom emojis OK). Leave empty to view yours.",
+)
+async def signature_command(interaction: discord.Interaction, emojis: str = None):
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only command.", ephemeral=True)
+        return
+
+    member = interaction.user
+    if not (_is_booster(member) or _is_admin(member)):
+        await interaction.response.send_message(
+            "\U0001F512 This is a **booster perk**! Boost the server to set a signature reaction "
+            "that gets added to every reply you receive.",
+            ephemeral=True,
+        )
+        return
+
+    data = _load_autoreact()
+    signatures = data.setdefault("signatures", {})
+
+    # View mode
+    if emojis is None:
+        current = signatures.get(str(member.id))
+        if current:
+            await interaction.response.send_message(
+                f"\U0001F3AD Your signature: {' '.join(current)}\n"
+                f"_Anyone who replies to you gets these reactions. "
+                f"Set new emojis to change, or `/signatureremove` to clear._",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "You don't have a signature set. Use `/signature emojis:\U0001F525\U0001F480` to set one.",
+                ephemeral=True,
+            )
+        return
+
+    parsed = _parse_emojis(emojis)
+    if not parsed:
+        await interaction.response.send_message(
+            "\u274C No valid emojis found. Use unicode or custom `<:name:id>` emojis.",
+            ephemeral=True,
+        )
+        return
+    if len(parsed) > 3:
+        await interaction.response.send_message(
+            "\u274C Max **3** signature emojis per booster.", ephemeral=True
+        )
+        return
+
+    # Validate custom emojis bot can use
+    valid, invalid = [], []
+    import re
+    for emoji in parsed:
+        if emoji.startswith("<"):
+            m = re.match(r"<a?:\w+:(\d+)>", emoji)
+            if m and client.get_emoji(int(m.group(1))):
+                valid.append(emoji)
+            else:
+                invalid.append(emoji)
+        else:
+            valid.append(emoji)
+
+    if not valid:
+        await interaction.response.send_message(
+            "\u274C The bot can't use those custom emojis (must be from a server it's in).",
+            ephemeral=True,
+        )
+        return
+
+    signatures[str(member.id)] = valid
+    _save_autoreact(data)
+    msg = f"\u2705 Signature set: {' '.join(valid)}\nNow anyone who replies to you gets these reactions!"
+    if invalid:
+        msg += f"\n\u26A0\uFE0F Skipped (bot can't use): {' '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+# ── /signatureremove — clear your own (or admin clears anyone's) ─────────────
+@tree.command(name="signatureremove", description="\U0001F3AD Remove your signature reaction (admins can target anyone).")
+@discord.app_commands.describe(user="(Admin only) remove this user's signature instead of yours")
+async def signatureremove_command(interaction: discord.Interaction, user: discord.Member = None):
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only command.", ephemeral=True)
+        return
+
+    member = interaction.user
+    data = _load_autoreact()
+    signatures = data.setdefault("signatures", {})
+
+    # Admin removing someone else's
+    if user is not None and user.id != member.id:
+        if not _is_admin(member):
+            await interaction.response.send_message(
+                "\u274C Only admins can remove other people's signatures.", ephemeral=True
+            )
+            return
+        if str(user.id) not in signatures:
+            await interaction.response.send_message(
+                f"{user.mention} has no signature set.", ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        del signatures[str(user.id)]
+        _save_autoreact(data)
+        await interaction.response.send_message(
+            f"\U0001F5D1\uFE0F Removed {user.mention}'s signature.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    # Removing your own
+    if str(member.id) not in signatures:
+        await interaction.response.send_message(
+            "You don't have a signature set.", ephemeral=True
+        )
+        return
+    del signatures[str(member.id)]
+    _save_autoreact(data)
+    await interaction.response.send_message(
+        "\U0001F5D1\uFE0F Your signature reaction has been removed.", ephemeral=True
+    )
+
+
+# ── /signatures — admin: view all booster signatures ─────────────────────────
+@tree.command(name="signatures", description="\U0001F3AD ADMIN: view all booster signature reactions.")
+async def signatures_command(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only command.", ephemeral=True)
+        return
+    if not _is_admin(interaction.user):
+        await interaction.response.send_message(
+            "\u274C Admins only.", ephemeral=True
+        )
+        return
+
+    data = _load_autoreact()
+    signatures = data.get("signatures", {})
+    if not signatures:
+        await interaction.response.send_message("No signatures set.", ephemeral=True)
+        return
+
+    lines = [f"<@{uid}> \u2192 {' '.join(emj)}" for uid, emj in signatures.items()]
+    embed = discord.Embed(
+        title="\U0001F3AD Booster Signature Reactions",
+        description="\n".join(lines),
+        color=discord.Color.fuchsia() if hasattr(discord.Color, "fuchsia") else discord.Color.purple(),
+    )
+    embed.set_footer(text="Bot reacts to replies these users receive.")
+    await interaction.response.send_message(
+        embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+    )
+
+
+@client.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """When a member loses the booster role, remove their signature perk."""
+    try:
+        had_role = any(r.id == BOOSTER_ROLE_ID for r in before.roles)
+        has_role = any(r.id == BOOSTER_ROLE_ID for r in after.roles)
+        if had_role and not has_role:
+            data = _load_autoreact()
+            signatures = data.get("signatures", {})
+            if str(after.id) in signatures:
+                del signatures[str(after.id)]
+                _save_autoreact(data)
+                log.info("Removed signature for %s (lost booster role)", after.id)
+    except Exception as e:
+        log.warning("on_member_update signature cleanup failed: %s", e)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -12365,6 +12635,8 @@ async def commands_command(interaction: discord.Interaction):
         name="📬 DMS & SETTINGS",
         value=(
             "`/notifications` Toggle which events DM you\n"
+            "`/signature` 🎭 BOOSTER: set reaction for replies you get\n"
+            "`/signatureremove` Remove your signature\n"
             "_Default: all DMs on (bounties, sabotage, loans, lottery wins, etc)_"
         ),
         inline=False,
@@ -12926,6 +13198,12 @@ async def on_message(message: discord.Message):
     memory.update_maxlen(cfg["max_memory_messages"])
     channel_id = str(message.channel.id)
     last_channel_activity[channel_id] = time.time()
+
+    # ── Auto-react: react to anyone replying to a target user (all channels) ──
+    try:
+        await handle_autoreact(message)
+    except Exception as e:
+        log.warning("autoreact failed: %s", e)
 
     # ── Random events: check if this answers an active event ─────────────────
     try:
