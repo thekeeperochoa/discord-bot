@@ -12372,25 +12372,29 @@ async def handle_autoreact(message: discord.Message):
         if replied_to is None:
             replied_to = await message.channel.fetch_message(message.reference.message_id)
         if not isinstance(replied_to, discord.Message):
+            log.info("autoreact: replied_to not a Message (%s)", type(replied_to))
             return
         booster_id = str(replied_to.author.id)
-    except Exception:
+    except Exception as e:
+        log.warning("autoreact: failed to resolve reply: %s", e)
         return
 
     emojis = signatures.get(booster_id)
     if not emojis:
         return
 
+    log.info("autoreact: triggered for booster %s, emojis=%s", booster_id, emojis)
+
     # Live booster check — if they lost the role while bot was offline, skip + clean up
     try:
         booster_member = message.guild.get_member(int(booster_id)) if message.guild else None
         if booster_member and not _is_booster(booster_member):
-            # Stale signature — remove it
             del signatures[booster_id]
             _save_autoreact(data)
+            log.info("autoreact: %s no longer booster, cleaned up", booster_id)
             return
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("autoreact: booster check failed: %s", e)
 
     # Don't react to the booster replying to themselves
     if str(message.author.id) == booster_id:
@@ -12400,8 +12404,8 @@ async def handle_autoreact(message: discord.Message):
         try:
             await message.add_reaction(emoji)
             await asyncio.sleep(0.25)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("autoreact: add_reaction failed for %r: %s", emoji, e)
 
 
 # ── /signature — boosters set their own reaction emoji ───────────────────────
@@ -12575,6 +12579,229 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 log.info("Removed signature for %s (lost booster role)", after.id)
     except Exception as e:
         log.warning("on_member_update signature cleanup failed: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎙️ AUTO-TRANSCRIBE VOICE MESSAGES
+# Uses Groq Whisper API (free, fast). Replies to voice messages with transcript.
+# ─────────────────────────────────────────────────────────────────────────────
+TRANSCRIBE_FILE = MEMORY_DIR / "transcribe.json"
+GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_WHISPER_MODEL = "whisper-large-v3"
+TRANSCRIBE_MAX_SIZE_MB = 25  # Groq's audio file limit
+TRANSCRIBE_MAX_DURATION_SECONDS = 600  # 10 min cap to avoid huge files
+
+
+def _load_transcribe_config() -> dict:
+    if TRANSCRIBE_FILE.exists():
+        try:
+            with open(TRANSCRIBE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"enabled": True, "disabled_channels": []}
+
+
+def _save_transcribe_config(data: dict):
+    with open(TRANSCRIBE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _is_voice_message(message: discord.Message) -> bool:
+    """Detect a Discord voice message attachment."""
+    if not message.attachments:
+        return False
+    for att in message.attachments:
+        # Voice messages have content_type audio/ogg and a waveform field
+        ct = (att.content_type or "").lower()
+        if ct.startswith("audio/"):
+            # Voice messages have a duration_secs or waveform
+            if getattr(att, "duration", None) is not None or getattr(att, "waveform", None):
+                return True
+            # Fallback: filename pattern voice-message.ogg
+            if "voice-message" in (att.filename or "").lower():
+                return True
+    return False
+
+
+async def _transcribe_audio(audio_bytes: bytes, filename: str = "voice.ogg") -> str | None:
+    """Send audio to Groq Whisper, return transcript or None on error."""
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        log.warning("transcribe: no GROQ_API_KEY")
+        return None
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    data = aiohttp.FormData()
+    data.add_field("file", audio_bytes, filename=filename, content_type="audio/ogg")
+    data.add_field("model", GROQ_WHISPER_MODEL)
+    data.add_field("response_format", "json")
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.post(GROQ_WHISPER_URL, headers=headers, data=data) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.warning("transcribe: Groq returned %s: %s", resp.status, body[:300])
+                    return None
+                payload = await resp.json()
+                return (payload.get("text") or "").strip()
+    except asyncio.TimeoutError:
+        log.warning("transcribe: timed out")
+        return None
+    except Exception as e:
+        log.warning("transcribe: exception: %s", e)
+        return None
+
+
+async def handle_voice_transcription(message: discord.Message):
+    """If message is a voice message, transcribe and reply."""
+    if not _is_voice_message(message):
+        return
+
+    cfg = _load_transcribe_config()
+    if not cfg.get("enabled", True):
+        return
+    if str(message.channel.id) in cfg.get("disabled_channels", []):
+        return
+
+    # Get the audio attachment
+    att = None
+    for a in message.attachments:
+        ct = (a.content_type or "").lower()
+        if ct.startswith("audio/"):
+            att = a
+            break
+    if not att:
+        return
+
+    # Size check
+    size_mb = att.size / (1024 * 1024) if att.size else 0
+    if size_mb > TRANSCRIBE_MAX_SIZE_MB:
+        log.info("transcribe: skipping (too large %.1fMB)", size_mb)
+        return
+    # Duration check (if exposed)
+    dur = getattr(att, "duration", None)
+    if dur and dur > TRANSCRIBE_MAX_DURATION_SECONDS:
+        log.info("transcribe: skipping (too long %.0fs)", dur)
+        return
+
+    try:
+        audio_bytes = await att.read()
+    except Exception as e:
+        log.warning("transcribe: failed to download audio: %s", e)
+        return
+
+    transcript = await _transcribe_audio(audio_bytes, filename=att.filename or "voice.ogg")
+    if not transcript:
+        return
+
+    # Truncate if absurdly long
+    if len(transcript) > 1900:
+        transcript = transcript[:1900] + "…"
+
+    try:
+        await message.reply(
+            f"🎙️ **Transcript:**\n```\n{transcript}\n```",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except Exception as e:
+        log.warning("transcribe: failed to reply: %s", e)
+
+
+# ── /transcribetoggle — admin toggle on/off, per-channel ─────────────────────
+@tree.command(name="transcribetoggle", description="🎙️ ADMIN: toggle voice message transcription (global or per-channel).")
+@discord.app_commands.describe(
+    scope="What to toggle",
+    channel="If scope=channel, which one (defaults to current)",
+)
+@discord.app_commands.choices(
+    scope=[
+        discord.app_commands.Choice(name="Global on/off", value="global"),
+        discord.app_commands.Choice(name="Disable in one channel", value="disable_channel"),
+        discord.app_commands.Choice(name="Enable in one channel", value="enable_channel"),
+        discord.app_commands.Choice(name="Show current settings", value="status"),
+    ]
+)
+async def transcribetoggle_command(
+    interaction: discord.Interaction,
+    scope: discord.app_commands.Choice[str],
+    channel: discord.TextChannel = None,
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only.", ephemeral=True)
+        return
+    if not (interaction.user.guild_permissions.administrator or
+            interaction.user.guild_permissions.manage_guild):
+        await interaction.response.send_message(
+            "❌ Admin only.", ephemeral=True
+        )
+        return
+
+    cfg = _load_transcribe_config()
+    scope_value = scope.value
+
+    if scope_value == "status":
+        disabled = cfg.get("disabled_channels", [])
+        embed = discord.Embed(
+            title="🎙️ Voice Transcription Status",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Globally",
+            value="✅ ON" if cfg.get("enabled", True) else "❌ OFF",
+            inline=False,
+        )
+        if disabled:
+            ch_list = []
+            for cid in disabled:
+                try:
+                    c = interaction.guild.get_channel(int(cid))
+                    ch_list.append(c.mention if c else f"`{cid}`")
+                except Exception:
+                    ch_list.append(f"`{cid}`")
+            embed.add_field(
+                name="Disabled in these channels",
+                value="\n".join(ch_list),
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if scope_value == "global":
+        new_state = not cfg.get("enabled", True)
+        cfg["enabled"] = new_state
+        _save_transcribe_config(cfg)
+        await interaction.response.send_message(
+            f"🎙️ Voice transcription is now **{'ON' if new_state else 'OFF'}** globally.",
+            ephemeral=True,
+        )
+        return
+
+    # Per-channel toggles
+    target = channel or interaction.channel
+    cid = str(target.id)
+    disabled = cfg.setdefault("disabled_channels", [])
+
+    if scope_value == "disable_channel":
+        if cid not in disabled:
+            disabled.append(cid)
+        _save_transcribe_config(cfg)
+        await interaction.response.send_message(
+            f"🔇 Voice transcription **disabled** in {target.mention}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    elif scope_value == "enable_channel":
+        if cid in disabled:
+            disabled.remove(cid)
+        _save_transcribe_config(cfg)
+        await interaction.response.send_message(
+            f"🔊 Voice transcription **enabled** in {target.mention}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 @tree.command(name="commands", description="List all available bot commands.")
@@ -13204,6 +13431,13 @@ async def on_message(message: discord.Message):
         await handle_autoreact(message)
     except Exception as e:
         log.warning("autoreact failed: %s", e)
+
+    # ── Voice message transcription (all channels) ────────────────────────────
+    try:
+        if message.attachments:
+            asyncio.create_task(handle_voice_transcription(message))
+    except Exception as e:
+        log.warning("voice transcription failed: %s", e)
 
     # ── Random events: check if this answers an active event ─────────────────
     try:
