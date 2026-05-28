@@ -11823,6 +11823,195 @@ async def nightlife_events_scheduler():
             log.exception("nightlife_events_scheduler: %s", e)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛠️ /renamechannels — admin bulk channel rename
+# Preview-by-default. Requires confirm:true to actually execute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Small-caps mapping for the ᴍᴀɪɴ aesthetic
+SMALL_CAPS_MAP = str.maketrans({
+    "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ғ", "g": "ɢ",
+    "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ", "m": "ᴍ", "n": "ɴ",
+    "o": "ᴏ", "p": "ᴘ", "q": "ǫ", "r": "ʀ", "s": "s", "t": "ᴛ", "u": "ᴜ",
+    "v": "ᴠ", "w": "ᴡ", "x": "x", "y": "ʏ", "z": "ᴢ",
+})
+
+
+def to_small_caps(text: str) -> str:
+    return text.lower().translate(SMALL_CAPS_MAP)
+
+
+def _strip_channel_decoration(name: str) -> str:
+    """Strip common decoration characters/wrappers from a channel name,
+    leaving only the alphanumeric base word.
+
+    Examples:
+      '《💬》╰┈➤﹕main⌝'  → 'main'
+      '🔥┃general'        → 'general'
+      '⌬-bot-spam-⌬'      → 'bot-spam'
+    """
+    import re
+    # Keep alphanumeric, spaces, dashes, underscores. Everything else gets stripped.
+    cleaned = re.sub(r"[^a-zA-Z0-9 _-]", " ", name)
+    # Collapse whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Normalize separators to single dashes
+    cleaned = cleaned.replace(" ", "-").strip("-")
+    return cleaned or "channel"
+
+
+def _format_channel_name(base: str, style: str) -> str:
+    """Apply a preset style. Discord channel names must be lowercase, no spaces,
+    so we use unicode small-caps + symbols which Discord accepts."""
+    base_clean = _strip_channel_decoration(base)
+    # Convert dashes back to spaces for readability inside the small-caps text
+    base_pretty = base_clean.replace("-", " ").replace("_", " ")
+    if style == "star":
+        # ★ ᴍᴀɪɴ
+        return f"★ {to_small_caps(base_pretty)}"
+    elif style == "star-arrow":
+        # ★彡 ᴍᴀɪɴ
+        return f"★彡 {to_small_caps(base_pretty)}"
+    elif style == "dot":
+        # ・ᴍᴀɪɴ
+        return f"・{to_small_caps(base_pretty)}"
+    elif style == "diamond":
+        # ❖ ᴍᴀɪɴ
+        return f"❖ {to_small_caps(base_pretty)}"
+    elif style == "flame":
+        # 🔥・ᴍᴀɪɴ
+        return f"🔥・{to_small_caps(base_pretty)}"
+    elif style == "lowercase":
+        # plain lowercase
+        return base_clean.lower()
+    elif style == "small-caps":
+        # just small caps, no prefix
+        return to_small_caps(base_pretty)
+    return base_clean
+
+
+@tree.command(name="renamechannels", description="🛠️ ADMIN: bulk rename channels in this server (preview by default).")
+@discord.app_commands.describe(
+    style="Naming style preset",
+    category="Limit to one category (optional, leave empty for all text channels)",
+    confirm="Set True to actually apply changes. Otherwise shows preview only.",
+)
+@discord.app_commands.choices(
+    style=[
+        discord.app_commands.Choice(name="★ ᴍᴀɪɴ  (star + small caps)", value="star"),
+        discord.app_commands.Choice(name="★彡 ᴍᴀɪɴ  (star arrow)", value="star-arrow"),
+        discord.app_commands.Choice(name="・ᴍᴀɪɴ  (dot)", value="dot"),
+        discord.app_commands.Choice(name="❖ ᴍᴀɪɴ  (diamond)", value="diamond"),
+        discord.app_commands.Choice(name="🔥・ᴍᴀɪɴ  (flame)", value="flame"),
+        discord.app_commands.Choice(name="ᴍᴀɪɴ  (small caps only)", value="small-caps"),
+        discord.app_commands.Choice(name="main  (plain lowercase)", value="lowercase"),
+    ]
+)
+async def renamechannels_command(
+    interaction: discord.Interaction,
+    style: discord.app_commands.Choice[str],
+    category: discord.CategoryChannel = None,
+    confirm: bool = False,
+):
+    # Permission check — must have Manage Channels permission OR be the boss
+    cfg = load_config()
+    is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
+    has_perm = interaction.user.guild_permissions.manage_channels if interaction.guild else False
+    if not (is_boss or has_perm):
+        await interaction.response.send_message(
+            "❌ You need **Manage Channels** permission to use this.",
+            ephemeral=True,
+        )
+        return
+
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only command.", ephemeral=True)
+        return
+
+    style_value = style.value
+
+    # Build target list
+    targets = []
+    if category:
+        channels_to_check = category.channels
+    else:
+        channels_to_check = interaction.guild.text_channels
+
+    for ch in channels_to_check:
+        # Only rename text channels (skip voice/stage/forum for safety)
+        if not isinstance(ch, discord.TextChannel):
+            continue
+        new_name = _format_channel_name(ch.name, style_value)
+        # Discord lowercases automatically + limits to 100 chars
+        new_name = new_name[:100]
+        if new_name != ch.name:
+            targets.append((ch, ch.name, new_name))
+
+    if not targets:
+        await interaction.response.send_message(
+            "✅ Nothing to rename — all channels already match the target format.",
+            ephemeral=True,
+        )
+        return
+
+    # Build preview
+    preview_lines = [f"`{old}` → `{new}`" for ch, old, new in targets]
+    preview_text = "\n".join(preview_lines)
+
+    embed = discord.Embed(
+        title="🛠️ Channel Rename " + ("— APPLIED" if confirm else "— PREVIEW"),
+        description=preview_text[:4000],
+        color=discord.Color.green() if confirm else discord.Color.gold(),
+    )
+    embed.add_field(
+        name="📊 Count",
+        value=f"{len(targets)} channel(s) {'renamed' if confirm else 'would be renamed'}",
+        inline=False,
+    )
+
+    if not confirm:
+        embed.add_field(
+            name="⚠️ Preview only",
+            value=(
+                "Re-run with `confirm:True` to apply changes.\n"
+                "_Discord enforces a rate limit of ~2 renames per 10 minutes per channel — large batches will take a while._"
+            ),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Apply
+    await interaction.response.defer(ephemeral=True)
+    renamed = 0
+    failed = []
+    for ch, old, new in targets:
+        try:
+            await ch.edit(name=new, reason=f"Bulk rename by {interaction.user} ({interaction.user.id})")
+            renamed += 1
+            # Tiny pause to avoid hammering the API
+            await asyncio.sleep(0.5)
+        except discord.Forbidden:
+            failed.append(f"`{old}` — no permission")
+        except discord.HTTPException as e:
+            failed.append(f"`{old}` — {e.text[:80] if hasattr(e,'text') else str(e)[:80]}")
+        except Exception as e:
+            failed.append(f"`{old}` — {str(e)[:80]}")
+
+    result = discord.Embed(
+        title="✅ Bulk Rename Complete" if not failed else "⚠️ Bulk Rename Partial",
+        description=f"**{renamed}** channel(s) renamed.",
+        color=discord.Color.green() if not failed else discord.Color.orange(),
+    )
+    if failed:
+        result.add_field(
+            name=f"❌ Failed ({len(failed)})",
+            value="\n".join(failed[:10])[:1024],
+            inline=False,
+        )
+    await interaction.followup.send(embed=result, ephemeral=True)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
