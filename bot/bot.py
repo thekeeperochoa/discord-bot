@@ -80,6 +80,8 @@ DEFAULT_PERSONALITY = {
     "daily_recap_hour_utc": 4,   # 4am UTC = midnight EST
     "daily_recap_channel": "",   # channel ID to post the recap in
     "daily_recap_max_tokens": 500,
+    # Dedicated channel for ALL bot notifications (events, recaps, tournaments, etc.)
+    "notifications_channel": "1303514703464497192",
 }
 
 
@@ -88,6 +90,17 @@ def load_config() -> dict:
         with open(CONFIG_FILE) as f:
             return {**DEFAULT_PERSONALITY, **json.load(f)}
     return DEFAULT_PERSONALITY.copy()
+
+
+def get_notification_channel_id(cfg: dict = None) -> str:
+    """The single channel ID where all bot notifications/events should post.
+    Falls back to daily_recap_channel if notifications_channel is unset."""
+    if cfg is None:
+        cfg = load_config()
+    nc = cfg.get("notifications_channel", "").strip()
+    if nc:
+        return nc
+    return cfg.get("daily_recap_channel", "").strip()
 
 
 # ── Chime-in counters & silence tracking ─────────────────────────────────────
@@ -1063,7 +1076,7 @@ async def tournament_scheduler():
             _save_tournament(data)
 
             # Announce
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             if recap_channel_id and announcements:
                 try:
                     channel = client.get_channel(int(recap_channel_id))
@@ -1100,7 +1113,7 @@ async def random_event_scheduler():
         await asyncio.sleep(random.randint(EVENT_INTERVAL_MIN, EVENT_INTERVAL_MAX))
         try:
             cfg = load_config()
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             if not recap_channel_id:
                 continue
             channel = client.get_channel(int(recap_channel_id))
@@ -1997,7 +2010,8 @@ async def daily_recap_scheduler():
                 {**cfg, "max_tokens": cfg.get("daily_recap_max_tokens", 500)},
             )
             if not recap.startswith("⚠️") and recap.strip():
-                channel = client.get_channel(int(recap_channel_id))
+                post_channel_id = get_notification_channel_id(cfg)
+                channel = client.get_channel(int(post_channel_id))
                 if channel:
                     header = f"📰 **Daily Recap — {yesterday}**\n\n"
                     full = header + recap
@@ -5107,7 +5121,7 @@ async def lottery_drawing_scheduler():
             _save_lottery(data)
 
             # Announce in the recap channel if configured
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             if recap_channel_id:
                 try:
                     channel = client.get_channel(int(recap_channel_id))
@@ -9448,7 +9462,7 @@ async def business_events_scheduler():
         try:
             data = _load_businesses()
             cfg = load_config()
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
 
             for uid, bizs in data["users"].items():
@@ -9830,7 +9844,7 @@ async def loan_shark_scheduler():
             loans = _load_json_file(LOANS_FILE, {"users": {}})
             now = time.time()
             cfg = load_config()
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
             changed = False
             for uid, loan in list(loans["users"].items()):
@@ -11750,7 +11764,7 @@ async def nightlife_events_scheduler():
         try:
             data = _load_nightlife()
             cfg = load_config()
-            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            recap_channel_id = get_notification_channel_id(cfg)
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
 
             for uid, venues in data["users"].items():
@@ -12262,6 +12276,35 @@ async def renamechannelsadvanced_command(
     if failed:
         result.add_field(name=f"❌ Failed ({len(failed)})", value="\n".join(failed[:10])[:1024], inline=False)
     await interaction.followup.send(embed=result, ephemeral=True)
+
+
+@tree.command(name="setnotifchannel", description="🛠️ ADMIN: set the channel where all bot notifications post.")
+@discord.app_commands.describe(channel="The channel for events, recaps, tournaments, etc.")
+async def setnotifchannel_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    cfg = load_config()
+    is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
+    has_perm = interaction.user.guild_permissions.manage_guild if interaction.guild else False
+    if not (is_boss or has_perm):
+        await interaction.response.send_message(
+            "❌ You need **Manage Server** permission to use this.", ephemeral=True
+        )
+        return
+
+    cfg["notifications_channel"] = str(channel.id)
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to save: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"✅ All bot notifications will now post in {channel.mention}.\n"
+        f"_This covers: daily recaps, tournaments, random events, business/nightlife events, "
+        f"lottery draws, and loan shark collections._\n"
+        f"Personal DMs still go to users who have them enabled (`/notifications`).",
+        ephemeral=True,
+    )
 
 
 @tree.command(name="commands", description="List all available bot commands.")
