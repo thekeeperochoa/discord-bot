@@ -11311,6 +11311,518 @@ async def dealer_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🍸 NIGHTLIFE EMPIRE
+# Own bars and nightclubs. Stock liquor. Hire staff (NPCs). Throw events.
+# Customers are NPCs. Risk events: raids, brawls. Celebrity nights = bonus.
+# ─────────────────────────────────────────────────────────────────────────────
+NIGHTLIFE_FILE = MEMORY_DIR / "nightlife.json"
+
+VENUE_TYPES = {
+    "dive_bar": {
+        "emoji": "🍺", "name": "Dive Bar",
+        "cost": 5_000, "income_per_hour": 80, "max_staff": 2,
+        "tier": 1, "desc": "Low overhead, blue-collar regulars.",
+    },
+    "sports_bar": {
+        "emoji": "📺", "name": "Sports Bar",
+        "cost": 20_000, "income_per_hour": 250, "max_staff": 3,
+        "tier": 1, "desc": "Game-day crowds. Wings & beer.",
+    },
+    "cocktail_lounge": {
+        "emoji": "🍸", "name": "Cocktail Lounge",
+        "cost": 45_000, "income_per_hour": 500, "max_staff": 4,
+        "tier": 2, "desc": "Upscale vibe. Bottle service.",
+    },
+    "speakeasy": {
+        "emoji": "🥃", "name": "Speakeasy",
+        "cost": 80_000, "income_per_hour": 850, "max_staff": 4,
+        "tier": 2, "desc": "Hidden door. Velvet booths.",
+    },
+    "nightclub": {
+        "emoji": "🎵", "name": "Nightclub",
+        "cost": 200_000, "income_per_hour": 2_000, "max_staff": 6,
+        "tier": 3, "desc": "Lines around the block. Bottle wars.",
+    },
+    "rooftop": {
+        "emoji": "🌃", "name": "Rooftop Lounge",
+        "cost": 400_000, "income_per_hour": 3_500, "max_staff": 7,
+        "tier": 4, "desc": "City views. Influencers everywhere.",
+    },
+    "mega_club": {
+        "emoji": "💎", "name": "Mega Club",
+        "cost": 750_000, "income_per_hour": 6_000, "max_staff": 10,
+        "tier": 5, "desc": "Multi-floor. International DJs. Real money.",
+    },
+}
+
+STAFF_ROLES = {
+    "bartender":  {"emoji": "🍹", "name": "Bartender",   "cost": 2_000, "income_boost": 0.15, "desc": "Faster pours, more sales."},
+    "bouncer":    {"emoji": "💪", "name": "Bouncer",     "cost": 2_500, "income_boost": 0.10, "desc": "Reduces brawl chance.", "risk_reduction": 0.5},
+    "dj":         {"emoji": "🎧", "name": "DJ",          "cost": 5_000, "income_boost": 0.25, "desc": "Big crowds love bangers."},
+    "promoter":   {"emoji": "📣", "name": "Promoter",    "cost": 3_500, "income_boost": 0.20, "desc": "Brings the night to life."},
+}
+
+LIQUOR_TYPES = {
+    "well":    {"emoji": "🍺", "name": "Well Liquor",  "cost_per_bottle": 50,  "revenue_per_bottle": 120,  "tier_min": 1},
+    "premium": {"emoji": "🍷", "name": "Premium",      "cost_per_bottle": 200, "revenue_per_bottle": 500,  "tier_min": 1},
+    "top_shelf": {"emoji": "🥃", "name": "Top Shelf",  "cost_per_bottle": 500, "revenue_per_bottle": 1_400, "tier_min": 2},
+    "bottle_service": {"emoji": "🍾", "name": "Bottle Service", "cost_per_bottle": 1_500, "revenue_per_bottle": 5_000, "tier_min": 3},
+}
+
+NIGHTLIFE_COLLECT_COOLDOWN_MIN = 60  # 1 hour cooldown on collecting per venue
+NIGHTLIFE_MAX_IDLE_HOURS = 18
+NIGHTLIFE_RISK_INTERVAL_HOURS = 3  # how often to roll for events
+NIGHTLIFE_RISK_CHANCE = 0.10       # 10% chance per venue per roll
+
+
+def _load_nightlife() -> dict:
+    if NIGHTLIFE_FILE.exists():
+        try:
+            with open(NIGHTLIFE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_nightlife(data: dict):
+    with open(NIGHTLIFE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _user_venues(user_id: int) -> list:
+    return _load_nightlife()["users"].get(str(user_id), [])
+
+
+def _venue_cost(user_id: int, venue_type: str) -> int:
+    info = VENUE_TYPES[venue_type]
+    base = info["cost"]
+    same_tier_owned = sum(
+        1 for v in _user_venues(user_id)
+        if VENUE_TYPES.get(v["type"], {}).get("tier") == info["tier"]
+    )
+    return int(base * (1.5 ** same_tier_owned))
+
+
+def _venue_income_per_hour(venue: dict) -> int:
+    info = VENUE_TYPES.get(venue["type"])
+    if not info:
+        return 0
+    base = info["income_per_hour"]
+    boost = 1.0
+    for staff_role in venue.get("staff", []):
+        role_info = STAFF_ROLES.get(staff_role, {})
+        boost += role_info.get("income_boost", 0)
+    # Celebrity night triple income
+    if venue.get("celebrity_until", 0) > time.time():
+        boost *= 3
+    return int(base * boost)
+
+
+def _venue_pending_income(venue: dict) -> int:
+    now = time.time()
+    last_collected = venue.get("last_collected", venue.get("purchased_at", now))
+    closed_until = venue.get("closed_until", 0)
+    # Don't earn during closure
+    effective_start = max(last_collected, closed_until) if closed_until > last_collected else last_collected
+    hours = (now - effective_start) / 3600
+    if hours <= 0:
+        return 0
+    hours = min(hours, NIGHTLIFE_MAX_IDLE_HOURS)
+    return int(_venue_income_per_hour(venue) * hours)
+
+
+# ── /buyvenue ────────────────────────────────────────────────────────────────
+@tree.command(name="buyvenue", description="Buy a nightclub or bar. Earn passive income from drinks & cover.")
+@discord.app_commands.describe(venue_type="Which venue type")
+@discord.app_commands.choices(
+    venue_type=[
+        discord.app_commands.Choice(
+            name=f"{v['emoji']} {v['name']} — {v['cost']:,} coins ({v['income_per_hour']}/hr)",
+            value=k,
+        )
+        for k, v in VENUE_TYPES.items()
+    ]
+)
+async def buyvenue_command(
+    interaction: discord.Interaction,
+    venue_type: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    v_type = venue_type.value
+    if v_type not in VENUE_TYPES:
+        await interaction.response.send_message("Invalid venue type.", ephemeral=True)
+        return
+
+    cost = _venue_cost(user.id, v_type)
+    if economy.balance(user.id) < cost:
+        await interaction.response.send_message(
+            f"❌ Need **{cost:,}** coins (scales with same-tier ownership). You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    info = VENUE_TYPES[v_type]
+    economy.add(user.id, -cost, f"venue: {v_type}")
+
+    data = _load_nightlife()
+    venues = data["users"].setdefault(str(user.id), [])
+    new_venue = {
+        "id": f"{v_type}_{int(time.time())}_{random.randint(1000,9999)}",
+        "type": v_type,
+        "name": f"{info['name']} #{len([v for v in venues if v['type']==v_type])+1}",
+        "purchased_at": time.time(),
+        "last_collected": time.time(),
+        "staff": [],
+        "liquor": {},          # liquor_type -> bottles stocked
+        "closed_until": 0,
+        "celebrity_until": 0,
+        "lifetime_revenue": 0,
+        "last_risk_roll": time.time(),
+    }
+    venues.append(new_venue)
+    _save_nightlife(data)
+
+    await interaction.response.send_message(
+        f"# {info['emoji']} VENUE ACQUIRED\n\n"
+        f"You opened **{new_venue['name']}** for **{cost:,}** coins.\n"
+        f"💰 Income: **{info['income_per_hour']:,}**/hr\n"
+        f"👥 Max staff: **{info['max_staff']}**\n"
+        f"📋 _{info['desc']}_\n\n"
+        f"`/venues` to manage, `/collectvenue` to claim earnings.\n"
+        f"`/hirestaff` to boost income, `/stockliquor` for bigger margins."
+    )
+
+
+# ── /venues ──────────────────────────────────────────────────────────────────
+@tree.command(name="venues", description="View your nightlife portfolio.")
+@discord.app_commands.describe(user="Whose venues (defaults to you)")
+async def venues_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    venues = _user_venues(target.id)
+    if not venues:
+        await interaction.response.send_message(
+            f"{target.mention} doesn't own any venues. Try `/buyvenue`.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"🌃 {target.display_name}'s Nightlife Empire",
+        color=discord.Color.dark_magenta(),
+    )
+
+    total_hourly = 0
+    total_pending = 0
+    for venue in venues:
+        info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?","max_staff":0})
+        hourly = _venue_income_per_hour(venue)
+        pending = _venue_pending_income(venue)
+        staff = venue.get("staff", [])
+        if venue.get("closed_until", 0) > time.time():
+            status = "🚨 CLOSED"
+        elif venue.get("celebrity_until", 0) > time.time():
+            status = "⭐ CELEBRITY NIGHT (3x)"
+        else:
+            status = "✅ Open"
+        embed.add_field(
+            name=f"{info['emoji']} {venue['name']}",
+            value=(
+                f"Status: {status}\n"
+                f"Income: **{hourly:,}**/hr\n"
+                f"Staff: {len(staff)}/{info['max_staff']}\n"
+                f"Pending: **{pending:,}** coins\n"
+                f"Lifetime: {venue.get('lifetime_revenue', 0):,}"
+            ),
+            inline=True,
+        )
+        total_hourly += hourly
+        total_pending += pending
+
+    embed.add_field(
+        name="📊 TOTALS",
+        value=f"Hourly: **{total_hourly:,}** | Pending: **{total_pending:,}**",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /collectvenue ────────────────────────────────────────────────────────────
+@tree.command(name="collectvenue", description="Collect revenue from your venues.")
+async def collectvenue_command(interaction: discord.Interaction):
+    user = interaction.user
+    data = _load_nightlife()
+    venues = data["users"].get(str(user.id), [])
+    if not venues:
+        await interaction.response.send_message("You don't own any venues.", ephemeral=True)
+        return
+
+    total = 0
+    lines = []
+    for venue in venues:
+        info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?"})
+        pending = _venue_pending_income(venue)
+        if pending <= 0:
+            continue
+        # Add liquor sales bonus based on stocked bottles
+        liquor_bonus = 0
+        for liq_key, bottles in list(venue.get("liquor", {}).items()):
+            if bottles <= 0:
+                continue
+            liq_info = LIQUOR_TYPES.get(liq_key)
+            if not liq_info:
+                continue
+            # Sell up to 20% of stock per collection (with a sane cap)
+            sold = min(bottles, max(1, int(bottles * 0.2)))
+            liquor_bonus += sold * (liq_info["revenue_per_bottle"] - liq_info["cost_per_bottle"])
+            venue["liquor"][liq_key] = bottles - sold
+
+        revenue = pending + liquor_bonus
+        venue["last_collected"] = time.time()
+        venue["lifetime_revenue"] = venue.get("lifetime_revenue", 0) + revenue
+        total += revenue
+        liquor_text = f" + {liquor_bonus:,} liquor" if liquor_bonus > 0 else ""
+        lines.append(f"{info['emoji']} **{venue['name']}** — {pending:,}{liquor_text} = **{revenue:,}**")
+
+    _save_nightlife(data)
+    if total <= 0:
+        await interaction.response.send_message(
+            "💤 No revenue yet. Be patient — venues take time.", ephemeral=True
+        )
+        return
+
+    new_bal = economy.add(user.id, total, "venue collect")
+    track_quest_progress(user.id, "coins_earned", total)
+    add_tournament_score(user.id, coins_earned=total)
+    await trigger_balance_check(user.id, channel=interaction.channel)
+
+    response = (
+        f"# 🍾 NIGHT'S TAKE\n\n"
+        + "\n".join(lines)
+        + f"\n\n💰 **Total: {total:,}**\nBalance: **{new_bal:,}**"
+    )
+    if len(response) > 2000:
+        response = response[:1990] + "..."
+    await interaction.response.send_message(response)
+
+
+# ── /hirestaff ───────────────────────────────────────────────────────────────
+@tree.command(name="hirestaff", description="Hire a staff role at one of your venues.")
+@discord.app_commands.describe(venue_type="Which venue type to staff", role="Staff role")
+@discord.app_commands.choices(
+    venue_type=[
+        discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
+        for k, v in VENUE_TYPES.items()
+    ],
+    role=[
+        discord.app_commands.Choice(
+            name=f"{r['emoji']} {r['name']} — {r['cost']:,} (+{int(r['income_boost']*100)}%)",
+            value=k,
+        )
+        for k, r in STAFF_ROLES.items()
+    ]
+)
+async def hirestaff_command(
+    interaction: discord.Interaction,
+    venue_type: discord.app_commands.Choice[str],
+    role: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    v_type = venue_type.value
+    r_key = role.value
+    if r_key not in STAFF_ROLES:
+        await interaction.response.send_message("Invalid role.", ephemeral=True)
+        return
+
+    role_info = STAFF_ROLES[r_key]
+    if economy.balance(user.id) < role_info["cost"]:
+        await interaction.response.send_message(
+            f"❌ Hiring a {role_info['name']} costs **{role_info['cost']:,}** coins.", ephemeral=True
+        )
+        return
+
+    data = _load_nightlife()
+    venues = data["users"].get(str(user.id), [])
+    # Find first venue of this type with room
+    info = VENUE_TYPES.get(v_type, {})
+    biz = None
+    for v in venues:
+        if v["type"] == v_type and len(v.get("staff", [])) < info.get("max_staff", 0):
+            biz = v
+            break
+
+    if not biz:
+        await interaction.response.send_message(
+            f"❌ No {info.get('name', v_type)} with open staff slots.", ephemeral=True
+        )
+        return
+
+    economy.add(user.id, -role_info["cost"], f"hire {r_key}")
+    biz.setdefault("staff", []).append(r_key)
+    _save_nightlife(data)
+    await interaction.response.send_message(
+        f"👥 Hired a {role_info['emoji']} **{role_info['name']}** at **{biz['name']}**!\n"
+        f"💰 Income now: **{_venue_income_per_hour(biz):,}/hr**"
+    )
+
+
+# ── /stockliquor ─────────────────────────────────────────────────────────────
+@tree.command(name="stockliquor", description="Stock liquor at one of your venues for bonus revenue.")
+@discord.app_commands.describe(venue_type="Which venue type", liquor="Which liquor", bottles="How many bottles")
+@discord.app_commands.choices(
+    venue_type=[
+        discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
+        for k, v in VENUE_TYPES.items()
+    ],
+    liquor=[
+        discord.app_commands.Choice(
+            name=f"{l['emoji']} {l['name']} — {l['cost_per_bottle']:,}/bottle",
+            value=k,
+        )
+        for k, l in LIQUOR_TYPES.items()
+    ]
+)
+async def stockliquor_command(
+    interaction: discord.Interaction,
+    venue_type: discord.app_commands.Choice[str],
+    liquor: discord.app_commands.Choice[str],
+    bottles: int,
+):
+    user = interaction.user
+    v_type = venue_type.value
+    l_key = liquor.value
+    if l_key not in LIQUOR_TYPES:
+        await interaction.response.send_message("Invalid liquor.", ephemeral=True)
+        return
+    if bottles <= 0 or bottles > 200:
+        await interaction.response.send_message("❌ Bottles must be 1–200.", ephemeral=True)
+        return
+
+    liq_info = LIQUOR_TYPES[l_key]
+    venue_info = VENUE_TYPES.get(v_type, {})
+
+    # Check tier requirement
+    if liq_info["tier_min"] > venue_info.get("tier", 1):
+        await interaction.response.send_message(
+            f"❌ **{liq_info['name']}** requires a Tier {liq_info['tier_min']}+ venue. "
+            f"This is Tier {venue_info.get('tier', 1)}.",
+            ephemeral=True,
+        )
+        return
+
+    data = _load_nightlife()
+    venues = data["users"].get(str(user.id), [])
+    biz = next((v for v in venues if v["type"] == v_type), None)
+    if not biz:
+        await interaction.response.send_message(
+            f"❌ You don't own a {venue_info.get('name', v_type)}.", ephemeral=True
+        )
+        return
+
+    total_cost = liq_info["cost_per_bottle"] * bottles
+    if economy.balance(user.id) < total_cost:
+        await interaction.response.send_message(
+            f"❌ Need **{total_cost:,}** coins. You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -total_cost, f"liquor: {l_key}")
+    biz.setdefault("liquor", {})[l_key] = biz["liquor"].get(l_key, 0) + bottles
+    _save_nightlife(data)
+
+    expected_revenue = bottles * liq_info["revenue_per_bottle"]
+    expected_profit = expected_revenue - total_cost
+    await interaction.response.send_message(
+        f"🍾 Stocked **{bottles} bottles** of {liq_info['emoji']} **{liq_info['name']}** at **{biz['name']}**.\n"
+        f"💸 Cost: {total_cost:,} • Expected revenue: ~{expected_revenue:,} (+{expected_profit:,} profit)\n"
+        f"_Bottles sell automatically when you `/collectvenue`._"
+    )
+
+
+# ── Risk events scheduler ────────────────────────────────────────────────────
+async def nightlife_events_scheduler():
+    """Random nightlife events: liquor raid, brawl, celebrity night."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(NIGHTLIFE_RISK_INTERVAL_HOURS * 3600)
+        try:
+            data = _load_nightlife()
+            cfg = load_config()
+            recap_channel_id = cfg.get("daily_recap_channel", "").strip()
+            channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
+
+            for uid, venues in data["users"].items():
+                for venue in venues:
+                    if venue.get("closed_until", 0) > time.time():
+                        continue
+                    if random.random() > NIGHTLIFE_RISK_CHANCE:
+                        continue
+                    info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?"})
+
+                    # Check for bouncer risk reduction
+                    has_bouncer = "bouncer" in venue.get("staff", [])
+                    # Pick an event weighted by venue + staff
+                    events = [
+                        ("🚨", "got raided — liquor license violation", 6, True),  # closes
+                        ("🥊", "had a brawl break out", 3, True),                    # closes (bouncer reduces)
+                        ("📋", "got a noise complaint visit", 2, False),             # no close, no celebrity
+                        ("⭐", "CELEBRITY in the building!", 0, False),              # 3x income for 6h
+                    ]
+                    event = random.choice(events)
+                    emoji, desc, close_hours, is_brawl = event
+
+                    if "CELEBRITY" in desc:
+                        venue["celebrity_until"] = time.time() + 6 * 3600
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** had a {desc}\n"
+                                    f"💰 **3x income** for the next **6 hours**!",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                        # DM owner
+                        try:
+                            await send_dm(int(uid), "business",
+                                content=f"⭐ A celebrity walked into your {venue['name']}! 3x income for 6 hours.")
+                        except Exception:
+                            pass
+                    elif is_brawl and has_bouncer and random.random() < 0.5:
+                        # Bouncer prevented it
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"💪 **<@{uid}>'s {info['emoji']} {venue['name']}**: a brawl was about to break out, "
+                                    f"but the bouncer shut it down. No damage.",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        venue["closed_until"] = time.time() + close_hours * 3600
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}!\n"
+                                    f"⏰ Closed for **{close_hours} hours**.",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            await send_dm(int(uid), "business",
+                                content=f"🚨 Your {venue['name']} {desc}. Closed for {close_hours} hours.")
+                        except Exception:
+                            pass
+                    venue["last_risk_roll"] = time.time()
+            _save_nightlife(data)
+        except Exception as e:
+            log.exception("nightlife_events_scheduler: %s", e)
+
+
 @tree.command(name="commands", description="List all available bot commands.")
 async def commands_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
@@ -11389,6 +11901,17 @@ async def commands_command(interaction: discord.Interaction):
             "`/petfood` 7-day pet food bundle\n"
             "`/upgradebusiness` Permanent business boost\n"
             "`/heisttools` +20% rob success 24h"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🌃 NIGHTLIFE EMPIRE",
+        value=(
+            "`/buyvenue` Open a bar/club (7 tiers)\n"
+            "`/venues` View your venues\n"
+            "`/collectvenue` Claim the night's take\n"
+            "`/hirestaff` Hire bartender/bouncer/DJ/promoter\n"
+            "`/stockliquor` Stock liquor for bonus sales"
         ),
         inline=False
     )
@@ -11492,6 +12015,7 @@ async def on_ready():
     client.loop.create_task(business_events_scheduler())
     client.loop.create_task(loan_shark_scheduler())
     client.loop.create_task(pet_starving_scheduler())
+    client.loop.create_task(nightlife_events_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11707,6 +12231,13 @@ PREFIX_COMMANDS = {
     "plug":         ("dealers",       []),
     "dealer":       ("dealer",        []),
     "dashboard":    ("dealer",        []),
+    "buyvenue":     ("buyvenue",      [{"name":"venue_type","type":"str","required":True}]),
+    "venues":       ("venues",        [{"name":"user","type":"user","required":False,"default":None}]),
+    "club":         ("venues",        [{"name":"user","type":"user","required":False,"default":None}]),
+    "collectvenue": ("collectvenue",  []),
+    "nightstake":   ("collectvenue",  []),
+    "hirestaff":    ("hirestaff",     [{"name":"venue_type","type":"str","required":True},{"name":"role","type":"str","required":True}]),
+    "stockliquor":  ("stockliquor",   [{"name":"venue_type","type":"str","required":True},{"name":"liquor","type":"str","required":True},{"name":"bottles","type":"int","required":True}]),
     "notifications":("notifications", []),
     "notif":        ("notifications", []),
     "dms":          ("notifications", []),
@@ -11836,6 +12367,33 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["substance"] = discord.app_commands.Choice(name=sub_key, value=sub_key)
+
+    if slash_name in ("buyvenue", "hirestaff", "stockliquor"):
+        v_type = kwargs.get("venue_type", "").lower()
+        if v_type not in VENUE_TYPES:
+            await message.channel.send(
+                f"❌ Venue types: {', '.join(VENUE_TYPES.keys())}"
+            )
+            return True
+        kwargs["venue_type"] = discord.app_commands.Choice(name=v_type, value=v_type)
+
+    if slash_name == "hirestaff":
+        r_key = kwargs.get("role", "").lower()
+        if r_key not in STAFF_ROLES:
+            await message.channel.send(
+                f"❌ Staff roles: {', '.join(STAFF_ROLES.keys())}"
+            )
+            return True
+        kwargs["role"] = discord.app_commands.Choice(name=r_key, value=r_key)
+
+    if slash_name == "stockliquor":
+        l_key = kwargs.get("liquor", "").lower()
+        if l_key not in LIQUOR_TYPES:
+            await message.channel.send(
+                f"❌ Liquor types: {', '.join(LIQUOR_TYPES.keys())}"
+            )
+            return True
+        kwargs["liquor"] = discord.app_commands.Choice(name=l_key, value=l_key)
 
     if slash_name == "upgradebusiness":
         biz_type = kwargs.get("business_type", "").lower()
