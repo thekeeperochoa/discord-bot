@@ -11828,7 +11828,7 @@ async def nightlife_events_scheduler():
 # Preview-by-default. Requires confirm:true to actually execute.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Small-caps mapping for the ᴍᴀɪɴ aesthetic
+# Small-caps mapping
 SMALL_CAPS_MAP = str.maketrans({
     "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ғ", "g": "ɢ",
     "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ", "m": "ᴍ", "n": "ɴ",
@@ -11836,58 +11836,145 @@ SMALL_CAPS_MAP = str.maketrans({
     "v": "ᴠ", "w": "ᴡ", "x": "x", "y": "ʏ", "z": "ᴢ",
 })
 
+# Bold sans-serif (𝗮𝗯𝗰 / 𝗔𝗕𝗖)
+BOLD_SANS_MAP = str.maketrans({c: chr(0x1D5EE + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")} |
+                              {c: chr(0x1D5D4 + i) for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")})
+
+# Italic sans-serif (𝘢𝘣𝘤)
+ITALIC_SANS_MAP = str.maketrans({c: chr(0x1D622 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Cursive / script (𝒶𝒷𝒸)
+SCRIPT_MAP = str.maketrans({c: chr(0x1D4B6 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Double-struck (𝕒𝕓𝕔)
+DOUBLE_STRUCK_MAP = str.maketrans({c: chr(0x1D552 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Monospace (𝚊𝚋𝚌)
+MONO_MAP = str.maketrans({c: chr(0x1D68A + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Fraktur / gothic (𝔞𝔟𝔠)
+FRAKTUR_MAP = str.maketrans({c: chr(0x1D51E + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Circled letters (ⓐⓑⓒ)
+CIRCLED_MAP = str.maketrans({c: chr(0x24D0 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Squared / inverted box (🅐🅑🅒)
+SQUARED_MAP = str.maketrans({c: chr(0x1F170 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Fullwidth (ａｂｃ) — wide spaced look
+FULLWIDTH_MAP = str.maketrans({c: chr(0xFF21 + i) for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")} |
+                              {c: chr(0xFF41 + i) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+
+# Bubble inverse (🅐🅑🅒 — black background)
+# already SQUARED_MAP above
+
+# Superscript-ish small
+SMALL_CAPS_MAP_2 = SMALL_CAPS_MAP
+
+
+def _xform(text: str, mapping: dict) -> str:
+    """Apply a translate map, leaving unmapped chars alone."""
+    return text.translate(mapping)
+
 
 def to_small_caps(text: str) -> str:
     return text.lower().translate(SMALL_CAPS_MAP)
 
 
 def _strip_channel_decoration(name: str) -> str:
-    """Strip common decoration characters/wrappers from a channel name,
-    leaving only the alphanumeric base word.
-
-    Examples:
-      '《💬》╰┈➤﹕main⌝'  → 'main'
-      '🔥┃general'        → 'general'
-      '⌬-bot-spam-⌬'      → 'bot-spam'
-    """
+    """Strip decoration to alphanumeric base."""
     import re
-    # Keep alphanumeric, spaces, dashes, underscores. Everything else gets stripped.
     cleaned = re.sub(r"[^a-zA-Z0-9 _-]", " ", name)
-    # Collapse whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    # Normalize separators to single dashes
     cleaned = cleaned.replace(" ", "-").strip("-")
     return cleaned or "channel"
 
 
 def _format_channel_name(base: str, style: str) -> str:
-    """Apply a preset style. Discord channel names must be lowercase, no spaces,
-    so we use unicode small-caps + symbols which Discord accepts."""
+    """Apply a preset style to a channel name."""
     base_clean = _strip_channel_decoration(base)
-    # Convert dashes back to spaces for readability inside the small-caps text
-    base_pretty = base_clean.replace("-", " ").replace("_", " ")
-    if style == "star":
-        # ★ ᴍᴀɪɴ
-        return f"★ {to_small_caps(base_pretty)}"
-    elif style == "star-arrow":
-        # ★彡 ᴍᴀɪɴ
-        return f"★彡 {to_small_caps(base_pretty)}"
-    elif style == "dot":
-        # ・ᴍᴀɪɴ
-        return f"・{to_small_caps(base_pretty)}"
-    elif style == "diamond":
-        # ❖ ᴍᴀɪɴ
-        return f"❖ {to_small_caps(base_pretty)}"
-    elif style == "flame":
-        # 🔥・ᴍᴀɪɴ
-        return f"🔥・{to_small_caps(base_pretty)}"
-    elif style == "lowercase":
-        # plain lowercase
-        return base_clean.lower()
-    elif style == "small-caps":
-        # just small caps, no prefix
-        return to_small_caps(base_pretty)
-    return base_clean
+    base_pretty = base_clean.replace("-", " ").replace("_", " ").lower()
+
+    # Helper to apply font + optional prefix/suffix
+    def deco(prefix: str, body_fn, suffix: str = "") -> str:
+        return f"{prefix}{body_fn(base_pretty)}{suffix}".strip()
+
+    # Font transforms (build the body)
+    small = lambda t: to_small_caps(t)
+    bold_sans = lambda t: _xform(t, BOLD_SANS_MAP)
+    italic = lambda t: _xform(t, ITALIC_SANS_MAP)
+    script = lambda t: _xform(t, SCRIPT_MAP)
+    double = lambda t: _xform(t, DOUBLE_STRUCK_MAP)
+    mono = lambda t: _xform(t, MONO_MAP)
+    fraktur = lambda t: _xform(t, FRAKTUR_MAP)
+    circled = lambda t: _xform(t, CIRCLED_MAP)
+    squared = lambda t: _xform(t.upper(), SQUARED_MAP)
+    fullwidth = lambda t: _xform(t, FULLWIDTH_MAP)
+    plain = lambda t: t
+    upper = lambda t: t.upper()
+
+    # ─── 40+ Style Presets ──────────────────────────────────────────────
+    STYLES = {
+        # Symbol prefix + small caps
+        "star":          deco("★ ", small),
+        "star-arrow":    deco("★彡 ", small),
+        "dot":           deco("・", small),
+        "diamond":       deco("❖ ", small),
+        "flame":         deco("🔥・", small),
+        "lightning":     deco("⚡・", small),
+        "skull":         deco("💀・", small),
+        "crown":         deco("👑・", small),
+        "heart":         deco("♡ ", small),
+        "spade":         deco("♠ ", small),
+        "moon":          deco("☾ ", small),
+        "snowflake":     deco("❄ ", small),
+        "rose":          deco("✿ ", small),
+        "sakura":        deco("✦ ", small),
+        "fourstars":     deco("✦°. ", small, " .°✦"),
+        "pipe":          deco("┃ ", small),
+        "arrow":         deco("➤ ", small),
+        "doublearrow":   deco("⪼ ", small),
+        "cross":         deco("✟ ", small),
+        "yinyang":       deco("☯ ", small),
+
+        # Brackets + small caps
+        "brackets":      deco("「", small, "」"),
+        "double-brackets": deco("『", small, "』"),
+        "angle-brackets":  deco("《", small, "》"),
+        "tilde":         deco("~ ", small, " ~"),
+        "stars-around":  deco("✧ ", small, " ✧"),
+
+        # Pure font styles (no prefix)
+        "small-caps":    small(base_pretty),
+        "bold":          bold_sans(base_pretty),
+        "italic":        italic(base_pretty),
+        "script":        script(base_pretty),
+        "double-struck": double(base_pretty),
+        "monospace":     mono(base_pretty),
+        "fraktur":       fraktur(base_pretty),
+        "circled":       circled(base_pretty),
+        "squared":       squared(base_pretty),
+        "fullwidth":     fullwidth(base_pretty),
+
+        # Themed combos
+        "vampire":       deco("🩸 ", fraktur),
+        "royal":         deco("♛ ", script),
+        "matrix":        deco("⌬ ", mono),
+        "y2k":           deco("✿ ", italic, " ✿"),
+        "vaporwave":     deco("ﾟ･: ", fullwidth, " :･ﾟ"),
+        "gamer":         deco("⌜ ", bold_sans, " ⌟"),
+        "cyber":         deco("◤ ", mono, " ◥"),
+        "minimal":       deco("· ", small),
+        "ornate":        deco("❀ ", script, " ❀"),
+        "battle":        deco("⚔️ ", small),
+
+        # Plain
+        "lowercase":     base_clean.lower(),
+        "uppercase":     upper(base_pretty),
+        "plain":         base_clean,
+    }
+
+    return STYLES.get(style, base_clean)[:100]
 
 
 @tree.command(name="renamechannels", description="🛠️ ADMIN: bulk rename channels in this server (preview by default).")
@@ -11898,13 +11985,33 @@ def _format_channel_name(base: str, style: str) -> str:
 )
 @discord.app_commands.choices(
     style=[
-        discord.app_commands.Choice(name="★ ᴍᴀɪɴ  (star + small caps)", value="star"),
-        discord.app_commands.Choice(name="★彡 ᴍᴀɪɴ  (star arrow)", value="star-arrow"),
+        # Top 25 picks — Discord caps choices at 25
+        discord.app_commands.Choice(name="★ ᴍᴀɪɴ  (star)", value="star"),
+        discord.app_commands.Choice(name="★彡 ᴍᴀɪɴ  (star-arrow)", value="star-arrow"),
         discord.app_commands.Choice(name="・ᴍᴀɪɴ  (dot)", value="dot"),
         discord.app_commands.Choice(name="❖ ᴍᴀɪɴ  (diamond)", value="diamond"),
         discord.app_commands.Choice(name="🔥・ᴍᴀɪɴ  (flame)", value="flame"),
-        discord.app_commands.Choice(name="ᴍᴀɪɴ  (small caps only)", value="small-caps"),
-        discord.app_commands.Choice(name="main  (plain lowercase)", value="lowercase"),
+        discord.app_commands.Choice(name="⚡・ᴍᴀɪɴ  (lightning)", value="lightning"),
+        discord.app_commands.Choice(name="💀・ᴍᴀɪɴ  (skull)", value="skull"),
+        discord.app_commands.Choice(name="👑・ᴍᴀɪɴ  (crown)", value="crown"),
+        discord.app_commands.Choice(name="♡ ᴍᴀɪɴ  (heart)", value="heart"),
+        discord.app_commands.Choice(name="☾ ᴍᴀɪɴ  (moon)", value="moon"),
+        discord.app_commands.Choice(name="✦°. ᴍᴀɪɴ .°✦  (sparkles)", value="fourstars"),
+        discord.app_commands.Choice(name="┃ ᴍᴀɪɴ  (pipe)", value="pipe"),
+        discord.app_commands.Choice(name="➤ ᴍᴀɪɴ  (arrow)", value="arrow"),
+        discord.app_commands.Choice(name="「ᴍᴀɪɴ」  (brackets)", value="brackets"),
+        discord.app_commands.Choice(name="《ᴍᴀɪɴ》  (angle-brackets)", value="angle-brackets"),
+        discord.app_commands.Choice(name="✧ ᴍᴀɪɴ ✧  (stars-around)", value="stars-around"),
+        # Pure fonts
+        discord.app_commands.Choice(name="ᴍᴀɪɴ  (small-caps)", value="small-caps"),
+        discord.app_commands.Choice(name="𝗺𝗮𝗶𝗻  (bold)", value="bold"),
+        discord.app_commands.Choice(name="𝘮𝘢𝘪𝘯  (italic)", value="italic"),
+        discord.app_commands.Choice(name="𝓂𝒶𝒾𝓃  (script)", value="script"),
+        discord.app_commands.Choice(name="𝕞𝕒𝕚𝕟  (double-struck)", value="double-struck"),
+        discord.app_commands.Choice(name="𝚖𝚊𝚒𝚗  (monospace)", value="monospace"),
+        discord.app_commands.Choice(name="𝔪𝔞𝔦𝔫  (fraktur)", value="fraktur"),
+        discord.app_commands.Choice(name="ⓜⓐⓘⓝ  (circled)", value="circled"),
+        discord.app_commands.Choice(name="ｍａｉｎ  (fullwidth)", value="fullwidth"),
     ]
 )
 async def renamechannels_command(
@@ -11913,7 +12020,6 @@ async def renamechannels_command(
     category: discord.CategoryChannel = None,
     confirm: bool = False,
 ):
-    # Permission check — must have Manage Channels permission OR be the boss
     cfg = load_config()
     is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
     has_perm = interaction.user.guild_permissions.manage_channels if interaction.guild else False
@@ -11930,7 +12036,6 @@ async def renamechannels_command(
 
     style_value = style.value
 
-    # Build target list
     targets = []
     if category:
         channels_to_check = category.channels
@@ -11938,11 +12043,9 @@ async def renamechannels_command(
         channels_to_check = interaction.guild.text_channels
 
     for ch in channels_to_check:
-        # Only rename text channels (skip voice/stage/forum for safety)
         if not isinstance(ch, discord.TextChannel):
             continue
         new_name = _format_channel_name(ch.name, style_value)
-        # Discord lowercases automatically + limits to 100 chars
         new_name = new_name[:100]
         if new_name != ch.name:
             targets.append((ch, ch.name, new_name))
@@ -11954,7 +12057,6 @@ async def renamechannels_command(
         )
         return
 
-    # Build preview
     preview_lines = [f"`{old}` → `{new}`" for ch, old, new in targets]
     preview_text = "\n".join(preview_lines)
 
@@ -11974,14 +12076,13 @@ async def renamechannels_command(
             name="⚠️ Preview only",
             value=(
                 "Re-run with `confirm:True` to apply changes.\n"
-                "_Discord enforces a rate limit of ~2 renames per 10 minutes per channel — large batches will take a while._"
+                "_Discord rate-limits channel renames to ~2 per 10 min per channel — large batches will pace themselves._"
             ),
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # Apply
     await interaction.response.defer(ephemeral=True)
     renamed = 0
     failed = []
@@ -11989,7 +12090,6 @@ async def renamechannels_command(
         try:
             await ch.edit(name=new, reason=f"Bulk rename by {interaction.user} ({interaction.user.id})")
             renamed += 1
-            # Tiny pause to avoid hammering the API
             await asyncio.sleep(0.5)
         except discord.Forbidden:
             failed.append(f"`{old}` — no permission")
@@ -12009,6 +12109,158 @@ async def renamechannels_command(
             value="\n".join(failed[:10])[:1024],
             inline=False,
         )
+    await interaction.followup.send(embed=result, ephemeral=True)
+
+
+# ── /stylepreview — see all available styles ─────────────────────────────────
+@tree.command(name="stylepreview", description="🛠️ See all channel name styles available.")
+async def stylepreview_command(interaction: discord.Interaction):
+    cfg = load_config()
+    is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
+    has_perm = interaction.user.guild_permissions.manage_channels if interaction.guild else False
+    if not (is_boss or has_perm):
+        await interaction.response.send_message(
+            "❌ You need **Manage Channels** permission to use this.",
+            ephemeral=True,
+        )
+        return
+
+    sample = "main"
+    styles = [
+        # Symbol prefixes
+        "star", "star-arrow", "dot", "diamond", "flame", "lightning",
+        "skull", "crown", "heart", "spade", "moon", "snowflake",
+        "rose", "sakura", "fourstars", "pipe", "arrow", "doublearrow",
+        "cross", "yinyang",
+        # Brackets
+        "brackets", "double-brackets", "angle-brackets", "tilde", "stars-around",
+        # Pure fonts
+        "small-caps", "bold", "italic", "script", "double-struck",
+        "monospace", "fraktur", "circled", "squared", "fullwidth",
+        # Themed
+        "vampire", "royal", "matrix", "y2k", "vaporwave",
+        "gamer", "cyber", "minimal", "ornate", "battle",
+        # Plain
+        "lowercase", "uppercase", "plain",
+    ]
+
+    chunks = []
+    current_chunk = ""
+    for s in styles:
+        try:
+            rendered = _format_channel_name(sample, s)
+        except Exception:
+            rendered = "(error)"
+        line = f"`{s}` → {rendered}\n"
+        if len(current_chunk) + len(line) > 1000:
+            chunks.append(current_chunk)
+            current_chunk = ""
+        current_chunk += line
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    embed = discord.Embed(
+        title="🎨 All Channel Name Styles",
+        description="_Sample input: `main`. Pick a style key for `/renamechannelsadvanced`._",
+        color=discord.Color.blurple(),
+    )
+    for i, chunk in enumerate(chunks, 1):
+        embed.add_field(name=f"Styles ({i}/{len(chunks)})", value=chunk, inline=False)
+    embed.set_footer(text=f"{len(styles)} total styles available")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── /renamechannelsadvanced — free-text style for full 48 list ───────────────
+@tree.command(name="renamechannelsadvanced", description="🛠️ ADMIN: rename channels with ANY style (type the style key).")
+@discord.app_commands.describe(
+    style_key="Style key (run /stylepreview to see all 48 options)",
+    category="Limit to one category (optional)",
+    confirm="True to apply. Default = preview only.",
+)
+async def renamechannelsadvanced_command(
+    interaction: discord.Interaction,
+    style_key: str,
+    category: discord.CategoryChannel = None,
+    confirm: bool = False,
+):
+    cfg = load_config()
+    is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
+    has_perm = interaction.user.guild_permissions.manage_channels if interaction.guild else False
+    if not (is_boss or has_perm):
+        await interaction.response.send_message(
+            "❌ You need **Manage Channels** permission to use this.",
+            ephemeral=True,
+        )
+        return
+    if not interaction.guild:
+        await interaction.response.send_message("Server-only.", ephemeral=True)
+        return
+
+    style_value = style_key.strip().lower()
+    # Validate by rendering a test
+    test_render = _format_channel_name("test", style_value)
+    if test_render == "test" and style_value not in ("plain", "lowercase"):
+        await interaction.response.send_message(
+            f"❌ Unknown style key `{style_value}`. Run `/stylepreview` to see all options.",
+            ephemeral=True,
+        )
+        return
+
+    targets = []
+    channels_to_check = category.channels if category else interaction.guild.text_channels
+    for ch in channels_to_check:
+        if not isinstance(ch, discord.TextChannel):
+            continue
+        new_name = _format_channel_name(ch.name, style_value)[:100]
+        if new_name != ch.name:
+            targets.append((ch, ch.name, new_name))
+
+    if not targets:
+        await interaction.response.send_message(
+            "✅ Nothing to rename — all channels already match.", ephemeral=True
+        )
+        return
+
+    preview = "\n".join(f"`{old}` → `{new}`" for ch, old, new in targets)
+    embed = discord.Embed(
+        title=f"🛠️ Rename ({style_value}) " + ("— APPLIED" if confirm else "— PREVIEW"),
+        description=preview[:4000],
+        color=discord.Color.green() if confirm else discord.Color.gold(),
+    )
+    embed.add_field(name="📊 Count", value=f"{len(targets)} channel(s)", inline=False)
+
+    if not confirm:
+        embed.add_field(
+            name="⚠️ Preview only",
+            value="Re-run with `confirm:True` to apply.",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    renamed = 0
+    failed = []
+    for ch, old, new in targets:
+        try:
+            await ch.edit(name=new, reason=f"Bulk rename by {interaction.user} ({interaction.user.id})")
+            renamed += 1
+            await asyncio.sleep(0.5)
+        except discord.Forbidden:
+            failed.append(f"`{old}` — no permission")
+        except discord.HTTPException as e:
+            failed.append(f"`{old}` — {e.text[:80] if hasattr(e,'text') else str(e)[:80]}")
+        except Exception as e:
+            failed.append(f"`{old}` — {str(e)[:80]}")
+
+    result = discord.Embed(
+        title="✅ Complete" if not failed else "⚠️ Partial",
+        description=f"**{renamed}** channel(s) renamed.",
+        color=discord.Color.green() if not failed else discord.Color.orange(),
+    )
+    if failed:
+        result.add_field(name=f"❌ Failed ({len(failed)})", value="\n".join(failed[:10])[:1024], inline=False)
     await interaction.followup.send(embed=result, ephemeral=True)
 
 
