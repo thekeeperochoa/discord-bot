@@ -351,6 +351,147 @@ economy = Economy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 📊 STATS TRACKING (for web dashboard)
+# Logs command uses, economy events, game outcomes, feature usage, activity feed.
+# All persisted to MEMORY_DIR/stats.json.
+# ─────────────────────────────────────────────────────────────────────────────
+STATS_FILE = MEMORY_DIR / "stats.json"
+STATS_MAX_FEED = 200  # keep last N events in activity feed
+STATS_KEEP_DAYS = 60  # retention window
+
+
+def _load_stats() -> dict:
+    if STATS_FILE.exists():
+        try:
+            with open(STATS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "command_uses": {},          # cmd -> total count
+        "command_uses_today": {},    # cmd -> {date: count}
+        "economy_events_today": {},  # date -> {earned, spent, transferred, transactions}
+        "game_outcomes": {},         # game -> {wins, losses, total_payout, biggest_payout}
+        "active_users_today": {},    # date -> [user_ids]
+        "new_users": {},             # date -> [user_ids]
+        "feature_usage": {},         # feature -> count
+        "activity_feed": [],         # list of dicts (newest first)
+    }
+
+
+def _save_stats(data: dict):
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save stats failed: %s", e)
+
+
+def _stats_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _stats_trim_old(stats: dict):
+    """Drop data older than STATS_KEEP_DAYS."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=STATS_KEEP_DAYS)).strftime("%Y-%m-%d")
+    for cmd in list(stats.get("command_uses_today", {}).keys()):
+        stats["command_uses_today"][cmd] = {
+            d: v for d, v in stats["command_uses_today"][cmd].items() if d >= cutoff
+        }
+        if not stats["command_uses_today"][cmd]:
+            del stats["command_uses_today"][cmd]
+    for key in ("economy_events_today", "active_users_today", "new_users"):
+        stats[key] = {d: v for d, v in stats.get(key, {}).items() if d >= cutoff}
+
+
+def track_command_use(command_name: str, user_id: int):
+    """Called automatically on every successful slash command."""
+    try:
+        stats = _load_stats()
+        today = _stats_today()
+        stats["command_uses"][command_name] = stats["command_uses"].get(command_name, 0) + 1
+        if command_name not in stats["command_uses_today"]:
+            stats["command_uses_today"][command_name] = {}
+        stats["command_uses_today"][command_name][today] = (
+            stats["command_uses_today"][command_name].get(today, 0) + 1
+        )
+        # Active users tracking
+        if today not in stats["active_users_today"]:
+            stats["active_users_today"][today] = []
+        uid = str(user_id)
+        if uid not in stats["active_users_today"][today]:
+            stats["active_users_today"][today].append(uid)
+            # New user = never seen on any other day
+            seen_before = any(uid in users for d, users in stats["active_users_today"].items() if d != today)
+            if not seen_before:
+                stats["new_users"].setdefault(today, []).append(uid)
+        _stats_trim_old(stats)
+        _save_stats(stats)
+    except Exception as e:
+        log.warning("track_command_use: %s", e)
+
+
+def track_economy_event(kind: str, amount: int):
+    """kind in {'earned','spent','transferred'}."""
+    try:
+        stats = _load_stats()
+        today = _stats_today()
+        if today not in stats["economy_events_today"]:
+            stats["economy_events_today"][today] = {"earned": 0, "spent": 0, "transferred": 0, "transactions": 0}
+        if kind in ("earned", "spent", "transferred"):
+            stats["economy_events_today"][today][kind] += abs(amount)
+        stats["economy_events_today"][today]["transactions"] += 1
+        _save_stats(stats)
+    except Exception as e:
+        log.warning("track_economy_event: %s", e)
+
+
+def track_game_outcome(game_name: str, won: bool, payout: int = 0):
+    try:
+        stats = _load_stats()
+        if game_name not in stats["game_outcomes"]:
+            stats["game_outcomes"][game_name] = {"wins": 0, "losses": 0, "total_payout": 0, "biggest_payout": 0}
+        g = stats["game_outcomes"][game_name]
+        if won:
+            g["wins"] += 1
+        else:
+            g["losses"] += 1
+        g["total_payout"] += payout
+        if payout > g.get("biggest_payout", 0):
+            g["biggest_payout"] = payout
+        _save_stats(stats)
+    except Exception as e:
+        log.warning("track_game_outcome: %s", e)
+
+
+def track_feature_use(feature: str):
+    """feature in {'pet','business','venue','dealer','heist','nightlife','shop'}"""
+    try:
+        stats = _load_stats()
+        stats["feature_usage"][feature] = stats["feature_usage"].get(feature, 0) + 1
+        _save_stats(stats)
+    except Exception as e:
+        log.warning("track_feature_use: %s", e)
+
+
+def track_activity(event_type: str, user_id: int, user_name: str, detail: str):
+    """Add to live activity feed (last 200)."""
+    try:
+        stats = _load_stats()
+        stats["activity_feed"].insert(0, {
+            "ts": int(time.time()),
+            "type": event_type,
+            "user_id": str(user_id),
+            "user_name": user_name,
+            "detail": detail,
+        })
+        stats["activity_feed"] = stats["activity_feed"][:STATS_MAX_FEED]
+        _save_stats(stats)
+    except Exception as e:
+        log.warning("track_activity: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 📅 PERSISTENT SCHEDULER STATE
 # Tracks which date each scheduler last fired, so they don't double-fire
 # after bot restarts (Railway redeploys, crashes, etc.)
@@ -3393,6 +3534,8 @@ async def daily_command(interaction: discord.Interaction):
     passive = get_perk(user.id, "passive_income")
     final_reward = int(reward * (1 + bonus_pct / 100)) + passive
     new_bal = economy.add(user.id, final_reward, "daily")
+    track_economy_event("earned", final_reward)
+    track_activity("daily", user.id, user.display_name, f"claimed daily {final_reward:,}")
     bonus_text = ""
     if bonus_pct or passive:
         bonus_text = f"\n_(+{bonus_pct}% bonus, +{passive} passive)_"
@@ -3440,6 +3583,8 @@ async def weekly_command(interaction: discord.Interaction):
     await edit("💸 *...counting...*")
     await asyncio.sleep(1.0)
     new_bal = economy.add(user.id, reward, "weekly")
+    track_economy_event("earned", reward)
+    track_activity("weekly", user.id, user.display_name, f"claimed weekly {reward:,}")
     suggestion = suggest_next_step(user.id)
     tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
@@ -3498,6 +3643,8 @@ async def work_command(interaction: discord.Interaction):
     await edit(f"{emoji} *Almost done at {job}...*")
     await asyncio.sleep(1.0)
     new_bal = economy.add(user.id, reward, "work")
+    track_economy_event("earned", reward)
+    track_activity("work", user.id, user.display_name, f"worked, earned {reward:,}")
     suggestion = suggest_next_step(user.id)
     tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
@@ -3549,6 +3696,8 @@ async def beg_command(interaction: discord.Interaction):
     await edit(f"🤲 *someone is approaching...*")
     await asyncio.sleep(1.0)
     new_bal = economy.add(user.id, reward, "beg")
+    track_economy_event("earned", reward)
+    track_activity("beg", user.id, user.display_name, f"begged, got {reward:,}")
     flavors = [
         f"A kind stranger gave you {reward} coins.",
         f"You found {reward} coins on the ground.",
@@ -8494,6 +8643,9 @@ async def collect_command(interaction: discord.Interaction):
     pet["xp"] = pet.get("xp", 0) + earnings // 10  # Working gives XP
     _save_pets(pets)
     new_bal = economy.add(user.id, earnings, "pet collect")
+    track_economy_event("earned", earnings)
+    track_feature_use("pet")
+    track_activity("pet_collect", user.id, user.display_name, f"collected {earnings:,} from pet")
 
     info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
     note = " _(earnings halved — pet is hungry)_" if hunger < 30 else ""
@@ -9094,6 +9246,9 @@ async def collectbusiness_command(interaction: discord.Interaction):
         return
 
     new_bal = economy.add(user.id, total_collected, "business collect")
+    track_economy_event("earned", total_collected)
+    track_feature_use("business")
+    track_activity("business_collect", user.id, user.display_name, f"collected {total_collected:,} from businesses")
 
     # Track achievements/tournament
     track_quest_progress(user.id, "coins_earned", total_collected)
@@ -10443,6 +10598,9 @@ async def sell_command(
     record["lifetime_profit"] = record.get("lifetime_profit", 0) + total
     _save_dealer(data)
     new_bal = economy.add(user.id, total, f"sold {sub_key}")
+    track_economy_event("earned", total)
+    track_feature_use("dealer")
+    track_activity("dealer_sale", user.id, user.display_name, f"sold {grams}g of {info['name']} for {total:,}")
 
     # Quest tracking
     track_quest_progress(user.id, "coins_earned", total)
@@ -11498,6 +11656,9 @@ async def collectvenue_command(interaction: discord.Interaction):
         return
 
     new_bal = economy.add(user.id, total, "venue collect")
+    track_economy_event("earned", total)
+    track_feature_use("venue")
+    track_activity("venue_collect", user.id, user.display_name, f"collected {total:,} from venues")
     track_quest_progress(user.id, "coins_earned", total)
     add_tournament_score(user.id, coins_earned=total)
     await trigger_balance_check(user.id, channel=interaction.channel)
@@ -13171,6 +13332,7 @@ async def _run_heist(interaction, channel_id, heist_msg, crew, crew_specialists,
         payout_lines = []
         for m in crew:
             economy.add(m.id, per_member, f"heist {target_key}")
+            track_economy_event("earned", per_member)
             payout_lines.append(f"💰 {m.mention} — +**{per_member:,}**")
             # Quests/tournament tracking
             try:
@@ -13179,6 +13341,13 @@ async def _run_heist(interaction, channel_id, heist_msg, crew, crew_specialists,
                 await trigger_balance_check(m.id, channel=interaction.channel)
             except Exception:
                 pass
+
+        # One activity feed entry per heist
+        track_feature_use("heist")
+        track_activity(
+            "heist", leader.id, leader.display_name,
+            f"pulled {HEIST_TARGETS[target_key]['name']} for {final_payout:,} ({len(crew)} crew)",
+        )
 
         # Save record
         data = _load_heist_crew()
@@ -13477,6 +13646,15 @@ class CommandsNavView(discord.ui.View):
             view = CommandsNavView(self.user_id, current=key)
             await interaction.response.edit_message(embed=embed, view=view)
         return cb
+
+
+@tree.event
+async def on_app_command_completion(interaction: discord.Interaction, command):
+    """Auto-track every successful slash command for analytics."""
+    try:
+        track_command_use(command.name, interaction.user.id)
+    except Exception as e:
+        log.warning("auto command tracking failed: %s", e)
 
 
 @client.event
