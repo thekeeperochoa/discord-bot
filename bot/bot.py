@@ -14303,4 +14303,20 @@ if __name__ == "__main__":
         raise RuntimeError("DISCORD_TOKEN environment variable is not set.")
     if not any(os.environ.get(f"{p.upper()}_API_KEY") for p in ["groq","cerebras","gemini"]):
         raise RuntimeError("No AI provider keys set. Add at least GROQ_API_KEY, CEREBRAS_API_KEY, or GEMINI_API_KEY.")
+
+    # ── Start embedded web dashboard on a background thread ──────────────
+    # Only if Flask is installed AND DASHBOARD_ENABLED isn't explicitly off.
+    try:
+        if os.environ.get("DASHBOARD_ENABLED", "1") != "0":
+            import threading
+            from dashboard_server import start_dashboard
+            port = int(os.environ.get("PORT", 8080))
+            t = threading.Thread(target=start_dashboard, args=(port,), daemon=True)
+            t.start()
+            log.info("Dashboard thread started on port %s", port)
+    except ImportError as e:
+        log.warning("Dashboard disabled (missing dependency): %s", e)
+    except Exception as e:
+        log.warning("Dashboard failed to start: %s", e)
+
     client.run(DISCORD_TOKEN, log_handler=None)

@@ -1,23 +1,27 @@
 """
-Web dashboard for the Discord bot.
-Discord OAuth login → admin-allowlisted view of all bot analytics.
+Embedded analytics dashboard for the Discord bot.
+Runs on a background thread alongside the Discord client.
+Reads stats.json from the same volume the bot writes to.
 
 Required env vars:
 - DISCORD_CLIENT_ID
 - DISCORD_CLIENT_SECRET
-- DISCORD_OAUTH_REDIRECT  (e.g. https://your-web-service.up.railway.app/auth/callback)
+- DISCORD_OAUTH_REDIRECT  (e.g. https://your-worker.up.railway.app/auth/callback)
 - DASHBOARD_ADMIN_IDS     (comma-separated Discord user IDs)
 - DASHBOARD_SESSION_SECRET (random 64-char hex)
-- MEMORY_DIR              (optional, defaults to /app/memory — same volume as bot)
+- MEMORY_DIR              (optional, defaults to /app/memory)
 """
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, redirect, request, session, url_for
+from flask import Flask, jsonify, redirect, request, session
+
+log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
@@ -81,7 +85,8 @@ def index():
 @app.route("/auth/login")
 def auth_login():
     if not CLIENT_ID or not REDIRECT_URI:
-        return "❌ Server config error: DISCORD_CLIENT_ID and DISCORD_OAUTH_REDIRECT must be set.", 500
+        return ("Server config error: DISCORD_CLIENT_ID and DISCORD_OAUTH_REDIRECT "
+                "must be set in Railway env vars."), 500
     state = secrets.token_urlsafe(16)
     session["oauth_state"] = state
     params = {
@@ -101,9 +106,7 @@ def auth_callback():
     code = request.args.get("code")
     state = request.args.get("state")
     if not code or state != session.get("oauth_state"):
-        return "❌ Invalid OAuth state.", 400
-
-    # Exchange code for token
+        return "Invalid OAuth state.", 400
     try:
         token_resp = requests.post(
             f"{DISCORD_API}/oauth2/token",
@@ -119,8 +122,6 @@ def auth_callback():
         )
         token_resp.raise_for_status()
         access_token = token_resp.json()["access_token"]
-
-        # Fetch user identity
         user_resp = requests.get(
             f"{DISCORD_API}/users/@me",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -129,11 +130,9 @@ def auth_callback():
         user_resp.raise_for_status()
         user = user_resp.json()
     except Exception as e:
-        return f"❌ OAuth exchange failed: {e}", 500
-
+        return f"OAuth exchange failed: {e}", 500
     session["user_id"] = user["id"]
     session["username"] = user.get("username", "?")
-    session["avatar"] = user.get("avatar")
     session.pop("oauth_state", None)
     return redirect("/")
 
@@ -144,20 +143,22 @@ def auth_logout():
     return redirect("/")
 
 
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "stats_file_exists": STATS_FILE.exists()})
+
+
 @app.route("/api/stats")
 def api_stats():
-    """Returns aggregated stats for the dashboard frontend."""
     if not is_admin():
         return jsonify({"error": "unauthorized"}), 403
 
     stats = _load_json(STATS_FILE, {})
     economy = _load_json(ECONOMY_FILE, {})
 
-    # ── Top commands ──
     cmd_uses = stats.get("command_uses", {})
     top_commands = sorted(cmd_uses.items(), key=lambda x: x[1], reverse=True)[:15]
 
-    # ── Command usage over time (last 14 days, top 5 commands) ──
     days = _last_n_days(14)
     top5_cmds = [c for c, _ in top_commands[:5]]
     command_trend = {"days": days, "series": {}}
@@ -165,7 +166,6 @@ def api_stats():
         per_day = stats.get("command_uses_today", {}).get(cmd, {})
         command_trend["series"][cmd] = [per_day.get(d, 0) for d in days]
 
-    # ── Economy stats ──
     today = _today_str()
     today_econ = stats.get("economy_events_today", {}).get(today, {})
     econ_trend = {"days": days, "earned": [], "spent": [], "transactions": []}
@@ -175,7 +175,6 @@ def api_stats():
         econ_trend["spent"].append(e.get("spent", 0))
         econ_trend["transactions"].append(e.get("transactions", 0))
 
-    # Total coins in circulation (sum of all balances)
     total_coins = 0
     user_count = 0
     top_users = []
@@ -188,7 +187,6 @@ def api_stats():
     top_users.sort(key=lambda x: x["balance"], reverse=True)
     top_users = top_users[:10]
 
-    # ── User activity ──
     active_today = stats.get("active_users_today", {}).get(today, [])
     new_today = stats.get("new_users", {}).get(today, [])
     activity_trend = {"days": days, "active": [], "new": []}
@@ -196,7 +194,6 @@ def api_stats():
         activity_trend["active"].append(len(stats.get("active_users_today", {}).get(d, [])))
         activity_trend["new"].append(len(stats.get("new_users", {}).get(d, [])))
 
-    # ── Game outcomes ──
     games = stats.get("game_outcomes", {})
     game_stats = []
     for name, g in sorted(games.items(), key=lambda x: x[1].get("wins", 0) + x[1].get("losses", 0), reverse=True):
@@ -212,10 +209,7 @@ def api_stats():
             "biggest_payout": g.get("biggest_payout", 0),
         })
 
-    # ── Feature usage ──
     feature_usage = stats.get("feature_usage", {})
-
-    # ── Activity feed ──
     feed = stats.get("activity_feed", [])[:30]
 
     return jsonify({
@@ -244,7 +238,7 @@ def api_stats():
     })
 
 
-# ── Templates (inline HTML) ──────────────────────────────────────────────
+# ── Pages ────────────────────────────────────────────────────────────────
 def _render_denied():
     return f"""
 <!DOCTYPE html>
@@ -275,18 +269,9 @@ DASHBOARD_HTML = r"""
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 :root {
-  --bg: #0e0e10;
-  --card: #1a1a1d;
-  --card-hover: #222227;
-  --border: #2a2a2f;
-  --text: #e6e6e6;
-  --muted: #8a8a92;
-  --accent: #5865f2;
-  --accent-soft: rgba(88,101,242,0.15);
-  --green: #43b581;
-  --red: #f04747;
-  --gold: #f1c40f;
-  --purple: #9b59b6;
+  --bg: #0e0e10; --card: #1a1a1d; --border: #2a2a2f; --text: #e6e6e6;
+  --muted: #8a8a92; --accent: #5865f2; --green: #43b581; --red: #f04747;
+  --gold: #f1c40f; --purple: #9b59b6;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 24px; min-height: 100vh; }
@@ -294,40 +279,29 @@ header { display: flex; justify-content: space-between; align-items: center; mar
 h1 { font-size: 28px; }
 .user-info { color: var(--muted); font-size: 14px; }
 .user-info a { color: var(--accent); text-decoration: none; margin-left: 12px; }
-.user-info a:hover { text-decoration: underline; }
-
-nav.tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 0; overflow-x: auto; }
+nav.tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .tab-btn { background: transparent; color: var(--muted); border: none; padding: 12px 20px; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
-
 .tab-content { display: none; }
 .tab-content.active { display: block; }
-
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
 .kpi-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .kpi-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
 .kpi-value { font-size: 28px; font-weight: 600; margin-top: 6px; }
-
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 24px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-.card h2 { font-size: 16px; margin-bottom: 16px; color: var(--text); }
+.card h2 { font-size: 16px; margin-bottom: 16px; }
 .card .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
 canvas { width: 100% !important; max-height: 320px; }
-
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 4px; border-bottom: 1px solid var(--border); }
 td { padding: 10px 4px; border-bottom: 1px solid var(--border); }
-tr:last-child td { border-bottom: none; }
 .num { font-variant-numeric: tabular-nums; }
 .right { text-align: right; }
-
 .feed-item { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px; }
-.feed-item:last-child { border-bottom: none; }
 .feed-user { font-weight: 500; color: var(--accent); }
-.feed-detail { color: var(--text); }
 .feed-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
-
 .loading { color: var(--muted); padding: 40px; text-align: center; }
 .error { color: var(--red); padding: 20px; }
 </style>
@@ -340,15 +314,10 @@ tr:last-child td { border-bottom: none; }
   </div>
   <button onclick="loadStats()" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:8px 16px;border-radius:6px;cursor:pointer;">🔄 Refresh</button>
 </header>
-
 <div id="loading" class="loading">Loading stats...</div>
 <div id="error" class="error" style="display:none;"></div>
-
 <div id="main" style="display:none;">
-  <!-- KPI Row -->
   <div class="kpi-grid" id="kpi-grid"></div>
-
-  <!-- Tabs -->
   <nav class="tabs" id="tabs">
     <button class="tab-btn active" data-tab="overview">Overview</button>
     <button class="tab-btn" data-tab="commands">Commands</button>
@@ -358,100 +327,45 @@ tr:last-child td { border-bottom: none; }
     <button class="tab-btn" data-tab="features">Features</button>
     <button class="tab-btn" data-tab="feed">Live Feed</button>
   </nav>
-
   <div id="tab-overview" class="tab-content active">
     <div class="grid">
-      <div class="card">
-        <h2>📈 Activity — Last 14 Days</h2>
-        <canvas id="overview-activity"></canvas>
-      </div>
-      <div class="card">
-        <h2>💰 Economy — Earned vs Spent</h2>
-        <canvas id="overview-economy"></canvas>
-      </div>
-      <div class="card">
-        <h2>🏆 Top Commands</h2>
-        <canvas id="overview-commands"></canvas>
-      </div>
-      <div class="card">
-        <h2>🎮 Feature Usage</h2>
-        <canvas id="overview-features"></canvas>
-      </div>
+      <div class="card"><h2>📈 Activity — Last 14 Days</h2><canvas id="overview-activity"></canvas></div>
+      <div class="card"><h2>💰 Economy — Earned vs Spent</h2><canvas id="overview-economy"></canvas></div>
+      <div class="card"><h2>🏆 Top Commands</h2><canvas id="overview-commands"></canvas></div>
+      <div class="card"><h2>🎮 Feature Usage</h2><canvas id="overview-features"></canvas></div>
     </div>
   </div>
-
   <div id="tab-commands" class="tab-content">
     <div class="grid">
-      <div class="card">
-        <h2>🔥 Top 15 Commands (All Time)</h2>
-        <canvas id="commands-top"></canvas>
-      </div>
-      <div class="card">
-        <h2>📊 Top 5 Commands — Last 14 Days</h2>
-        <canvas id="commands-trend"></canvas>
-      </div>
+      <div class="card"><h2>🔥 Top 15 Commands (All Time)</h2><canvas id="commands-top"></canvas></div>
+      <div class="card"><h2>📊 Top 5 Commands — Last 14 Days</h2><canvas id="commands-trend"></canvas></div>
     </div>
   </div>
-
   <div id="tab-economy" class="tab-content">
     <div class="grid">
-      <div class="card">
-        <h2>💵 Daily Economy Flow</h2>
-        <canvas id="economy-flow"></canvas>
-      </div>
-      <div class="card">
-        <h2>📜 Transactions Per Day</h2>
-        <canvas id="economy-tx"></canvas>
-      </div>
-      <div class="card" style="grid-column: 1 / -1;">
-        <h2>🏆 Top 10 Richest Users</h2>
-        <div id="top-users-table"></div>
-      </div>
+      <div class="card"><h2>💵 Daily Economy Flow</h2><canvas id="economy-flow"></canvas></div>
+      <div class="card"><h2>📜 Transactions Per Day</h2><canvas id="economy-tx"></canvas></div>
+      <div class="card" style="grid-column: 1 / -1;"><h2>🏆 Top 10 Richest Users</h2><div id="top-users-table"></div></div>
     </div>
   </div>
-
   <div id="tab-users" class="tab-content">
-    <div class="grid">
-      <div class="card">
-        <h2>👥 Active vs New Users — Last 14 Days</h2>
-        <canvas id="users-activity"></canvas>
-      </div>
-    </div>
+    <div class="grid"><div class="card"><h2>👥 Active vs New Users — Last 14 Days</h2><canvas id="users-activity"></canvas></div></div>
   </div>
-
   <div id="tab-games" class="tab-content">
-    <div class="card">
-      <h2>🎲 Game Stats</h2>
-      <div id="games-table"></div>
-    </div>
+    <div class="card"><h2>🎲 Game Stats</h2><div id="games-table"></div></div>
   </div>
-
   <div id="tab-features" class="tab-content">
-    <div class="grid">
-      <div class="card">
-        <h2>🎮 Feature Usage Breakdown</h2>
-        <canvas id="features-chart"></canvas>
-      </div>
-    </div>
+    <div class="grid"><div class="card"><h2>🎮 Feature Usage Breakdown</h2><canvas id="features-chart"></canvas></div></div>
   </div>
-
   <div id="tab-feed" class="tab-content">
-    <div class="card">
-      <h2>📰 Live Activity Feed</h2>
-      <div class="subtitle">Last 30 events. Refresh to update.</div>
-      <div id="activity-feed"></div>
-    </div>
+    <div class="card"><h2>📰 Live Activity Feed</h2><div class="subtitle">Last 30 events. Refresh to update.</div><div id="activity-feed"></div></div>
   </div>
 </div>
-
 <script>
 let charts = {};
 const palette = ['#5865f2','#43b581','#f04747','#f1c40f','#9b59b6','#1abc9c','#e67e22','#3498db'];
-
 function destroyChart(id) { if (charts[id]) { charts[id].destroy(); delete charts[id]; } }
-
 function fmt(n) { return (n || 0).toLocaleString(); }
-
 function timeAgo(ts) {
   const diff = Math.floor(Date.now()/1000 - ts);
   if (diff < 60) return diff + 's ago';
@@ -459,7 +373,6 @@ function timeAgo(ts) {
   if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
   return Math.floor(diff/86400) + 'd ago';
 }
-
 async function loadStats() {
   document.getElementById('loading').style.display = 'block';
   document.getElementById('error').style.display = 'none';
@@ -477,18 +390,11 @@ async function loadStats() {
     document.getElementById('error').style.display = 'block';
   }
 }
-
 function renderDashboard(data) {
   renderKPIs(data.summary);
-  renderOverview(data);
-  renderCommands(data);
-  renderEconomy(data);
-  renderUsers(data);
-  renderGames(data);
-  renderFeatures(data);
-  renderFeed(data);
+  renderOverview(data); renderCommands(data); renderEconomy(data);
+  renderUsers(data); renderGames(data); renderFeatures(data); renderFeed(data);
 }
-
 function renderKPIs(s) {
   const cards = [
     ['Active Today', fmt(s.active_users_today)],
@@ -498,197 +404,112 @@ function renderKPIs(s) {
     ['Commands Today', fmt(s.transactions_today)],
     ['Total Commands', fmt(s.total_commands_ever)],
   ];
-  const html = cards.map(([k,v]) => `<div class="kpi-card"><div class="kpi-label">${k}</div><div class="kpi-value">${v}</div></div>`).join('');
-  document.getElementById('kpi-grid').innerHTML = html;
+  document.getElementById('kpi-grid').innerHTML = cards.map(([k,v]) => `<div class="kpi-card"><div class="kpi-label">${k}</div><div class="kpi-value">${v}</div></div>`).join('');
 }
-
 function renderOverview(d) {
-  // Activity line chart
   destroyChart('overview-activity');
   charts['overview-activity'] = new Chart(document.getElementById('overview-activity'), {
     type: 'line',
-    data: {
-      labels: d.activity_trend.days,
-      datasets: [
-        { label: 'Active Users', data: d.activity_trend.active, borderColor: palette[0], backgroundColor: 'transparent', tension: 0.3 },
-        { label: 'New Users',    data: d.activity_trend.new,    borderColor: palette[1], backgroundColor: 'transparent', tension: 0.3 },
-      ],
-    },
-    options: chartOpts(),
+    data: { labels: d.activity_trend.days, datasets: [
+      { label: 'Active Users', data: d.activity_trend.active, borderColor: palette[0], backgroundColor: 'transparent', tension: 0.3 },
+      { label: 'New Users', data: d.activity_trend.new, borderColor: palette[1], backgroundColor: 'transparent', tension: 0.3 },
+    ]}, options: chartOpts(),
   });
-
-  // Economy bar chart
   destroyChart('overview-economy');
   charts['overview-economy'] = new Chart(document.getElementById('overview-economy'), {
     type: 'bar',
-    data: {
-      labels: d.economy_trend.days,
-      datasets: [
-        { label: 'Earned', data: d.economy_trend.earned, backgroundColor: palette[1] },
-        { label: 'Spent',  data: d.economy_trend.spent,  backgroundColor: palette[2] },
-      ],
-    },
-    options: chartOpts(),
+    data: { labels: d.economy_trend.days, datasets: [
+      { label: 'Earned', data: d.economy_trend.earned, backgroundColor: palette[1] },
+      { label: 'Spent', data: d.economy_trend.spent, backgroundColor: palette[2] },
+    ]}, options: chartOpts(),
   });
-
-  // Top commands horizontal bar
   destroyChart('overview-commands');
   const top10 = d.top_commands.slice(0, 10);
   charts['overview-commands'] = new Chart(document.getElementById('overview-commands'), {
     type: 'bar',
-    data: {
-      labels: top10.map(c => c.name),
-      datasets: [{ label: 'Uses', data: top10.map(c => c.count), backgroundColor: palette[0] }],
-    },
+    data: { labels: top10.map(c => c.name), datasets: [{ label: 'Uses', data: top10.map(c => c.count), backgroundColor: palette[0] }] },
     options: { ...chartOpts(), indexAxis: 'y' },
   });
-
-  // Feature usage doughnut
   destroyChart('overview-features');
   const feats = Object.entries(d.feature_usage || {});
   charts['overview-features'] = new Chart(document.getElementById('overview-features'), {
     type: 'doughnut',
-    data: {
-      labels: feats.map(([k,_]) => k),
-      datasets: [{ data: feats.map(([_,v]) => v), backgroundColor: palette }],
-    },
+    data: { labels: feats.map(([k,_]) => k), datasets: [{ data: feats.map(([_,v]) => v), backgroundColor: palette }] },
     options: chartOpts(true),
   });
 }
-
 function renderCommands(d) {
   destroyChart('commands-top');
   charts['commands-top'] = new Chart(document.getElementById('commands-top'), {
     type: 'bar',
-    data: {
-      labels: d.top_commands.map(c => c.name),
-      datasets: [{ label: 'Uses', data: d.top_commands.map(c => c.count), backgroundColor: palette[0] }],
-    },
+    data: { labels: d.top_commands.map(c => c.name), datasets: [{ label: 'Uses', data: d.top_commands.map(c => c.count), backgroundColor: palette[0] }] },
     options: { ...chartOpts(), indexAxis: 'y' },
   });
-
   destroyChart('commands-trend');
-  const trend = d.command_trend;
   charts['commands-trend'] = new Chart(document.getElementById('commands-trend'), {
     type: 'line',
-    data: {
-      labels: trend.days,
-      datasets: Object.entries(trend.series).map(([name, series], i) => ({
-        label: name,
-        data: series,
-        borderColor: palette[i % palette.length],
-        backgroundColor: 'transparent',
-        tension: 0.3,
-      })),
-    },
+    data: { labels: d.command_trend.days, datasets: Object.entries(d.command_trend.series).map(([name, series], i) => ({
+      label: name, data: series, borderColor: palette[i % palette.length], backgroundColor: 'transparent', tension: 0.3,
+    }))},
     options: chartOpts(),
   });
 }
-
 function renderEconomy(d) {
   destroyChart('economy-flow');
   charts['economy-flow'] = new Chart(document.getElementById('economy-flow'), {
     type: 'line',
-    data: {
-      labels: d.economy_trend.days,
-      datasets: [
-        { label: 'Earned', data: d.economy_trend.earned, borderColor: palette[1], backgroundColor: 'rgba(67,181,129,0.1)', tension: 0.3, fill: true },
-        { label: 'Spent',  data: d.economy_trend.spent,  borderColor: palette[2], backgroundColor: 'rgba(240,71,71,0.1)', tension: 0.3, fill: true },
-      ],
-    },
-    options: chartOpts(),
+    data: { labels: d.economy_trend.days, datasets: [
+      { label: 'Earned', data: d.economy_trend.earned, borderColor: palette[1], backgroundColor: 'rgba(67,181,129,0.1)', tension: 0.3, fill: true },
+      { label: 'Spent', data: d.economy_trend.spent, borderColor: palette[2], backgroundColor: 'rgba(240,71,71,0.1)', tension: 0.3, fill: true },
+    ]}, options: chartOpts(),
   });
-
   destroyChart('economy-tx');
   charts['economy-tx'] = new Chart(document.getElementById('economy-tx'), {
     type: 'bar',
-    data: {
-      labels: d.economy_trend.days,
-      datasets: [{ label: 'Transactions', data: d.economy_trend.transactions, backgroundColor: palette[3] }],
-    },
+    data: { labels: d.economy_trend.days, datasets: [{ label: 'Transactions', data: d.economy_trend.transactions, backgroundColor: palette[3] }] },
     options: chartOpts(),
   });
-
-  const usersHtml = '<table><thead><tr><th>#</th><th>User ID</th><th class="right">Balance</th></tr></thead><tbody>'
-    + d.top_users.map((u,i) => `<tr><td>${i+1}</td><td>${u.user_id}</td><td class="right num">${fmt(u.balance)}</td></tr>`).join('')
-    + '</tbody></table>';
-  document.getElementById('top-users-table').innerHTML = usersHtml;
+  document.getElementById('top-users-table').innerHTML = '<table><thead><tr><th>#</th><th>User ID</th><th class="right">Balance</th></tr></thead><tbody>'
+    + d.top_users.map((u,i) => `<tr><td>${i+1}</td><td>${u.user_id}</td><td class="right num">${fmt(u.balance)}</td></tr>`).join('') + '</tbody></table>';
 }
-
 function renderUsers(d) {
   destroyChart('users-activity');
   charts['users-activity'] = new Chart(document.getElementById('users-activity'), {
     type: 'line',
-    data: {
-      labels: d.activity_trend.days,
-      datasets: [
-        { label: 'Active', data: d.activity_trend.active, borderColor: palette[0], backgroundColor: 'rgba(88,101,242,0.1)', fill: true, tension: 0.3 },
-        { label: 'New',    data: d.activity_trend.new,    borderColor: palette[1], backgroundColor: 'rgba(67,181,129,0.1)', fill: true, tension: 0.3 },
-      ],
-    },
-    options: chartOpts(),
+    data: { labels: d.activity_trend.days, datasets: [
+      { label: 'Active', data: d.activity_trend.active, borderColor: palette[0], backgroundColor: 'rgba(88,101,242,0.1)', fill: true, tension: 0.3 },
+      { label: 'New', data: d.activity_trend.new, borderColor: palette[1], backgroundColor: 'rgba(67,181,129,0.1)', fill: true, tension: 0.3 },
+    ]}, options: chartOpts(),
   });
 }
-
 function renderGames(d) {
-  if (!d.games.length) {
-    document.getElementById('games-table').innerHTML = '<p style="color:var(--muted);padding:20px;">No game data yet.</p>';
-    return;
-  }
-  const rows = d.games.map(g => `<tr>
-    <td>${g.name}</td>
-    <td class="num">${fmt(g.plays)}</td>
-    <td class="num" style="color:var(--green)">${fmt(g.wins)}</td>
-    <td class="num" style="color:var(--red)">${fmt(g.losses)}</td>
-    <td class="num">${g.win_rate}%</td>
-    <td class="num right">${fmt(g.total_payout)}</td>
-    <td class="num right">${fmt(g.biggest_payout)}</td>
-  </tr>`).join('');
-  document.getElementById('games-table').innerHTML = `<table><thead><tr>
-    <th>Game</th><th>Plays</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th class="right">Total Payout</th><th class="right">Biggest</th>
-  </tr></thead><tbody>${rows}</tbody></table>`;
+  if (!d.games.length) { document.getElementById('games-table').innerHTML = '<p style="color:var(--muted);padding:20px;">No game data yet.</p>'; return; }
+  const rows = d.games.map(g => `<tr><td>${g.name}</td><td class="num">${fmt(g.plays)}</td><td class="num" style="color:var(--green)">${fmt(g.wins)}</td><td class="num" style="color:var(--red)">${fmt(g.losses)}</td><td class="num">${g.win_rate}%</td><td class="num right">${fmt(g.total_payout)}</td><td class="num right">${fmt(g.biggest_payout)}</td></tr>`).join('');
+  document.getElementById('games-table').innerHTML = `<table><thead><tr><th>Game</th><th>Plays</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th class="right">Total Payout</th><th class="right">Biggest</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-
 function renderFeatures(d) {
   destroyChart('features-chart');
   const feats = Object.entries(d.feature_usage || {});
   charts['features-chart'] = new Chart(document.getElementById('features-chart'), {
     type: 'bar',
-    data: {
-      labels: feats.map(([k,_]) => k),
-      datasets: [{ label: 'Uses', data: feats.map(([_,v]) => v), backgroundColor: palette }],
-    },
+    data: { labels: feats.map(([k,_]) => k), datasets: [{ label: 'Uses', data: feats.map(([_,v]) => v), backgroundColor: palette }] },
     options: chartOpts(),
   });
 }
-
 function renderFeed(d) {
-  if (!d.activity_feed.length) {
-    document.getElementById('activity-feed').innerHTML = '<p style="color:var(--muted);padding:20px;">No activity yet.</p>';
-    return;
-  }
-  const html = d.activity_feed.map(e => `<div class="feed-item">
-    <div><span class="feed-user">${e.user_name}</span> <span class="feed-detail">${e.detail}</span></div>
-    <div class="feed-time">${timeAgo(e.ts)}</div>
-  </div>`).join('');
-  document.getElementById('activity-feed').innerHTML = html;
+  if (!d.activity_feed.length) { document.getElementById('activity-feed').innerHTML = '<p style="color:var(--muted);padding:20px;">No activity yet.</p>'; return; }
+  document.getElementById('activity-feed').innerHTML = d.activity_feed.map(e => `<div class="feed-item"><div><span class="feed-user">${e.user_name}</span> ${e.detail}</div><div class="feed-time">${timeAgo(e.ts)}</div></div>`).join('');
 }
-
 function chartOpts(forDoughnut) {
   return {
-    responsive: true,
-    maintainAspectRatio: true,
-    plugins: {
-      legend: { labels: { color: '#e6e6e6' } },
-    },
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: { labels: { color: '#e6e6e6' } } },
     scales: forDoughnut ? {} : {
       y: { beginAtZero: true, ticks: { color: '#8a8a92' }, grid: { color: '#2a2a2f' } },
       x: { ticks: { color: '#8a8a92' }, grid: { color: '#2a2a2f' } },
     },
   };
 }
-
-// Tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -697,9 +518,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
   });
 });
-
 loadStats();
-// Auto-refresh every 60s
 setInterval(loadStats, 60_000);
 </script>
 </body>
@@ -707,7 +526,15 @@ setInterval(loadStats, 60_000);
 """
 
 
-# ── Entry ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+def start_dashboard(port: int = 8080):
+    """Run the Flask server. Called from bot.py on a background thread."""
+    log.info("Starting dashboard on port %s", port)
+    # Use waitress if available (production-quality), else Flask dev server
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port, threads=4)
+    except ImportError:
+        # Suppress Flask dev-server "WARNING: This is a development server" noise
+        import logging as logging_mod
+        logging_mod.getLogger("werkzeug").setLevel(logging_mod.ERROR)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
