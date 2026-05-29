@@ -3352,6 +3352,11 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
         value=(badges or "_none yet — try /achievements_"),
         inline=False,
     )
+    # Show next-step suggestion only if checking your own balance
+    if target.id == interaction.user.id:
+        suggestion = suggest_next_step(target.id)
+        if suggestion:
+            embed.add_field(name="💡 Next Step", value=suggestion, inline=False)
     await interaction.response.send_message(embed=embed)
 
 
@@ -3391,10 +3396,12 @@ async def daily_command(interaction: discord.Interaction):
     bonus_text = ""
     if bonus_pct or passive:
         bonus_text = f"\n_(+{bonus_pct}% bonus, +{passive} passive)_"
+    suggestion = suggest_next_step(user.id)
+    tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
         f"🎁 **DAILY REWARD!**\n\n"
         f"You found {COIN_EMOJI} **{final_reward:,}** coins!{bonus_text}\n"
-        f"Balance: **{new_bal:,}**"
+        f"Balance: **{new_bal:,}**{tip}"
     )
     # Achievements
     await trigger_daily_claim(user.id, channel=interaction.channel)
@@ -3433,10 +3440,12 @@ async def weekly_command(interaction: discord.Interaction):
     await edit("💸 *...counting...*")
     await asyncio.sleep(1.0)
     new_bal = economy.add(user.id, reward, "weekly")
+    suggestion = suggest_next_step(user.id)
+    tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
         f"💎 **WEEKLY REWARD!**\n\n"
         f"You scored {COIN_EMOJI} **{reward:,}** coins!\n"
-        f"Balance: **{new_bal:,}**"
+        f"Balance: **{new_bal:,}**{tip}"
     )
 
 
@@ -3489,10 +3498,12 @@ async def work_command(interaction: discord.Interaction):
     await edit(f"{emoji} *Almost done at {job}...*")
     await asyncio.sleep(1.0)
     new_bal = economy.add(user.id, reward, "work")
+    suggestion = suggest_next_step(user.id)
+    tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
         f"{emoji} **JOB COMPLETE!**\n\n"
         f"You worked at *{job}* and earned {COIN_EMOJI} **{reward:,}** coins.\n"
-        f"Balance: **{new_bal:,}**"
+        f"Balance: **{new_bal:,}**{tip}"
     )
     await trigger_work_used(user.id, channel=interaction.channel)
     await trigger_balance_check(user.id, channel=interaction.channel)
@@ -3548,6 +3559,7 @@ async def beg_command(interaction: discord.Interaction):
         f"🥺 **BEG SUCCESS**\n\n"
         f"{random.choice(flavors)}\n"
         f"Balance: **{new_bal:,}**"
+        + (f"\n\n{suggest_next_step(user.id)}" if suggest_next_step(user.id) else "")
     )
 
 
@@ -13191,6 +13203,78 @@ async def _run_heist(interaction, channel_id, heist_msg, crew, crew_specialists,
             pass
 
     ACTIVE_HEIST_CREW.pop(channel_id, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💡 SUGGEST NEXT STEP
+# Shows contextual "next purchase" tips after earning commands.
+# Drives progression: balance → pet → business → nightlife → empire.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def suggest_next_step(user_id: int) -> str:
+    """Return a contextual next-goal tip based on what the user already owns.
+    Returns a short formatted string or empty if user has it all."""
+    bal = economy.balance(user_id)
+    pets = _load_pets()
+    has_pet = str(user_id) in pets
+    user_bizs = _user_businesses(user_id)
+    has_business = len(user_bizs) > 0
+    user_venues = _user_venues(user_id)
+    has_venue = len(user_venues) > 0
+
+    # Pet collect available? (passive income waiting)
+    if has_pet:
+        pet = pets[str(user_id)]
+        level = _pet_level(pet["xp"])
+        hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
+        pending = int(level * PET_DAILY_INCOME_BASE * (hours_since / 24))
+        if _pet_hunger(pet) < 30:
+            pending = pending // 2
+        if pending >= 100:
+            return f"💰 _Your pet has **{pending:,}** coins waiting! Run `/collect`._"
+
+    # Business pending?
+    if has_business:
+        total_pending = sum(_business_pending_income(b) for b in user_bizs)
+        if total_pending >= 500:
+            return f"💰 _Your businesses have **{total_pending:,}** coins pending! Run `/collectbusiness`._"
+
+    # Venue pending?
+    if has_venue:
+        total_pending = sum(_venue_pending_income(v) for v in user_venues)
+        if total_pending >= 500:
+            return f"💰 _Your venues have **{total_pending:,}** coins pending! Run `/collectvenue`._"
+
+    # Progressive suggestions by balance + ownership
+    if not has_pet and bal >= 1_500:
+        return f"🐶 _You can afford a pet (1,500 coins)! Use `/adopt` for passive income._"
+    if not has_business and bal >= 2_000:
+        return f"🏢 _Buy your first business with `/buybusiness`! Lemonade Stand = 2,000._"
+    if not has_pet and bal < 1_500:
+        return f"🐶 _Save up to **1,500** for your first pet (`/adopt`). Earns coins 24/7._"
+    if not has_business and bal < 2_000:
+        return f"🏢 _Save up to **2,000** for your first business (`/buybusiness`)._"
+
+    # Has both pet and business — push to nightlife
+    if has_pet and has_business and not has_venue:
+        if bal >= 5_000:
+            return f"🌃 _Open a Dive Bar (5,000) with `/buyvenue` to scale up your empire._"
+        else:
+            return f"🌃 _Save up to **5,000** to open your first bar (`/buyvenue`)._"
+
+    # Has everything — push to dealer game / heist / shop perks
+    if has_pet and has_business and has_venue:
+        # Suggest based on balance
+        if bal >= 50_000:
+            return f"🦹 _Try a heist! `/targets` to see jobs. Or hit `/shop` for boosts._"
+        if bal >= 10_000:
+            return f"💊 _Try the dealer game with `/dealer` — fast cash if you can dodge cops._"
+        return f"🏆 _Run `/quests` for daily bonuses or `/tournament` to chase the weekly prize._"
+
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @tree.command(name="commands", description="See all bot commands organized by category.")
