@@ -2980,127 +2980,6 @@ HEIST_LOOT = [
     ("📿", "pearl necklace"), ("🪙", "gold coin"),
 ]
 
-@tree.command(name="heistquick", description="Quick crew heist (2-5 players). Simple lobby-based loot game.")
-@discord.app_commands.describe(crew1="Crew member", crew2="Crew member", crew3="Crew member", crew4="Crew member")
-async def heist_command(
-    interaction: discord.Interaction,
-    crew1: discord.Member,
-    crew2: discord.Member = None,
-    crew3: discord.Member = None,
-    crew4: discord.Member = None,
-):
-    silent = discord.AllowedMentions.none()
-    starter = interaction.user
-    candidates = [starter, crew1, crew2, crew3, crew4]
-    seen = set()
-    crew = []
-    for u in candidates:
-        if u and u.id not in seen and not u.bot:
-            seen.add(u.id)
-            crew.append(u)
-    if len(crew) < 2:
-        await interaction.response.send_message("Need at least 2 unique crew members.", ephemeral=True)
-        return
-
-    await interaction.response.defer()
-
-    async def edit(content):
-        try:
-            await interaction.edit_original_response(content=content, allowed_mentions=silent)
-        except Exception:
-            pass
-
-    crew_str = ", ".join(p.mention for p in crew)
-    await edit(f"🚐 **THE HEIST BEGINS**\n\n{crew_str} pull up to the bank...")
-    await asyncio.sleep(2.0)
-
-    stages = [
-        "🔍 Scoping the perimeter...",
-        "💣 Planting the explosives...",
-        "🚨 ALARMS TRIGGERED!",
-        "🏃 Crew runs into the vault!",
-        "💰 Cracking the safe...",
-    ]
-    for stage in stages:
-        await edit(f"🚐 **HEIST IN PROGRESS**\n\n{crew_str}\n\n{stage}")
-        await asyncio.sleep(1.6)
-
-    # 15% chance the heist fails
-    if random.random() < 0.15:
-        caught = random.choice(crew)
-        # Caught crew member pays a fine
-        fine = min(300, economy.balance(caught.id))
-        economy.add(caught.id, -fine, "heist caught")
-        for p in crew:
-            economy.record_loss(p.id)
-        final = (
-            f"🚔 **HEIST FAILED!**\n\n"
-            f"The cops showed up. {caught.mention} got pinned to the wall.\n"
-            f"The rest of the crew escaped with **NOTHING**.\n"
-            f"💀 {caught.display_name} paid a **{fine:,}** coin fine.\n\n"
-            f"The crew: {crew_str}"
-        )
-        try:
-            await interaction.edit_original_response(content=final)
-        except Exception:
-            pass
-        return
-
-    # Otherwise everyone gets a random share — REAL coins now
-    payouts = []
-    total = 0
-    for p in crew:
-        amount = random.randint(200, 1500)
-        loot_emoji, loot_name = random.choice(HEIST_LOOT)
-        economy.add(p.id, amount, "heist payout")
-        economy.record_win(p.id)
-        await trigger_game_win(p.id, "heist", channel=interaction.channel)
-        await trigger_balance_check(p.id, channel=interaction.channel)
-        payouts.append((p, amount, loot_emoji, loot_name))
-        total += amount
-
-    # Sort by haul descending
-    payouts.sort(key=lambda x: x[1], reverse=True)
-    biggest = payouts[0]
-
-    payout_lines = "\n".join(
-        f"{['👑','🥈','🥉','🎖️','🎖️'][i] if i < 5 else '•'} {p.mention} — 💰 **{amt:,}** coins {emoji} _{name}_"
-        for i, (p, amt, emoji, name) in enumerate(payouts)
-    )
-
-    final = (
-        f"💰 **HEIST SUCCESSFUL!** 💰\n\n"
-        f"The crew got out clean with **{total:,}** coins in loot!\n\n"
-        f"**Cuts:**\n{payout_lines}\n\n"
-        f"🏆 {biggest[0].mention} took the biggest haul."
-    )
-    try:
-        await interaction.edit_original_response(content=final)
-    except Exception:
-        pass
-
-
-# ── 💻 /hack ─────────────────────────────────────────────────────────────────
-HACK_FAKE_FINDINGS = [
-    "browser history: 7,432 pages of *cat videos*",
-    "Spotify wrapped: 'Mr. Brightside' (843 plays)",
-    "screen time average: 11h 47m daily 💀",
-    "Twitter drafts folder: 23 unsent posts",
-    "Photos folder: 89% screenshots",
-    "search history: 'how to talk to women'",
-    "deleted texts to ex: 47",
-    "$3,800 spent on Uber Eats this month",
-    "DoorDash account: 'extra ranch' on every order",
-    "Notes app: 'business ideas' (empty since 2021)",
-    "TikTok For You Page: BRAINROT detected",
-    "Apple Wallet: 1 punch card to a closed café",
-    "draft text to mom: 'pls send money'",
-    "Google search: 'is it normal to-' x 200",
-    "iCloud full of blurry concert videos",
-    "Steam library: 487 games, 2 played",
-    "screenshot of an email from 2019 still saved",
-    "$0.32 in checking, $4,200 on a credit card",
-]
 
 @tree.command(name="hack", description="Hack into a user's most embarrassing data.")
 @discord.app_commands.describe(target="Who to hack")
@@ -12175,7 +12054,7 @@ async def stylepreview_command(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🎨 All Channel Name Styles",
-        description="_Sample input: `main`. Pick a style key for `/renamechannelsadvanced`._",
+        description="_Sample input: `main`. Pick a style key and use it as `/renamechannels style:<key>`._",
         color=discord.Color.blurple(),
     )
     for i, chunk in enumerate(chunks, 1):
@@ -12185,99 +12064,7 @@ async def stylepreview_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ── /renamechannelsadvanced — free-text style for full 48 list ───────────────
-@tree.command(name="renamechannelsadvanced", description="🛠️ ADMIN: rename channels with ANY style (type the style key).")
-@discord.app_commands.describe(
-    style_key="Style key (run /stylepreview to see all 48 options)",
-    category="Limit to one category (optional)",
-    confirm="True to apply. Default = preview only.",
-)
-async def renamechannelsadvanced_command(
-    interaction: discord.Interaction,
-    style_key: str,
-    category: discord.CategoryChannel = None,
-    confirm: bool = False,
-):
-    cfg = load_config()
-    is_boss = str(interaction.user.id) in cfg.get("respected_users", [])
-    has_perm = interaction.user.guild_permissions.manage_channels if interaction.guild else False
-    if not (is_boss or has_perm):
-        await interaction.response.send_message(
-            "❌ You need **Manage Channels** permission to use this.",
-            ephemeral=True,
-        )
-        return
-    if not interaction.guild:
-        await interaction.response.send_message("Server-only.", ephemeral=True)
-        return
-
-    style_value = style_key.strip().lower()
-    # Validate by rendering a test
-    test_render = _format_channel_name("test", style_value)
-    if test_render == "test" and style_value not in ("plain", "lowercase"):
-        await interaction.response.send_message(
-            f"❌ Unknown style key `{style_value}`. Run `/stylepreview` to see all options.",
-            ephemeral=True,
-        )
-        return
-
-    targets = []
-    channels_to_check = category.channels if category else interaction.guild.text_channels
-    for ch in channels_to_check:
-        if not isinstance(ch, discord.TextChannel):
-            continue
-        new_name = _format_channel_name(ch.name, style_value)[:100]
-        if new_name != ch.name:
-            targets.append((ch, ch.name, new_name))
-
-    if not targets:
-        await interaction.response.send_message(
-            "✅ Nothing to rename — all channels already match.", ephemeral=True
-        )
-        return
-
-    preview = "\n".join(f"`{old}` → `{new}`" for ch, old, new in targets)
-    embed = discord.Embed(
-        title=f"🛠️ Rename ({style_value}) " + ("— APPLIED" if confirm else "— PREVIEW"),
-        description=preview[:4000],
-        color=discord.Color.green() if confirm else discord.Color.gold(),
-    )
-    embed.add_field(name="📊 Count", value=f"{len(targets)} channel(s)", inline=False)
-
-    if not confirm:
-        embed.add_field(
-            name="⚠️ Preview only",
-            value="Re-run with `confirm:True` to apply.",
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    renamed = 0
-    failed = []
-    for ch, old, new in targets:
-        try:
-            await ch.edit(name=new, reason=f"Bulk rename by {interaction.user} ({interaction.user.id})")
-            renamed += 1
-            await asyncio.sleep(0.5)
-        except discord.Forbidden:
-            failed.append(f"`{old}` — no permission")
-        except discord.HTTPException as e:
-            failed.append(f"`{old}` — {e.text[:80] if hasattr(e,'text') else str(e)[:80]}")
-        except Exception as e:
-            failed.append(f"`{old}` — {str(e)[:80]}")
-
-    result = discord.Embed(
-        title="✅ Complete" if not failed else "⚠️ Partial",
-        description=f"**{renamed}** channel(s) renamed.",
-        color=discord.Color.green() if not failed else discord.Color.orange(),
-    )
-    if failed:
-        result.add_field(name=f"❌ Failed ({len(failed)})", value="\n".join(failed[:10])[:1024], inline=False)
-    await interaction.followup.send(embed=result, ephemeral=True)
-
-
+# ── /setnotifchannel — admin sets where bot notifications post ───────────────
 @tree.command(name="setnotifchannel", description="🛠️ ADMIN: set the channel where all bot notifications post.")
 @discord.app_commands.describe(channel="The channel for events, recaps, tournaments, etc.")
 async def setnotifchannel_command(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -13484,7 +13271,7 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
             "color": discord.Color.purple(),
             "fields": [
                 ("Casino", "`/slots` Spin the slots\n`/blackjack` Beat the dealer\n`/wheel` Wheel of fortune\n`/casino` Browse casino games"),
-                ("Multiplayer PvP", "`/duel` Quick 1v1 duel\n`/fight` 60s fight w/ spectator bets\n`/gun` Russian roulette (2-4p)\n`/heistquick` Quick crew heist"),
+                ("Multiplayer PvP", "`/duel` Quick 1v1 duel\n`/fight` 60s fight w/ spectator bets\n`/gun` Russian roulette (2-4p)"),
                 ("Lobby Games", "`/rs` Race tag (up to 3)\n`/shootout` Lobby + doors\n`/bomb` Hot potato\n`/connect4` Classic Connect 4\n`/rps` Rock-paper-scissors\n`/rps-tournament` Bracket RPS\n`/lieordie` Lie detector"),
                 ("Fun & Solo", "`/roll` Dice\n`/flip` Coin flip\n`/8ball` Magic 8-ball\n`/rate` Get rated\n`/ship` Ship two users\n`/quest` AI choose-adventure"),
                 ("AI Roleplay", "`/court` Criminal trial (no $)\n`/lawsuit` Civil suit (real $)\n`/tarot` Tarot reading\n`/roast` AI roast\n`/bio` Generate a bio\n`/analyze` Analyze a user\n`/hack` Pretend hack"),
@@ -13783,7 +13570,6 @@ PREFIX_COMMANDS = {
     "connect4":     ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
     "c4":           ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
     "gun":          ("gun",           [{"name":"player2","type":"user","required":True},{"name":"player3","type":"user","required":False,"default":None},{"name":"player4","type":"user","required":False,"default":None}]),
-    "heistquick":   ("heistquick",    [{"name":"crew1","type":"user","required":True},{"name":"crew2","type":"user","required":False,"default":None},{"name":"crew3","type":"user","required":False,"default":None},{"name":"crew4","type":"user","required":False,"default":None}]),
     # AI
     "roast":        ("roast",         [{"name":"user","type":"user","required":True}]),
     "bio":          ("bio",           [{"name":"user","type":"user","required":True}]),
