@@ -2980,7 +2980,7 @@ HEIST_LOOT = [
     ("📿", "pearl necklace"), ("🪙", "gold coin"),
 ]
 
-@tree.command(name="heist", description="Pull off a bank heist with your crew.")
+@tree.command(name="heistquick", description="Quick crew heist (2-5 players). Simple lobby-based loot game.")
 @discord.app_commands.describe(crew1="Crew member", crew2="Crew member", crew3="Crew member", crew4="Crew member")
 async def heist_command(
     interaction: discord.Interaction,
@@ -12804,178 +12804,808 @@ async def transcribetoggle_command(
         )
 
 
-@tree.command(name="commands", description="List all available bot commands.")
-async def commands_command(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎮 Bot Commands", color=discord.Color.blurple())
-    embed.add_field(
-        name="💰 ECONOMY",
-        value=(
-            "`/balance` Check coins\n"
-            "`/daily` Daily reward\n"
-            "`/weekly` Weekly reward\n"
-            "`/work` Earn from a job\n"
-            "`/beg` Beg for change\n"
-            "`/rob` Try to rob someone\n"
-            "`/pay` Send coins\n"
-            "`/bet` Coinflip wager\n"
-            "`/leaderboard` Richest users"
-        ),
-        inline=False
+# ─────────────────────────────────────────────────────────────────────────────
+# 🦹 HEIST CREW — Multi-step heists with hired specialists
+# 6 targets, 6 specialist roles, 5-phase live narration, partial-failure payouts
+# ─────────────────────────────────────────────────────────────────────────────
+HEIST_CREW_FILE = MEMORY_DIR / "heist_crew.json"
+
+# Specialists — each has a base success chance per role
+SPECIALISTS = {
+    "safecracker": {"emoji": "🔓", "name": "Safecracker", "desc": "Cracks vaults & safes."},
+    "hacker":      {"emoji": "💻", "name": "Hacker",      "desc": "Disables alarms & security."},
+    "driver":      {"emoji": "🚗", "name": "Driver",      "desc": "Getaway and escape rolls."},
+    "demolitions": {"emoji": "💣", "name": "Demolitions", "desc": "Blows open shortcuts & bonus vaults."},
+    "lookout":     {"emoji": "👁️", "name": "Lookout",    "desc": "Early warning + casing rolls."},
+    "conman":      {"emoji": "🎭", "name": "Conman",      "desc": "Bypasses guards & security checks."},
+}
+
+# Tiers — multiplier on hire cost & boost magnitude
+SPECIALIST_TIERS = {
+    "rookie":  {"name": "Rookie", "cost_mult": 1.0, "boost": 0.0, "emoji": "⚪"},
+    "pro":     {"name": "Pro",    "cost_mult": 3.0, "boost": 0.15, "emoji": "🔵"},
+    "legend":  {"name": "Legend", "cost_mult": 8.0, "boost": 0.30, "emoji": "🟣"},
+}
+SPECIALIST_BASE_COST = 500  # rookie cost; multiplied by tier
+
+# Heist targets — required specialists per phase, payout range
+HEIST_TARGETS = {
+    "convenience": {
+        "emoji": "🏪", "name": "Convenience Store",
+        "min_crew": 1, "max_crew": 2,
+        "required_specialists": [],
+        "useful_specialists": ["driver"],
+        "payout_min": 500,  "payout_max": 2_000,
+        "cooldown_hours": 0.5,
+        "fail_fine_pct": 0.05,
+        "tier": 1,
+        "desc": "Easy in-and-out. Low loot, low risk.",
+    },
+    "bank": {
+        "emoji": "🏦", "name": "Local Bank",
+        "min_crew": 2, "max_crew": 4,
+        "required_specialists": ["driver"],
+        "useful_specialists": ["safecracker", "lookout"],
+        "payout_min": 3_000, "payout_max": 10_000,
+        "cooldown_hours": 2,
+        "fail_fine_pct": 0.10,
+        "tier": 2,
+        "desc": "Classic bank job. Need a getaway driver.",
+    },
+    "jewelry": {
+        "emoji": "💎", "name": "Jewelry Store",
+        "min_crew": 2, "max_crew": 3,
+        "required_specialists": ["safecracker"],
+        "useful_specialists": ["lookout", "driver"],
+        "payout_min": 8_000, "payout_max": 25_000,
+        "cooldown_hours": 3,
+        "fail_fine_pct": 0.10,
+        "tier": 3,
+        "desc": "Smash the cases. Need a cracker for the back safe.",
+    },
+    "casino": {
+        "emoji": "🎰", "name": "Casino Vault",
+        "min_crew": 4, "max_crew": 6,
+        "required_specialists": ["hacker", "driver", "safecracker"],
+        "useful_specialists": ["lookout", "conman"],
+        "payout_min": 30_000, "payout_max": 100_000,
+        "cooldown_hours": 12,
+        "fail_fine_pct": 0.15,
+        "tier": 4,
+        "desc": "Ocean's Eleven energy. Big crew, bigger take.",
+    },
+    "crypto": {
+        "emoji": "💰", "name": "Crypto Exchange",
+        "min_crew": 4, "max_crew": 5,
+        "required_specialists": ["hacker", "conman"],
+        "useful_specialists": ["demolitions", "lookout"],
+        "payout_min": 100_000, "payout_max": 300_000,
+        "cooldown_hours": 24,
+        "fail_fine_pct": 0.20,
+        "tier": 5,
+        "desc": "Pull the keys off cold storage. Total digital heist.",
+    },
+    "federal": {
+        "emoji": "🏛️", "name": "Federal Reserve",
+        "min_crew": 5, "max_crew": 6,
+        "required_specialists": ["safecracker", "hacker", "driver", "demolitions", "lookout"],
+        "useful_specialists": ["conman"],
+        "payout_min": 200_000, "payout_max": 500_000,
+        "cooldown_hours": 48,
+        "fail_fine_pct": 0.25,
+        "tier": 6,
+        "desc": "The ultimate score. Don't even THINK about going in light.",
+    },
+}
+
+# Phase definitions per target (which specialist handles each phase)
+HEIST_PHASES_BY_TARGET = {
+    "convenience": [
+        ("👀", "Casing the joint",   "lookout"),
+        ("🚪", "Cracking the safe",  None),  # No specialist needed
+        ("🚓", "Cops arrive — escape!", "driver"),
+    ],
+    "bank": [
+        ("👀", "Casing the bank",        "lookout"),
+        ("💻", "Disabling silent alarm", "hacker"),
+        ("🔓", "Cracking the vault",     "safecracker"),
+        ("🚓", "Cops responding — escape!", "driver"),
+    ],
+    "jewelry": [
+        ("👀", "Casing the storefront",     "lookout"),
+        ("💎", "Smashing display cases",    None),
+        ("🔓", "Opening the back safe",     "safecracker"),
+        ("🚓", "Slipping out the back",     "driver"),
+    ],
+    "casino": [
+        ("🎭", "Talking past front security", "conman"),
+        ("💻", "Killing the cameras",          "hacker"),
+        ("👁️", "Tracking the guards",         "lookout"),
+        ("🔓", "Cracking the vault",           "safecracker"),
+        ("🚓", "Escape through the parking deck", "driver"),
+    ],
+    "crypto": [
+        ("🎭", "Social engineering the CEO",   "conman"),
+        ("💻", "Breaching the network",        "hacker"),
+        ("💣", "Blowing the cold storage room","demolitions"),
+        ("💻", "Transferring funds",           "hacker"),
+        ("👁️", "Watching for feds",           "lookout"),
+    ],
+    "federal": [
+        ("👁️", "Casing the Fed building",   "lookout"),
+        ("🎭", "Slipping past badge scanners","conman"),
+        ("💻", "Cutting building security",  "hacker"),
+        ("💣", "Blowing the inner blast door","demolitions"),
+        ("🔓", "Cracking the gold vault",    "safecracker"),
+        ("🚓", "Escape from the National Guard", "driver"),
+    ],
+}
+
+HEIST_CREW_INVITE_TIMEOUT = 90  # seconds to wait for crew accepts
+HEIST_PHASE_DELAY = 4  # seconds between phases for drama
+ACTIVE_HEIST_CREW: dict[str, dict] = {}  # channel_id -> heist state
+
+
+def _load_heist_crew() -> dict:
+    if HEIST_CREW_FILE.exists():
+        try:
+            with open(HEIST_CREW_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_heist_crew(data: dict):
+    with open(HEIST_CREW_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _user_heist_record(user_id: int) -> dict:
+    data = _load_heist_crew()
+    uid = str(user_id)
+    if uid not in data["users"]:
+        data["users"][uid] = {
+            "specialists": {},  # role -> tier (most recent hire)
+            "last_heist": {},   # target_key -> timestamp
+            "lifetime_heists": 0,
+            "lifetime_loot": 0,
+            "jail_until": 0,
+        }
+        _save_heist_crew(data)
+    return data["users"][uid]
+
+
+def _specialist_cost(role: str, tier: str) -> int:
+    base = SPECIALIST_BASE_COST
+    return int(base * SPECIALIST_TIERS[tier]["cost_mult"])
+
+
+# ── /hire_specialist ─────────────────────────────────────────────────────────
+@tree.command(name="hire_specialist", description="🦹 Hire a specialist for upcoming heists.")
+@discord.app_commands.describe(
+    role="Which specialist",
+    tier="Tier (better = more expensive but more reliable)",
+)
+@discord.app_commands.choices(
+    role=[
+        discord.app_commands.Choice(name=f"{s['emoji']} {s['name']} — {s['desc']}", value=k)
+        for k, s in SPECIALISTS.items()
+    ],
+    tier=[
+        discord.app_commands.Choice(name=f"{t['emoji']} {t['name']} (+{int(t['boost']*100)}% boost)", value=k)
+        for k, t in SPECIALIST_TIERS.items()
+    ],
+)
+async def hire_specialist_command(
+    interaction: discord.Interaction,
+    role: discord.app_commands.Choice[str],
+    tier: discord.app_commands.Choice[str],
+):
+    user = interaction.user
+    role_key = role.value
+    tier_key = tier.value
+    cost = _specialist_cost(role_key, tier_key)
+
+    if economy.balance(user.id) < cost:
+        await interaction.response.send_message(
+            f"❌ This {SPECIALIST_TIERS[tier_key]['name']} {SPECIALISTS[role_key]['name']} "
+            f"costs **{cost:,}** coins. You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    data = _load_heist_crew()
+    record = data["users"].setdefault(str(user.id), {
+        "specialists": {}, "last_heist": {}, "lifetime_heists": 0,
+        "lifetime_loot": 0, "jail_until": 0,
+    })
+
+    # Upgrading? If current tier is same or better, warn
+    current = record["specialists"].get(role_key)
+    if current:
+        current_idx = list(SPECIALIST_TIERS).index(current)
+        new_idx = list(SPECIALIST_TIERS).index(tier_key)
+        if new_idx <= current_idx:
+            await interaction.response.send_message(
+                f"❌ You already have a {SPECIALIST_TIERS[current]['name']} "
+                f"{SPECIALISTS[role_key]['name']}. Hiring a lower-tier replacement would downgrade you.",
+                ephemeral=True,
+            )
+            return
+
+    economy.add(user.id, -cost, f"hire {role_key} {tier_key}")
+    record["specialists"][role_key] = tier_key
+    _save_heist_crew(data)
+
+    info = SPECIALISTS[role_key]
+    tier_info = SPECIALIST_TIERS[tier_key]
+    await interaction.response.send_message(
+        f"# {info['emoji']} {tier_info['name'].upper()} {info['name'].upper()} HIRED\n\n"
+        f"💰 Cost: **{cost:,}** coins\n"
+        f"📈 Boost: **+{int(tier_info['boost']*100)}%** to {info['name'].lower()} rolls\n"
+        f"💡 _Specialists persist between heists. They get fired only if you replace them._"
     )
-    embed.add_field(
-        name="🏆 PROGRESSION",
-        value=(
-            "`/level` Your XP, level, and title\n"
-            "`/achievements` View earned badges + perks\n"
-            "`/tournament` Weekly leaderboard\n"
-            "`/quests` Daily & weekly missions\n"
-            "`/claimquest` Claim completed quests\n"
-            "`/rep @user` Give someone reputation\n"
-            "`/reputation` Check rep score"
-        ),
-        inline=False,
+
+
+# ── /crew ────────────────────────────────────────────────────────────────────
+@tree.command(name="crew", description="🦹 View your current heist crew (specialists & stats).")
+@discord.app_commands.describe(user="Whose crew to view (defaults to you)")
+async def crew_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    record = _user_heist_record(target.id)
+    specialists = record.get("specialists", {})
+
+    embed = discord.Embed(
+        title=f"🦹 {target.display_name}'s Heist Crew",
+        color=discord.Color.dark_grey(),
     )
-    embed.add_field(
-        name="🐶 PETS",
-        value=(
-            "`/adopt` Get a pet (1,500 coins)\n"
-            "`/pet` Check your pet's stats\n"
-            "`/feed` Feed your pet (50 coins)\n"
-            "`/collect` Claim earnings\n"
-            "`/abandon` Give up your pet"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏢 BUSINESSES",
-        value=(
-            "`/buybusiness` Buy a business (8 types)\n"
-            "`/businesses` Your portfolio\n"
-            "`/collectbusiness` Claim earnings\n"
-            "`/hire` Hire an employee\n"
-            "`/fire` Fire an employee\n"
-            "`/sabotage` Sabotage a rival (risky!)"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="📬 DMS & SETTINGS",
-        value=(
-            "`/notifications` Toggle which events DM you\n"
-            "`/signature` 🎭 BOOSTER: set reaction for replies you get\n"
-            "`/signatureremove` Remove your signature\n"
-            "_Default: all DMs on (bounties, sabotage, loans, lottery wins, etc)_"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🛒 SHOP & REDEEM",
-        value=(
-            "**`/shop` — Interactive shop menu (everything in one place)**\n"
-            "`/buyrole` Colored Discord role\n"
-            "`/protect` 12h rob immunity\n"
-            "`/megaphone` Channel-wide announcement\n"
-            "`/lottery` Buy tickets / view jackpot\n"
-            "`/insurance` 48h business protection\n"
-            "`/vip` 7-day VIP badge 💎\n"
-            "`/xpboost` 2x XP for 24h\n"
-            "`/title` Set custom title\n"
-            "`/lotterymult` 2x next lottery win\n"
-            "`/petfood` 7-day pet food bundle\n"
-            "`/upgradebusiness` Permanent business boost\n"
-            "`/heisttools` +20% rob success 24h"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🌃 NIGHTLIFE EMPIRE",
-        value=(
-            "`/buyvenue` Open a bar/club (7 tiers)\n"
-            "`/venues` View your venues\n"
-            "`/collectvenue` Claim the night's take\n"
-            "`/hirestaff` Hire bartender/bouncer/DJ/promoter\n"
-            "`/stockliquor` Stock liquor for bonus sales"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="💊 DEALER GAME",
-        value=(
-            "**`/dealer` — Full dashboard (recommended!)**\n"
-            "`/buysupply` Buy product from the plug\n"
-            "`/sell` Sell to NPCs (builds heat)\n"
-            "`/stash` View inventory, heat, stats\n"
-            "`/streetprice` Today's market prices\n"
-            "`/laylow` Pay 500 to drop heat by 30\n"
-            "`/dealers` Top dealers leaderboard"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="💰 RISK / PvP",
-        value=(
-            "`/loan` Borrow coins from loan shark\n"
-            "`/repay` Pay back your loan\n"
-            "`/bounty @user amount` Place bounty\n"
-            "`/bounties` See active bounties"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🎲 GAMES (earn coins)",
-        value=(
-            "`/fight` Fight w/ spectator betting\n"
-            "`/lieordie` Vote True/False on AI fact\n"
-            "`/quest` AI choose-your-adventure\n"
-            "`/shootout` Door elimination\n"
-            "`/bomb` Hot potato\n"
-            "`/connect4` Connect 4 PvP\n"
-            "`/blackjack` Beat the dealer\n"
-            "`/casino` Casino menu\n"
-            "`/wheel` Wheel of fortune\n"
-            "`/crime` Random crime\n"
-            "`/rs` Race (tag racers)\n"
-            "`/duel` Pistol duel\n"
-            "`/gun` Russian roulette\n"
-            "`/heist` Bank heist crew\n"
-            "`/slots` Slot machine\n"
-            "`/rps-tournament` 4-player RPS"
-        ),
-        inline=True
-    )
-    embed.add_field(
-        name="🤖 AI",
-        value=(
-            "`/roast` Personalized roast\n"
-            "`/court` AI courtroom trial\n"
-            "`/lawsuit` Sue another user\n"
-            "`/bio` AI Tinder bio\n"
-            "`/tarot` 3-card tarot reading\n"
-            "`/analyze` Analyze your messages"
-        ),
-        inline=True
-    )
-    embed.add_field(
-        name="🎉 FUN",
-        value=(
-            "`/marry` Propose to a user\n"
-            "`/divorce` End a marriage\n"
-            "`/hack` Hack a user\n"
-            "`/ship` Ship two users\n"
-            "`/rate` Rate something /10\n"
-            "`/8ball` Magic 8-ball\n"
-            "`/rps` RPS vs bot\n"
-            "`/roll` Roll dice\n"
-            "`/flip` Coin flip"
-        ),
-        inline=True
-    )
-    embed.add_field(
-        name="💬 CHAT",
-        value="Mention me, reply, or say my name\n`!recap` `!clearhistory` `!botinfo`",
-        inline=False
-    )
+
+    if specialists:
+        lines = []
+        for role_key, tier_key in specialists.items():
+            info = SPECIALISTS[role_key]
+            tier_info = SPECIALIST_TIERS[tier_key]
+            lines.append(f"{info['emoji']} **{info['name']}** — {tier_info['emoji']} {tier_info['name']}")
+        embed.add_field(name="👥 Specialists", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(
+            name="👥 Specialists",
+            value="_No crew yet. Hire some with `/hire_specialist`._",
+            inline=False,
+        )
+
+    # Jail status
+    jail = record.get("jail_until", 0)
+    if jail > time.time():
+        remaining = int(jail - time.time())
+        embed.add_field(name="🚔 IN JAIL", value=f"Out in **{fmt_cooldown(remaining)}**", inline=False)
+
+    embed.add_field(name="🎯 Lifetime Heists", value=str(record.get("lifetime_heists", 0)), inline=True)
+    embed.add_field(name="💰 Lifetime Loot", value=f"{record.get('lifetime_loot', 0):,}", inline=True)
+
     await interaction.response.send_message(embed=embed)
+
+
+# ── /targets ─────────────────────────────────────────────────────────────────
+@tree.command(name="targets", description="🦹 View available heist targets and their requirements.")
+async def targets_command(interaction: discord.Interaction):
+    record = _user_heist_record(interaction.user.id)
+    user_specs = set(record.get("specialists", {}).keys())
+
+    embed = discord.Embed(
+        title="🎯 HEIST TARGETS",
+        description="_Pull these jobs with `/heist target:<name>`. Match specialists to the requirements._",
+        color=discord.Color.dark_red(),
+    )
+
+    for key, t in HEIST_TARGETS.items():
+        # Show what user is missing
+        required = set(t["required_specialists"])
+        missing = required - user_specs
+        if missing:
+            missing_str = ", ".join(SPECIALISTS[r]["name"] for r in missing)
+            status = f"❌ Missing: {missing_str}"
+        else:
+            status = "✅ Ready to pull"
+        # Cooldown
+        last = record.get("last_heist", {}).get(key, 0)
+        cd_remaining = (t["cooldown_hours"] * 3600) - (time.time() - last)
+        if cd_remaining > 0:
+            status += f" • ⏰ {fmt_cooldown(int(cd_remaining))}"
+
+        req_str = ", ".join(SPECIALISTS[r]["name"] for r in t["required_specialists"]) or "_none_"
+        useful_str = ", ".join(SPECIALISTS[r]["name"] for r in t["useful_specialists"]) or "_none_"
+
+        embed.add_field(
+            name=f"{t['emoji']} {t['name']} (Tier {t['tier']})",
+            value=(
+                f"💰 Loot: **{t['payout_min']:,}–{t['payout_max']:,}**\n"
+                f"👥 Crew: **{t['min_crew']}–{t['max_crew']}**\n"
+                f"⚠️ Required: {req_str}\n"
+                f"💡 Useful: {useful_str}\n"
+                f"{status}"
+            ),
+            inline=False,
+        )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /heist (the main event) ──────────────────────────────────────────────────
+@tree.command(name="heist", description="🦹 Plan a multi-phase heist with your crew. Big risk, big reward.")
+@discord.app_commands.describe(
+    target="Which target to hit",
+    crewmate1="Crewmate (required for most targets)",
+    crewmate2="Optional second crewmate",
+    crewmate3="Optional third crewmate",
+    crewmate4="Optional fourth crewmate",
+    crewmate5="Optional fifth crewmate",
+)
+@discord.app_commands.choices(
+    target=[
+        discord.app_commands.Choice(name=f"{t['emoji']} {t['name']} (Tier {t['tier']})", value=k)
+        for k, t in HEIST_TARGETS.items()
+    ]
+)
+async def heist_command(
+    interaction: discord.Interaction,
+    target: discord.app_commands.Choice[str],
+    crewmate1: discord.Member = None,
+    crewmate2: discord.Member = None,
+    crewmate3: discord.Member = None,
+    crewmate4: discord.Member = None,
+    crewmate5: discord.Member = None,
+):
+    user = interaction.user
+    target_key = target.value
+    t = HEIST_TARGETS[target_key]
+    channel_id = str(interaction.channel_id)
+
+    if channel_id in ACTIVE_HEIST_CREW:
+        await interaction.response.send_message(
+            "❌ A heist is already running in this channel.", ephemeral=True
+        )
+        return
+
+    # Build initial crew list (no duplicates, no bots, no self-duplicate)
+    crew = [user]
+    seen = {user.id}
+    for cm in [crewmate1, crewmate2, crewmate3, crewmate4, crewmate5]:
+        if cm is None or cm.bot or cm.id in seen:
+            continue
+        seen.add(cm.id)
+        crew.append(cm)
+
+    if len(crew) < t["min_crew"]:
+        await interaction.response.send_message(
+            f"❌ {t['name']} needs **{t['min_crew']}** crew minimum. You have {len(crew)}.",
+            ephemeral=True,
+        )
+        return
+    if len(crew) > t["max_crew"]:
+        crew = crew[:t["max_crew"]]
+
+    # Check leader's jail status
+    leader_record = _user_heist_record(user.id)
+    if leader_record.get("jail_until", 0) > time.time():
+        await interaction.response.send_message(
+            f"🚔 You're in jail until <t:{int(leader_record['jail_until'])}:R>.",
+            ephemeral=True,
+        )
+        return
+
+    # Cooldown for this target
+    last = leader_record.get("last_heist", {}).get(target_key, 0)
+    cd_remaining = (t["cooldown_hours"] * 3600) - (time.time() - last)
+    if cd_remaining > 0:
+        await interaction.response.send_message(
+            f"⏰ {t['name']} cooldown: **{fmt_cooldown(int(cd_remaining))}** left.",
+            ephemeral=True,
+        )
+        return
+
+    # Check required specialists across the WHOLE crew (any crewmate's specialists count)
+    crew_specialists = {}  # role_key -> best_tier_idx
+    crew_specialist_owners = {}  # role_key -> user_id
+    for member in crew:
+        m_record = _user_heist_record(member.id)
+        for role_key, tier_key in m_record.get("specialists", {}).items():
+            tier_idx = list(SPECIALIST_TIERS).index(tier_key)
+            if role_key not in crew_specialists or tier_idx > crew_specialists[role_key]:
+                crew_specialists[role_key] = tier_idx
+                crew_specialist_owners[role_key] = member.id
+
+    missing_required = [
+        r for r in t["required_specialists"] if r not in crew_specialists
+    ]
+    if missing_required:
+        names = ", ".join(SPECIALISTS[r]["name"] for r in missing_required)
+        await interaction.response.send_message(
+            f"❌ Crew is missing required specialist(s): **{names}**. "
+            f"Hire them with `/hire_specialist` or bring a crewmate who has them.",
+            ephemeral=True,
+        )
+        return
+
+    # Lock channel for heist
+    ACTIVE_HEIST_CREW[channel_id] = {
+        "leader": user.id,
+        "target": target_key,
+        "crew_ids": [m.id for m in crew],
+        "phase": "running",
+        "started_at": time.time(),
+    }
+
+    # Initial embed
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title=f"{t['emoji']} {t['name'].upper()} — INCOMING",
+            description=(
+                f"**Leader:** {user.mention}\n"
+                f"**Crew:** {', '.join(m.mention for m in crew)}\n"
+                f"**Specialists on deck:** " +
+                ", ".join(f"{SPECIALISTS[r]['emoji']} {SPECIALISTS[r]['name']} ({SPECIALIST_TIERS[list(SPECIALIST_TIERS)[tier_idx]]['emoji']})" for r, tier_idx in crew_specialists.items())
+            ),
+            color=discord.Color.dark_red(),
+        ),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    heist_msg = await interaction.original_response()
+    asyncio.create_task(_run_heist(interaction, channel_id, heist_msg, crew, crew_specialists, crew_specialist_owners))
+
+
+async def _run_heist(interaction, channel_id, heist_msg, crew, crew_specialists, crew_specialist_owners):
+    """Run the multi-phase heist animation."""
+    state = ACTIVE_HEIST_CREW.get(channel_id)
+    if not state:
+        return
+    target_key = state["target"]
+    t = HEIST_TARGETS[target_key]
+    phases = HEIST_PHASES_BY_TARGET[target_key]
+    leader = crew[0]
+
+    log_lines = []
+    phase_results = []  # True/False per phase
+    payout_share = 1.0  # multiplier — drops with each failure
+
+    for idx, (emoji, phase_name, required_role) in enumerate(phases):
+        await asyncio.sleep(HEIST_PHASE_DELAY)
+        # Compute success chance
+        base_success = 0.75
+        if required_role:
+            if required_role in crew_specialists:
+                tier_idx = crew_specialists[required_role]
+                tier_key = list(SPECIALIST_TIERS)[tier_idx]
+                base_success += SPECIALIST_TIERS[tier_key]["boost"]
+            else:
+                base_success = 0.40  # punishing if missing specialist for a phase
+        # Useful (non-required) specialists give small global bonus too
+        for useful_role in t["useful_specialists"]:
+            if useful_role in crew_specialists:
+                tier_idx = crew_specialists[useful_role]
+                tier_key = list(SPECIALIST_TIERS)[tier_idx]
+                base_success += SPECIALIST_TIERS[tier_key]["boost"] * 0.3
+        base_success = min(0.97, base_success)  # cap
+
+        success = random.random() < base_success
+        phase_results.append(success)
+
+        if success:
+            if required_role and required_role in crew_specialist_owners:
+                spec_owner = crew_specialist_owners[required_role]
+                log_lines.append(f"{emoji} **{phase_name}** — ✅ Pulled off by <@{spec_owner}>")
+            else:
+                log_lines.append(f"{emoji} **{phase_name}** — ✅ Smooth")
+        else:
+            log_lines.append(f"{emoji} **{phase_name}** — ❌ Bungled")
+            payout_share *= 0.6  # each failure costs 40% of payout
+            # Final phase failure (usually escape) = total bust
+            if idx == len(phases) - 1:
+                payout_share = 0
+
+        # Update embed
+        try:
+            await heist_msg.edit(
+                embed=discord.Embed(
+                    title=f"{t['emoji']} {t['name'].upper()} — IN PROGRESS",
+                    description=(
+                        f"**Crew:** {', '.join(m.mention for m in crew)}\n\n"
+                        + "\n".join(log_lines)
+                    ),
+                    color=discord.Color.gold(),
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+
+    # Calculate final payout
+    base_payout = random.randint(t["payout_min"], t["payout_max"])
+    final_payout = int(base_payout * payout_share)
+
+    # Last phase determines if cops catch them
+    last_succeeded = phase_results[-1]
+    failures = phase_results.count(False)
+    # Total bust = lose everything + jail time
+    total_bust = not last_succeeded
+
+    if total_bust:
+        # Leader pays fine + jail time
+        bal = economy.balance(leader.id)
+        fine = int(bal * t["fail_fine_pct"])
+        economy.add(leader.id, -fine, "heist failed")
+        # Jail leader for the cooldown
+        leader_record = _user_heist_record(leader.id)
+        leader_record["jail_until"] = time.time() + t["cooldown_hours"] * 3600
+        # Update last_heist so cooldown still works
+        leader_record["last_heist"][target_key] = time.time()
+        data = _load_heist_crew()
+        data["users"][str(leader.id)] = leader_record
+        _save_heist_crew(data)
+
+        try:
+            await heist_msg.edit(
+                embed=discord.Embed(
+                    title=f"🚔 BUSTED — {t['name'].upper()} FAILED",
+                    description=(
+                        f"**Crew:** {', '.join(m.mention for m in crew)}\n\n"
+                        + "\n".join(log_lines)
+                        + f"\n\n💀 {failures}/{len(phases)} phases failed. Cops caught the crew.\n"
+                        f"💸 {leader.mention} paid **{fine:,}** in fines.\n"
+                        f"🚔 Leader is in **jail for {t['cooldown_hours']}h**."
+                    ),
+                    color=discord.Color.dark_red(),
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+    else:
+        # Successful (maybe partial) — distribute payout
+        per_member = final_payout // len(crew) if len(crew) > 0 else 0
+        leader_record = _user_heist_record(leader.id)
+        leader_record["last_heist"][target_key] = time.time()
+        leader_record["lifetime_heists"] = leader_record.get("lifetime_heists", 0) + 1
+        leader_record["lifetime_loot"] = leader_record.get("lifetime_loot", 0) + final_payout
+
+        payout_lines = []
+        for m in crew:
+            economy.add(m.id, per_member, f"heist {target_key}")
+            payout_lines.append(f"💰 {m.mention} — +**{per_member:,}**")
+            # Quests/tournament tracking
+            try:
+                track_quest_progress(m.id, "coins_earned", per_member)
+                add_tournament_score(m.id, coins_earned=per_member, games_won=1)
+                await trigger_balance_check(m.id, channel=interaction.channel)
+            except Exception:
+                pass
+
+        # Save record
+        data = _load_heist_crew()
+        data["users"][str(leader.id)] = leader_record
+        _save_heist_crew(data)
+
+        title = f"💰 {t['name'].upper()} — SCORE!" if final_payout >= base_payout * 0.8 else f"⚠️ {t['name'].upper()} — PARTIAL"
+        try:
+            await heist_msg.edit(
+                embed=discord.Embed(
+                    title=title,
+                    description=(
+                        "\n".join(log_lines)
+                        + f"\n\n**Total take:** {final_payout:,} coins ({int(payout_share*100)}% of max)\n"
+                        + "\n".join(payout_lines)
+                    ),
+                    color=discord.Color.green() if final_payout >= base_payout * 0.8 else discord.Color.orange(),
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+
+    ACTIVE_HEIST_CREW.pop(channel_id, None)
+
+
+@tree.command(name="commands", description="See all bot commands organized by category.")
+async def commands_command(interaction: discord.Interaction):
+    embed = _build_commands_home_embed()
+    view = CommandsNavView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+def _build_commands_home_embed() -> discord.Embed:
+    """The 'start here' landing page."""
+    embed = discord.Embed(
+        title="\U0001F3AE Welcome to Jordan Belfort",
+        description=(
+            "_The full degen economy bot. Pick a category below to see commands._\n\n"
+            "**Use `/` to type any command, or `_` as a prefix shortcut (e.g. `_balance`)**"
+        ),
+        color=discord.Color.gold(),
+    )
+
+    embed.add_field(
+        name="\U0001F195 NEW HERE? START EARNING",
+        value=(
+            "1\u20E3 `/balance` \u2014 Check your wallet\n"
+            "2\u20E3 `/daily` \u2014 Free coins every 24h\n"
+            "3\u20E3 `/work` \u2014 Earn 50-250 every 45min\n"
+            "4\u20E3 `/weekly` \u2014 Big bonus every 7 days\n\n"
+            "_Goal: get to ~2,000 coins so you can adopt a pet or buy a business._"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="\U0001F4B0 NEXT: PASSIVE INCOME",
+        value=(
+            "**\U0001F436 Pets** \u2014 `/adopt` then `/pet` `/feed` `/collect`\n"
+            "**\U0001F3E2 Businesses** \u2014 `/buybusiness` then `/businesses` `/collectbusiness`\n"
+            "**\U0001F303 Nightlife** \u2014 `/buyvenue` then `/venues` `/collectvenue`\n\n"
+            "_Earn coins 24/7 even when you're offline._"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="\U0001F3AF AFTER THAT: PROGRESSION",
+        value=(
+            "`/level` \u2014 Your XP and rank\n"
+            "`/achievements` \u2014 Earn badges & perks\n"
+            "`/quests` \u2014 Daily & weekly tasks\n"
+            "`/tournament` \u2014 Weekly comp for top 3"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="\U0001F4D6 BROWSE ALL COMMANDS",
+        value="_Use the buttons below to explore every category._",
+        inline=False,
+    )
+    embed.set_footer(text="Click a button \u2192 see commands in that category")
+    return embed
+
+
+def _build_commands_category_embed(category: str) -> discord.Embed:
+    """Build an embed for a specific category."""
+    categories = {
+        "economy": {
+            "title": "\U0001F4B0 ECONOMY \u2014 Earn & Spend",
+            "color": discord.Color.gold(),
+            "fields": [
+                ("Earning", "`/daily` Daily reward (24h)\n`/weekly` Weekly reward (7d)\n`/work` Work for coins (45m)\n`/beg` Beg for change (10m)"),
+                ("Spending & Transfers", "`/balance` Check wallet\n`/pay` Send coins to a user\n`/leaderboard` Richest users"),
+                ("Risky Plays", "`/rob` Try to rob someone (2h cd)\n`/crime` Commit a crime (2h cd)\n`/bet` Double or nothing"),
+            ],
+        },
+        "games": {
+            "title": "\U0001F3B2 GAMES \u2014 Play to Win",
+            "color": discord.Color.purple(),
+            "fields": [
+                ("Casino", "`/slots` Spin the slots\n`/blackjack` Beat the dealer\n`/wheel` Wheel of fortune\n`/casino` Browse casino games"),
+                ("Multiplayer PvP", "`/duel` Quick 1v1 duel\n`/fight` 60s fight w/ spectator bets\n`/gun` Russian roulette (2-4p)\n`/heistquick` Quick crew heist"),
+                ("Lobby Games", "`/rs` Race tag (up to 3)\n`/shootout` Lobby + doors\n`/bomb` Hot potato\n`/connect4` Classic Connect 4\n`/rps` Rock-paper-scissors\n`/rps-tournament` Bracket RPS\n`/lieordie` Lie detector"),
+                ("Fun & Solo", "`/roll` Dice\n`/flip` Coin flip\n`/8ball` Magic 8-ball\n`/rate` Get rated\n`/ship` Ship two users\n`/quest` AI choose-adventure"),
+                ("AI Roleplay", "`/court` Criminal trial (no $)\n`/lawsuit` Civil suit (real $)\n`/tarot` Tarot reading\n`/roast` AI roast\n`/bio` Generate a bio\n`/analyze` Analyze a user\n`/hack` Pretend hack"),
+            ],
+        },
+        "passive": {
+            "title": "\U0001F4C8 PASSIVE INCOME EMPIRES",
+            "color": discord.Color.dark_green(),
+            "fields": [
+                ("\U0001F436 Pets", "`/adopt` Get a pet (1,500)\n`/pet` View stats\n`/feed` Feed (50)\n`/collect` Claim earnings\n`/abandon` Give up your pet"),
+                ("\U0001F3E2 Businesses", "`/buybusiness` Buy (8 tiers)\n`/businesses` Portfolio\n`/collectbusiness` Claim earnings\n`/hire` Hire employee\n`/fire` Fire employee\n`/sabotage` Sabotage a rival"),
+                ("\U0001F303 Nightlife", "`/buyvenue` Open bar/club (7 tiers)\n`/venues` Portfolio\n`/collectvenue` Claim earnings\n`/hirestaff` Hire bartender/bouncer/DJ\n`/stockliquor` Stock liquor"),
+            ],
+        },
+        "dealer": {
+            "title": "\U0001F48A DEALER GAME",
+            "color": discord.Color.dark_purple(),
+            "fields": [
+                ("Get Started", "**`/dealer`** \u2014 Full dashboard (recommended)\n`/buysupply` Cop product from the plug\n`/sell` Sell to NPCs (builds heat)"),
+                ("Manage", "`/stash` Inventory + heat + stats\n`/streetprice` Today's market prices\n`/laylow` Pay 500 to drop heat\n`/dealers` Top dealers leaderboard"),
+            ],
+        },
+        "heist": {
+            "title": "\U0001F979 HEIST CREW",
+            "color": discord.Color.dark_red(),
+            "fields": [
+                ("Build Your Crew", "`/hire_specialist` Hire safecracker/hacker/driver/etc\n`/crew` View your specialists\n`/targets` See heist targets"),
+                ("Pull a Job", "`/heist` Plan a multi-phase heist with crew\n_6 targets from convenience stores to the Federal Reserve._"),
+            ],
+        },
+        "progression": {
+            "title": "\U0001F3C6 PROGRESSION",
+            "color": discord.Color.green(),
+            "fields": [
+                ("Level Up", "`/level` Your XP and rank\n`/achievements` Earned badges + perks\n`/quests` Daily & weekly tasks\n`/claimquest` Claim completed quests"),
+                ("Tournaments & Rep", "`/tournament` Weekly leaderboard\n`/rep` Give someone reputation\n`/reputation` Check rep"),
+            ],
+        },
+        "shop": {
+            "title": "\U0001F6D2 SHOP & ITEMS",
+            "color": discord.Color.blue(),
+            "fields": [
+                ("Main Shop", "**`/shop`** \u2014 Interactive shop (3 pages)\n`/buyrole` Colored Discord role\n`/protect` 12h rob immunity\n`/megaphone` @here announcement\n`/lottery` Lottery tickets"),
+                ("Boosts & Cosmetics", "`/vip` 7-day VIP badge \u270D\n`/title` Custom title\n`/xpboost` 2x XP for 24h\n`/insurance` Business protection\n`/heisttools` +20% rob success\n`/lotterymult` 2x lottery"),
+                ("Misc", "`/petfood` 7-day pet food bundle\n`/upgradebusiness` Permanent boost\n`/loan` Borrow from loan shark\n`/repay` Pay back loan\n`/bounty` Place bounty on user\n`/bounties` See active bounties"),
+            ],
+        },
+        "settings": {
+            "title": "\u2699\uFE0F SETTINGS & MODS",
+            "color": discord.Color.greyple(),
+            "fields": [
+                ("Personal Settings", "`/notifications` Toggle DM notifications\n`/signature` \U0001F3AD BOOSTER: signature reactions"),
+                ("Admin", "`/setnotifchannel` Set notification channel\n`/renamechannels` Bulk rename channels\n`/stylepreview` See channel name styles\n`/transcribetoggle` Voice transcription"),
+            ],
+        },
+    }
+
+    cat = categories.get(category, categories["economy"])
+    embed = discord.Embed(title=cat["title"], color=cat["color"])
+    for name, value in cat["fields"]:
+        embed.add_field(name=name, value=value, inline=False)
+    embed.set_footer(text="\u2190 Use the buttons to switch categories or go home")
+    return embed
+
+
+class CommandsNavView(discord.ui.View):
+    def __init__(self, user_id: int, current: str = "home"):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.current = current
+
+        # Row 0 — main categories
+        for label, key, emoji in [
+            ("Home", "home", "\U0001F3E0"),
+            ("Economy", "economy", "\U0001F4B0"),
+            ("Games", "games", "\U0001F3B2"),
+            ("Passive", "passive", "\U0001F4C8"),
+        ]:
+            btn = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                style=discord.ButtonStyle.primary if key == current else discord.ButtonStyle.secondary,
+                row=0,
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+        # Row 1 — more categories
+        for label, key, emoji in [
+            ("Dealer", "dealer", "\U0001F48A"),
+            ("Heist", "heist", "\U0001F979"),
+            ("Progression", "progression", "\U0001F3C6"),
+            ("Shop", "shop", "\U0001F6D2"),
+            ("Settings", "settings", "\u2699\uFE0F"),
+        ]:
+            btn = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                style=discord.ButtonStyle.primary if key == current else discord.ButtonStyle.secondary,
+                row=1,
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Run `/commands` to open your own.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _make_cb(self, key: str):
+        async def cb(interaction: discord.Interaction):
+            if key == "home":
+                embed = _build_commands_home_embed()
+            else:
+                embed = _build_commands_category_embed(key)
+            view = CommandsNavView(self.user_id, current=key)
+            await interaction.response.edit_message(embed=embed, view=view)
+        return cb
 
 
 @client.event
@@ -13153,7 +13783,7 @@ PREFIX_COMMANDS = {
     "connect4":     ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
     "c4":           ("connect4",      [{"name":"opponent","type":"user","required":True},{"name":"wager","type":"int","required":False,"default":200}]),
     "gun":          ("gun",           [{"name":"player2","type":"user","required":True},{"name":"player3","type":"user","required":False,"default":None},{"name":"player4","type":"user","required":False,"default":None}]),
-    "heist":        ("heist",         [{"name":"crew1","type":"user","required":True},{"name":"crew2","type":"user","required":False,"default":None},{"name":"crew3","type":"user","required":False,"default":None},{"name":"crew4","type":"user","required":False,"default":None}]),
+    "heistquick":   ("heistquick",    [{"name":"crew1","type":"user","required":True},{"name":"crew2","type":"user","required":False,"default":None},{"name":"crew3","type":"user","required":False,"default":None},{"name":"crew4","type":"user","required":False,"default":None}]),
     # AI
     "roast":        ("roast",         [{"name":"user","type":"user","required":True}]),
     "bio":          ("bio",           [{"name":"user","type":"user","required":True}]),
