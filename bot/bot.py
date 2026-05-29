@@ -13648,7 +13648,7 @@ class CommandsNavView(discord.ui.View):
         return cb
 
 
-@tree.event
+@client.event
 async def on_app_command_completion(interaction: discord.Interaction, command):
     """Auto-track every successful slash command for analytics."""
     try:
