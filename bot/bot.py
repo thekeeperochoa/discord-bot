@@ -15125,6 +15125,458 @@ async def _re_collect(interaction, data):
         pass
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 📈 /stocks — Fictional Stock Market
+# Trend-based prices (momentum builds and crashes). Some stocks pay weekly dividends.
+# Persistent stock prices updated hourly via background scheduler.
+# ─────────────────────────────────────────────────────────────────────────────
+STOCKS_FILE = MEMORY_DIR / "stocks.json"
+STOCKS_HOURLY_VOLATILITY = 0.04        # ±4% base price drift per hour
+STOCKS_MOMENTUM_FACTOR = 0.6           # how much past direction influences next move
+STOCKS_CRASH_CHANCE = 0.02             # 2% chance per hour for a crash event
+STOCKS_BOOM_CHANCE = 0.015             # 1.5% chance per hour for a boom
+STOCKS_BROKERAGE_FEE = 0.02            # 2% fee on every trade
+STOCKS_DIVIDEND_DAY = 0                # Monday (0=Mon, 6=Sun) for weekly dividend payout
+STOCKS_DIVIDEND_HOUR_UTC = 12          # 12pm UTC on dividend day
+
+# Stock catalog
+STOCKS = {
+    "DEGEN": {
+        "emoji": "🤡", "name": "Degenerate Gambling Inc.",
+        "starting_price": 100, "volatility": 1.5, "dividend_pct": 0,
+        "desc": "Wild swings, no dividends. Pure chaos.",
+    },
+    "WEED": {
+        "emoji": "🌿", "name": "Greenfield Cannabis Co.",
+        "starting_price": 75, "volatility": 1.0, "dividend_pct": 0.03,
+        "desc": "Pays 3%/week dividend. Steady growth.",
+    },
+    "PUMP": {
+        "emoji": "🚀", "name": "Pump.fun Holdings",
+        "starting_price": 50, "volatility": 2.5, "dividend_pct": 0,
+        "desc": "Extreme volatility. Memes only. No dividends.",
+    },
+    "BANK": {
+        "emoji": "🏦", "name": "First National Trust",
+        "starting_price": 500, "volatility": 0.5, "dividend_pct": 0.04,
+        "desc": "Slow, steady. 4% weekly dividend.",
+    },
+    "COKE": {
+        "emoji": "❄️", "name": "Snowfall Logistics",
+        "starting_price": 200, "volatility": 1.8, "dividend_pct": 0.02,
+        "desc": "Volatile commodity. Small dividend.",
+    },
+    "FOOD": {
+        "emoji": "🍔", "name": "FastBite Franchises",
+        "starting_price": 150, "volatility": 0.6, "dividend_pct": 0.03,
+        "desc": "Boring blue chip. Reliable 3% dividend.",
+    },
+    "META": {
+        "emoji": "👁️", "name": "Metavoid Corp",
+        "starting_price": 300, "volatility": 1.3, "dividend_pct": 0,
+        "desc": "Tech speculation. No dividend.",
+    },
+    "BLOW": {
+        "emoji": "🎰", "name": "Blow Casinos Ltd.",
+        "starting_price": 250, "volatility": 1.4, "dividend_pct": 0.05,
+        "desc": "Highest dividend (5%/week). High variance.",
+    },
+}
+
+
+def _load_stocks() -> dict:
+    if STOCKS_FILE.exists():
+        try:
+            with open(STOCKS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "prices": {},
+        "momentum": {},        # ticker -> last direction (-1..1)
+        "history": {},         # ticker -> [(ts, price), ...]
+        "holdings": {},        # user_id -> {ticker: shares}
+        "last_update": 0,
+        "last_dividend": 0,
+    }
+
+
+def _save_stocks(data: dict):
+    with open(STOCKS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _stocks_init_if_needed(data: dict):
+    """Initialize prices if first run."""
+    changed = False
+    for ticker, info in STOCKS.items():
+        if ticker not in data.get("prices", {}):
+            data.setdefault("prices", {})[ticker] = float(info["starting_price"])
+            data.setdefault("momentum", {})[ticker] = 0.0
+            data.setdefault("history", {})[ticker] = [(int(time.time()), info["starting_price"])]
+            changed = True
+    if changed:
+        _save_stocks(data)
+
+
+def _stocks_tick(data: dict):
+    """Move all stock prices one hour forward. Apply momentum + random walk + occasional crashes/booms."""
+    for ticker, info in STOCKS.items():
+        cur = data["prices"].get(ticker, info["starting_price"])
+        momentum = data.get("momentum", {}).get(ticker, 0.0)
+
+        # Random base move
+        base_drift = random.gauss(0, STOCKS_HOURLY_VOLATILITY * info["volatility"])
+        # Apply momentum (continuation bias)
+        move = base_drift + momentum * STOCKS_MOMENTUM_FACTOR * 0.03
+
+        # Random events
+        event = None
+        if random.random() < STOCKS_CRASH_CHANCE:
+            crash_size = random.uniform(0.20, 0.50)
+            move = -crash_size
+            event = "crash"
+        elif random.random() < STOCKS_BOOM_CHANCE:
+            boom_size = random.uniform(0.20, 0.55)
+            move = boom_size
+            event = "boom"
+
+        new_price = cur * (1 + move)
+        # Floor at 1, no ceiling (let it moon)
+        new_price = max(1.0, new_price)
+        data["prices"][ticker] = new_price
+
+        # Update momentum: 70% of new direction, 30% of old
+        new_momentum = 0.7 * (1 if move > 0 else -1 if move < 0 else 0) + 0.3 * momentum
+        data["momentum"][ticker] = max(-1.0, min(1.0, new_momentum))
+
+        # Track history (cap to 168 entries = 1 week of hourly data)
+        hist = data.setdefault("history", {}).setdefault(ticker, [])
+        hist.append((int(time.time()), round(new_price, 2)))
+        if len(hist) > 168:
+            data["history"][ticker] = hist[-168:]
+
+        # Broadcast big moves to notification channel
+        if event:
+            asyncio.create_task(_announce_stock_event(ticker, event, cur, new_price))
+
+    data["last_update"] = int(time.time())
+
+
+async def _announce_stock_event(ticker, event_type, old_price, new_price):
+    """Broadcast crash/boom announcements."""
+    try:
+        cfg = load_config()
+        nc = get_notification_channel_id(cfg)
+        if not nc:
+            return
+        ch = client.get_channel(int(nc))
+        if not ch:
+            return
+        info = STOCKS.get(ticker, {})
+        pct = ((new_price / old_price) - 1) * 100
+        if event_type == "crash":
+            await ch.send(
+                f"📉 **STOCK CRASH** — {info.get('emoji','')} **${ticker}** "
+                f"({info.get('name','?')}) just dropped **{pct:.0f}%** to **{new_price:.2f}**!"
+            )
+        else:
+            await ch.send(
+                f"📈 **STOCK BOOM** — {info.get('emoji','')} **${ticker}** "
+                f"({info.get('name','?')}) just spiked **+{pct:.0f}%** to **{new_price:.2f}**!"
+            )
+        track_activity("stock_event", 0, "Market", f"${ticker} {event_type} {pct:+.0f}% → {new_price:.2f}")
+    except Exception as e:
+        log.warning("stock event broadcast failed: %s", e)
+
+
+async def stocks_scheduler():
+    """Run every hour: update prices, occasionally trigger events, pay dividends weekly."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            data = _load_stocks()
+            _stocks_init_if_needed(data)
+            _stocks_tick(data)
+            # Dividend check — once per week on configured day/hour
+            now = datetime.now(timezone.utc)
+            if now.weekday() == STOCKS_DIVIDEND_DAY and now.hour == STOCKS_DIVIDEND_HOUR_UTC:
+                last_div = data.get("last_dividend", 0)
+                # Don't pay twice in same day
+                if time.time() - last_div > 23 * 3600:
+                    await _pay_dividends(data)
+            _save_stocks(data)
+        except Exception as e:
+            log.exception("stocks_scheduler: %s", e)
+        await asyncio.sleep(3600)  # 1 hour
+
+
+async def _pay_dividends(data: dict):
+    """Pay weekly dividends to all stock holders."""
+    total_paid = 0
+    payouts_by_user = {}
+    for ticker, info in STOCKS.items():
+        div_pct = info.get("dividend_pct", 0)
+        if div_pct <= 0:
+            continue
+        price = data["prices"].get(ticker, info["starting_price"])
+        dividend_per_share = int(price * div_pct)
+        if dividend_per_share <= 0:
+            continue
+        for uid, holdings in data.get("holdings", {}).items():
+            shares = holdings.get(ticker, 0)
+            if shares <= 0:
+                continue
+            payout = dividend_per_share * shares
+            try:
+                economy.add(int(uid), payout, f"dividend {ticker}")
+                track_economy_event("earned", payout)
+                payouts_by_user[uid] = payouts_by_user.get(uid, 0) + payout
+                total_paid += payout
+            except Exception:
+                pass
+    data["last_dividend"] = int(time.time())
+
+    # Announce + DM big dividend recipients
+    if total_paid > 0:
+        try:
+            cfg = load_config()
+            nc = get_notification_channel_id(cfg)
+            if nc:
+                ch = client.get_channel(int(nc))
+                if ch:
+                    top = sorted(payouts_by_user.items(), key=lambda x: x[1], reverse=True)[:3]
+                    lines = []
+                    for uid, amt in top:
+                        lines.append(f"💰 <@{uid}> — **{amt:,}**")
+                    await ch.send(
+                        f"📰 **WEEKLY DIVIDENDS PAID**\n"
+                        f"Total: **{total_paid:,}** coins\n\n"
+                        + ("\n".join(lines) if lines else ""),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            # DMs to all who got paid
+            for uid, amt in payouts_by_user.items():
+                try:
+                    await send_dm(int(uid), "rep",
+                                  content=f"💵 Weekly dividends paid: **{amt:,}** coins.")
+                except Exception:
+                    pass
+            track_activity("dividends_paid", 0, "Market", f"paid {total_paid:,} total dividends")
+        except Exception as e:
+            log.warning("dividend broadcast failed: %s", e)
+
+
+def _stock_price(ticker: str, data: dict = None) -> float:
+    if data is None:
+        data = _load_stocks()
+    return data.get("prices", {}).get(ticker, STOCKS[ticker]["starting_price"])
+
+
+def _user_holdings(uid: int, data: dict = None) -> dict:
+    if data is None:
+        data = _load_stocks()
+    return data.get("holdings", {}).get(str(uid), {})
+
+
+def _trend_arrow(momentum: float) -> str:
+    if momentum > 0.4: return "📈📈"
+    if momentum > 0.1: return "📈"
+    if momentum < -0.4: return "📉📉"
+    if momentum < -0.1: return "📉"
+    return "➖"
+
+
+@tree.command(name="stocks", description="📈 Fictional stock market. Buy, sell, watch trends, collect dividends.")
+@discord.app_commands.describe(action="What do you want to do?")
+@discord.app_commands.choices(
+    action=[
+        discord.app_commands.Choice(name="📊 Market — see all stocks + prices", value="market"),
+        discord.app_commands.Choice(name="💼 Portfolio — your holdings", value="portfolio"),
+        discord.app_commands.Choice(name="💰 Buy — purchase shares", value="buy"),
+        discord.app_commands.Choice(name="💸 Sell — liquidate shares", value="sell"),
+    ]
+)
+@discord.app_commands.describe(
+    ticker="(For Buy/Sell) Ticker symbol (e.g. DEGEN, WEED)",
+    shares="(For Buy/Sell) Number of shares",
+)
+async def stocks_command(
+    interaction: discord.Interaction,
+    action: discord.app_commands.Choice[str],
+    ticker: str = None,
+    shares: int = None,
+):
+    data = _load_stocks()
+    _stocks_init_if_needed(data)
+
+    if action.value == "market":
+        await _stocks_market_view(interaction, data)
+    elif action.value == "portfolio":
+        await _stocks_portfolio(interaction, data)
+    elif action.value == "buy":
+        await _stocks_buy(interaction, data, ticker, shares)
+    elif action.value == "sell":
+        await _stocks_sell(interaction, data, ticker, shares)
+
+
+async def _stocks_market_view(interaction, data):
+    embed = discord.Embed(
+        title="📊 Stock Market",
+        description=f"_Prices update hourly. {int(STOCKS_BROKERAGE_FEE*100)}% brokerage fee on every trade._",
+        color=discord.Color.dark_gold(),
+    )
+    lines = []
+    for ticker, info in STOCKS.items():
+        price = _stock_price(ticker, data)
+        momentum = data.get("momentum", {}).get(ticker, 0)
+        arrow = _trend_arrow(momentum)
+        # Calc 24h change from history
+        hist = data.get("history", {}).get(ticker, [])
+        change_str = ""
+        if len(hist) >= 24:
+            old_price = hist[-24][1]
+            pct = ((price / old_price) - 1) * 100
+            sign = "+" if pct >= 0 else ""
+            change_str = f" ({sign}{pct:.1f}% 24h)"
+        div_str = f" • 💵 {info['dividend_pct']*100:.0f}%/wk div" if info.get("dividend_pct", 0) > 0 else ""
+        lines.append(
+            f"{info['emoji']} **${ticker}** {arrow} **{price:,.2f}**{change_str}\n"
+            f"   _{info['name']}_ • Vol: {info['volatility']:.1f}{div_str}"
+        )
+    embed.description = (embed.description or "") + "\n\n" + "\n\n".join(lines)
+    embed.set_footer(text="Trade with /stocks action:buy ticker:DEGEN shares:10 • Weekly dividends paid Mondays 12pm UTC")
+    await interaction.response.send_message(embed=embed)
+
+
+async def _stocks_portfolio(interaction, data):
+    holdings = _user_holdings(interaction.user.id, data)
+    if not holdings or not any(v > 0 for v in holdings.values()):
+        await interaction.response.send_message(
+            "_You don't own any stocks yet. `/stocks action:market` to see what's available._",
+            ephemeral=True,
+        )
+        return
+    embed = discord.Embed(
+        title=f"💼 {interaction.user.display_name}'s Stock Portfolio",
+        color=discord.Color.gold(),
+    )
+    total_value = 0
+    lines = []
+    for ticker, shares in holdings.items():
+        if shares <= 0:
+            continue
+        info = STOCKS.get(ticker, {})
+        price = _stock_price(ticker, data)
+        value = int(price * shares)
+        total_value += value
+        momentum = data.get("momentum", {}).get(ticker, 0)
+        arrow = _trend_arrow(momentum)
+        div_note = ""
+        if info.get("dividend_pct", 0) > 0:
+            div_per_share = int(price * info["dividend_pct"])
+            weekly = div_per_share * shares
+            div_note = f"\n   💵 ~{weekly:,} weekly dividend"
+        lines.append(
+            f"{info.get('emoji','📊')} **${ticker}** {arrow}\n"
+            f"   {shares:,} shares × {price:,.2f} = **{value:,}**{div_note}"
+        )
+    embed.description = "\n\n".join(lines)
+    embed.add_field(name="📊 Total Portfolio Value", value=f"**{total_value:,}** coins", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+async def _stocks_buy(interaction, data, ticker, shares):
+    if not ticker:
+        await interaction.response.send_message("❌ Specify `ticker:` (e.g. `DEGEN`).", ephemeral=True)
+        return
+    ticker = ticker.upper().strip().lstrip("$")
+    if ticker not in STOCKS:
+        await interaction.response.send_message(
+            f"❌ Unknown ticker. Available: {', '.join(STOCKS.keys())}",
+            ephemeral=True,
+        )
+        return
+    if shares is None or shares <= 0:
+        await interaction.response.send_message("❌ `shares:` must be positive.", ephemeral=True)
+        return
+    if shares > 10000:
+        await interaction.response.send_message("❌ Max 10,000 shares per trade.", ephemeral=True)
+        return
+    user = interaction.user
+    price = _stock_price(ticker, data)
+    gross = int(price * shares)
+    fee = int(gross * STOCKS_BROKERAGE_FEE)
+    total = gross + fee
+    if economy.balance(user.id) < total:
+        await interaction.response.send_message(
+            f"❌ Need **{total:,}** ({gross:,} + {fee:,} fee). You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+    economy.add(user.id, -total, f"stocks buy {ticker}")
+    holdings = data.setdefault("holdings", {}).setdefault(str(user.id), {})
+    holdings[ticker] = holdings.get(ticker, 0) + shares
+    _save_stocks(data)
+    info = STOCKS[ticker]
+    await interaction.response.send_message(
+        f"✅ Bought **{shares:,} ${ticker}** @ {price:,.2f}\n"
+        f"💰 Paid **{total:,}** ({gross:,} + {fee:,} fee)\n"
+        f"📊 You now own **{holdings[ticker]:,}** shares of {info['emoji']} {info['name']}"
+    )
+    try:
+        track_economy_event("spent", total)
+        track_feature_use("stocks")
+        track_activity("stocks_buy", user.id, user.display_name, f"bought {shares:,} ${ticker} for {gross:,}")
+    except Exception:
+        pass
+
+
+async def _stocks_sell(interaction, data, ticker, shares):
+    if not ticker:
+        await interaction.response.send_message("❌ Specify `ticker:`.", ephemeral=True)
+        return
+    ticker = ticker.upper().strip().lstrip("$")
+    if ticker not in STOCKS:
+        await interaction.response.send_message(
+            f"❌ Unknown ticker. Available: {', '.join(STOCKS.keys())}",
+            ephemeral=True,
+        )
+        return
+    if shares is None or shares <= 0:
+        await interaction.response.send_message("❌ `shares:` must be positive.", ephemeral=True)
+        return
+    user = interaction.user
+    holdings = data.setdefault("holdings", {}).setdefault(str(user.id), {})
+    owned = holdings.get(ticker, 0)
+    if owned < shares:
+        await interaction.response.send_message(
+            f"❌ You only own **{owned:,}** shares of ${ticker}.",
+            ephemeral=True,
+        )
+        return
+    price = _stock_price(ticker, data)
+    gross = int(price * shares)
+    fee = int(gross * STOCKS_BROKERAGE_FEE)
+    net = gross - fee
+    holdings[ticker] = owned - shares
+    if holdings[ticker] == 0:
+        del holdings[ticker]
+    _save_stocks(data)
+    economy.add(user.id, net, f"stocks sell {ticker}")
+    info = STOCKS[ticker]
+    await interaction.response.send_message(
+        f"💸 Sold **{shares:,} ${ticker}** @ {price:,.2f}\n"
+        f"💰 Got **{net:,}** ({gross:,} - {fee:,} fee)\n"
+        f"📊 Remaining: **{holdings.get(ticker, 0):,}** shares"
+    )
+    try:
+        track_economy_event("earned", net)
+        track_activity("stocks_sell", user.id, user.display_name, f"sold {shares:,} ${ticker} for {net:,}")
+    except Exception:
+        pass
+
+
 @tree.command(name="commands", description="See all bot commands organized by category.")
 async def commands_command(interaction: discord.Interaction):
     embed = _build_commands_home_embed()
@@ -15228,6 +15680,7 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
                 ("\U0001F3E2 Businesses", "`/buybusiness` Buy (8 tiers)\n`/businesses` Portfolio\n`/collectbusiness` Claim earnings\n`/hire` Hire employee\n`/fire` Fire employee\n`/sabotage` Sabotage a rival"),
                 ("\U0001F303 Nightlife", "`/buyvenue` Open bar/club (7 tiers)\n`/venues` Portfolio\n`/collectvenue` Claim earnings\n`/hirestaff` Hire bartender/bouncer/DJ\n`/stockliquor` Stock liquor"),
                 ("\U0001F3D8\uFE0F Real Estate", "`/realestate action:market` See properties\n`/realestate action:buy` Buy property\n`/realestate action:collect` Claim rent\n`/realestate action:repair` Fix condition\n`/realestate action:portfolio` View yours"),
+                ("\U0001F4C8 Stock Market", "`/stocks action:market` Live ticker prices\n`/stocks action:buy` Buy shares\n`/stocks action:sell` Sell shares\n`/stocks action:portfolio` Your holdings\n_Dividends paid weekly to holders of dividend stocks_"),
             ],
         },
         "dealer": {
@@ -15370,6 +15823,7 @@ async def on_ready():
     client.loop.create_task(pet_starving_scheduler())
     client.loop.create_task(nightlife_events_scheduler())
     client.loop.create_task(market_expire_scheduler())
+    client.loop.create_task(stocks_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15503,6 +15957,9 @@ PREFIX_COMMANDS = {
     "realestate":   ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
     "re":           ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
     "property":     ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
+    "stocks":       ("stocks",        [{"name":"action","type":"str","required":True},{"name":"ticker","type":"str","required":False,"default":None},{"name":"shares","type":"int","required":False,"default":None}]),
+    "stock":        ("stocks",        [{"name":"action","type":"str","required":True},{"name":"ticker","type":"str","required":False,"default":None},{"name":"shares","type":"int","required":False,"default":None}]),
+    "stockmarket":  ("stocks",        [{"name":"action","type":"str","required":True},{"name":"ticker","type":"str","required":False,"default":None},{"name":"shares","type":"int","required":False,"default":None}]),
     "run":          ("run",           []),
     "hustle":       ("run",           []),
     "beg":          ("beg",           []),
@@ -15713,6 +16170,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name == "stocks":
+        action_val = kwargs.get("action", "").lower()
+        valid_actions = {"market", "portfolio", "buy", "sell"}
+        if action_val not in valid_actions:
+            await message.channel.send(
+                f"❌ Action must be one of: {', '.join(valid_actions)}"
+            )
+            return True
+        kwargs["action"] = discord.app_commands.Choice(name=action_val, value=action_val)
 
     if slash_name == "realestate":
         action_val = kwargs.get("action", "").lower()
