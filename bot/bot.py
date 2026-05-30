@@ -82,6 +82,11 @@ DEFAULT_PERSONALITY = {
     "daily_recap_max_tokens": 500,
     # Dedicated channel for ALL bot notifications (events, recaps, tournaments, etc.)
     "notifications_channel": "1303514703464497192",
+    # Welcome & onboarding
+    "welcome_enabled": True,
+    "welcome_channel": "",       # if blank, no public message — just DM
+    "welcome_dm": True,          # send onboarding DM to new members
+    "welcome_starter_coins": 500, # free coins for joining
 }
 
 
@@ -12412,6 +12417,115 @@ async def signatures_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 👋 WELCOME + ONBOARDING SYSTEM
+# - Public welcome in welcome_channel (if set)
+# - DM onboarding guide with starter coins (skip if user has DMs closed)
+# - Tracks new joiners in stats activity feed
+# ─────────────────────────────────────────────────────────────────────────────
+
+WELCOME_DM_TEMPLATE = """\
+**Yo {name} — welcome to {guild}** 🎉
+
+You just got dropped into the deep end. Here's the 60-second tour:
+
+**💰 Step 1: Get your starter pack**
+> I just dropped **{starter:,} coins** into your account.
+> Run `/balance` to check.
+
+**🏃 Step 2: Try the flagship command**
+> **`/run`** — Pick a street hustle, navigate encounters, chase the JACKPOT.
+> Costs 100 coins, no cooldown, runs in 30-60 seconds. Rare jackpots hit for **2k-20k coins**.
+
+**📈 Step 3: Build passive income**
+> `/daily` — Free coins every 24 hours
+> `/work` — Earn 50-250 coins every 45 minutes
+> `/adopt` — Get a pet that earns coins 24/7 (needs 1,500 coins)
+> `/buybusiness` — Open a business (needs 2,000 coins for the smallest)
+
+**🎮 Step 4: Explore everything**
+> `/commands` — Full menu of all 96 commands organized by category
+
+**Pro tips:**
+> • Use `_` as a shortcut for any command (e.g. `_balance` works the same as `/balance`)
+> • Check `/quests` for daily challenges that pay out bonus coins
+> • Watch chat for random **💰 coin drops** — first to react grabs them
+
+Welcome to the city. **What are you working tonight?** 🌃
+"""
+
+
+async def handle_member_join(member: discord.Member):
+    """Welcome a new member: public message + DM + starter coins."""
+    if member.bot:
+        return
+    cfg = load_config()
+    if not cfg.get("welcome_enabled", True):
+        return
+
+    # Grant starter coins
+    starter = cfg.get("welcome_starter_coins", 500)
+    if starter > 0:
+        try:
+            economy.add(member.id, starter, "welcome bonus")
+            track_economy_event("earned", starter)
+        except Exception as e:
+            log.warning("welcome starter grant failed: %s", e)
+
+    # Log to dashboard
+    try:
+        track_activity("member_join", member.id, member.display_name,
+                       f"joined {member.guild.name}" + (f" (+{starter:,} starter)" if starter else ""))
+    except Exception:
+        pass
+
+    # Public welcome message
+    welcome_channel_id = cfg.get("welcome_channel", "").strip()
+    if welcome_channel_id:
+        try:
+            ch = client.get_channel(int(welcome_channel_id))
+            if ch:
+                embed = discord.Embed(
+                    title=f"👋 Welcome, {member.display_name}!",
+                    description=(
+                        f"{member.mention} just dropped into the city.\n"
+                        f"💰 Starter bonus: **{starter:,} coins** in your wallet.\n\n"
+                        f"_Check your DMs for the full onboarding guide, "
+                        f"or run `/commands` to see everything._"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed.set_footer(text=f"Member #{member.guild.member_count}")
+                await ch.send(embed=embed)
+        except Exception as e:
+            log.warning("welcome public message failed: %s", e)
+
+    # DM onboarding
+    if cfg.get("welcome_dm", True):
+        try:
+            msg = WELCOME_DM_TEMPLATE.format(
+                name=member.display_name,
+                guild=member.guild.name,
+                starter=starter,
+            )
+            await member.send(msg)
+        except discord.Forbidden:
+            # User has DMs closed — silent, no big deal
+            pass
+        except Exception as e:
+            log.warning("welcome DM failed: %s", e)
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    """Triggered when a new member joins the server."""
+    try:
+        await handle_member_join(member)
+    except Exception as e:
+        log.warning("on_member_join failed: %s", e)
 
 
 @client.event
