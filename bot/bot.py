@@ -13488,6 +13488,453 @@ def suggest_next_step(user_id: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏃 /run — THE FLAGSHIP COMMAND
+# 4-stage branching choose-your-own-adventure street hustle game.
+# Buttons-only interaction. ~30-60 second runs. Massive replayability.
+# Entry cost 100 coins. Avg outcome -50 to +150. Jackpots ~1% for 2k-5k.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN_ENTRY_COST = 100
+RUN_TIMEOUT = 60  # seconds for the user to make each choice
+ACTIVE_RUNS: dict[int, dict] = {}  # user_id -> run state
+
+
+# ── Hustles (Stage 1 picks) ──────────────────────────────────────────────────
+HUSTLES = {
+    "monte": {
+        "emoji": "🃏",
+        "name": "Three-Card Monte",
+        "desc": "Set up a folding table. Cards down, suckers in. Mid risk, mid reward.",
+        "base_pot": 250,
+        "variance": 0.4,   # ±40% on pot
+        "risk_mult": 1.0,
+        "intro": "You set up your folding table on the corner. A small crowd gathers, eyeing the cards.",
+    },
+    "watches": {
+        "emoji": "💎",
+        "name": "Knockoff Watches",
+        "desc": "A duffel bag full of 'Rolexes.' Slow burn, steady money, less heat.",
+        "base_pot": 180,
+        "variance": 0.25,
+        "risk_mult": 0.6,
+        "intro": "You unzip the duffel. Twelve knockoff Submariners. The tourists won't know the difference.",
+    },
+    "tips": {
+        "emoji": "🎰",
+        "name": "Hot Tips Hotline",
+        "desc": "Burner phone, 'insider' picks. Big spikes, bigger crashes.",
+        "base_pot": 400,
+        "variance": 0.8,
+        "risk_mult": 1.6,
+        "intro": "Burner phone in hand. You've got three 'hot tips' to sell at $50 a pop. The picks are made up.",
+    },
+}
+
+# ── Stage 2 encounters (random, branch heavily) ──────────────────────────────
+STAGE2_ENCOUNTERS = [
+    {
+        "id": "cop",
+        "text": "🚓 A cop is walking your way, eyeing your setup.",
+        "choices": [
+            {"emoji": "🏃", "label": "Run for it",      "outcome": "run_from_cop"},
+            {"emoji": "😎", "label": "Play it cool",    "outcome": "stay_calm"},
+            {"emoji": "💵", "label": "Slip him cash",   "outcome": "bribe_cop"},
+        ],
+    },
+    {
+        "id": "rich",
+        "text": "🧑‍💼 A guy in a tailored suit pulls a fat wad of cash and wants in for $500.",
+        "choices": [
+            {"emoji": "💰", "label": "Take his bet",        "outcome": "take_rich"},
+            {"emoji": "🤏", "label": "Lowball — make it $200", "outcome": "lowball_rich"},
+            {"emoji": "🚶", "label": "Walk away",           "outcome": "walk_rich"},
+        ],
+    },
+    {
+        "id": "partner",
+        "text": "🤝 Someone you half-know offers to partner up for the day. Says he'll bring in marks.",
+        "choices": [
+            {"emoji": "✊", "label": "Trust him",        "outcome": "trust_partner"},
+            {"emoji": "🙅", "label": "Decline",          "outcome": "decline_partner"},
+            {"emoji": "🐍", "label": "Scam HIM first",   "outcome": "scam_partner"},
+        ],
+    },
+    {
+        "id": "rival",
+        "text": "👀 A rival hustler is setting up across the street, eyeing your crowd.",
+        "choices": [
+            {"emoji": "🗣️", "label": "Confront him",   "outcome": "confront_rival"},
+            {"emoji": "📦", "label": "Move locations", "outcome": "move_locations"},
+            {"emoji": "🤐", "label": "Ignore him",     "outcome": "ignore_rival"},
+        ],
+    },
+    {
+        "id": "drunk",
+        "text": "🍺 A drunk dude is making a scene at your table, scaring off real marks.",
+        "choices": [
+            {"emoji": "🤝", "label": "Humor him",       "outcome": "humor_drunk"},
+            {"emoji": "💪", "label": "Throw him out",   "outcome": "throw_drunk"},
+            {"emoji": "🎩", "label": "Let him 'win'",   "outcome": "let_drunk_win"},
+        ],
+    },
+    {
+        "id": "tourist",
+        "text": "📸 A loud tourist with a camera wants to film you 'in action.'",
+        "choices": [
+            {"emoji": "📵", "label": "Tell him no",    "outcome": "no_filming"},
+            {"emoji": "🎬", "label": "Let him film",   "outcome": "let_film"},
+            {"emoji": "💸", "label": "Charge him",     "outcome": "charge_tourist"},
+        ],
+    },
+]
+
+# Outcome handlers: name -> dict(delta_pct, heat_delta, narration)
+STAGE2_OUTCOMES = {
+    # ── Cop encounter ──
+    "run_from_cop":   {"pot_mult": 0.5,  "heat": -10, "text": "🏃 You bolt — leave half your stuff behind but make it clear. **Pot halved, heat way down.**"},
+    "stay_calm":      {"pot_mult": 1.0,  "heat": 5,   "text": "😎 You smile and nod. He keeps walking. **Pot intact, slight heat.**", "risk_roll": 0.85},
+    "bribe_cop":      {"pot_mult": 0.85, "heat": -15, "text": "💵 A folded fifty changes hands. He never saw you. **Small pot hit, heat dropped.**"},
+    # ── Rich encounter ──
+    "take_rich":      {"pot_mult": 1.6,  "heat": 10,  "text": "💰 He drops $500 cash. You play him perfectly. **Pot way up — but you got noticed.**", "risk_roll": 0.7},
+    "lowball_rich":   {"pot_mult": 1.25, "heat": 5,   "text": "🤏 'Eh, $200's fine.' He laughs and plays. **Pot bumped, modest heat.**"},
+    "walk_rich":      {"pot_mult": 1.0,  "heat": -5,  "text": "🚶 Something felt off. You let him walk. **Nothing gained, nothing lost.**"},
+    # ── Partner ──
+    "trust_partner":  {"pot_mult": 1.4,  "heat": 5,   "text": "✊ He brings in three marks in the next hour. **Pot up nicely.**", "risk_roll": 0.65},
+    "decline_partner":{"pot_mult": 1.0,  "heat": 0,   "text": "🙅 You wave him off. Probably wise. **No change.**"},
+    "scam_partner":   {"pot_mult": 1.8,  "heat": 20,  "text": "🐍 You pocket his stake while he wasn't looking. **Big pot, big heat.**", "risk_roll": 0.5},
+    # ── Rival ──
+    "confront_rival": {"pot_mult": 1.1,  "heat": 15,  "text": "🗣️ Some yelling. He backs off. **Slight pot bump, attention drawn.**", "risk_roll": 0.75},
+    "move_locations": {"pot_mult": 0.85, "heat": -10, "text": "📦 You pack up and find a new spot. **Pot dings a bit, heat clears.**"},
+    "ignore_rival":   {"pot_mult": 0.9,  "heat": 0,   "text": "🤐 He's stealing your marks. **Pot down slightly.**"},
+    # ── Drunk ──
+    "humor_drunk":    {"pot_mult": 1.05, "heat": 0,   "text": "🤝 You play along. He buys you a beer and wanders off. **Tiny pot bump.**"},
+    "throw_drunk":    {"pot_mult": 1.0,  "heat": 10,  "text": "💪 You shove him off. He yells something. **Heat up.**", "risk_roll": 0.85},
+    "let_drunk_win":  {"pot_mult": 1.3,  "heat": -5,  "text": "🎩 You let him 'win' $20. He brings 4 friends back, all losing big. **Pot up, heat down.**"},
+    # ── Tourist ──
+    "no_filming":     {"pot_mult": 1.0,  "heat": -5,  "text": "📵 'No cameras.' He grumbles and leaves. **No change, slight heat drop.**"},
+    "let_film":       {"pot_mult": 1.2,  "heat": 25,  "text": "🎬 Now you're on the internet. Crowd doubles. **Pot up — but you're VERY visible.**", "risk_roll": 0.6},
+    "charge_tourist": {"pot_mult": 1.15, "heat": 5,   "text": "💸 You charge him $50 to film. He pays. Idiot. **Modest pot bump.**"},
+}
+
+
+# ── Stage 3 pressure point ───────────────────────────────────────────────────
+STAGE3_CHOICES = [
+    {"emoji": "💼", "label": "Bank it & walk",   "outcome": "bank"},
+    {"emoji": "🔥", "label": "Push for more",    "outcome": "push"},
+    {"emoji": "💀", "label": "Double down",      "outcome": "double"},
+]
+
+
+def _run_get_hustle(hustle_key):
+    return HUSTLES.get(hustle_key, HUSTLES["monte"])
+
+
+class RunView(discord.ui.View):
+    """Dispatches between stages. Disabled-after-click semantics."""
+
+    def __init__(self, user_id: int, stage: str, state: dict):
+        super().__init__(timeout=RUN_TIMEOUT)
+        self.user_id = user_id
+        self.stage = stage
+        self.state = state
+        self._build_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Not your run. Start your own with `/run`.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        # Refund half if they bail mid-run
+        run = ACTIVE_RUNS.get(self.user_id)
+        if run:
+            refund = RUN_ENTRY_COST // 2
+            economy.add(self.user_id, refund, "run timeout refund")
+            try:
+                msg = run.get("message")
+                if msg:
+                    embed = discord.Embed(
+                        title="⏰ You bailed on the run",
+                        description=f"_You hesitated too long. Refunded **{refund}** coins._",
+                        color=discord.Color.greyple(),
+                    )
+                    await msg.edit(embed=embed, view=None)
+            except Exception:
+                pass
+            ACTIVE_RUNS.pop(self.user_id, None)
+
+    def _build_buttons(self):
+        if self.stage == "stage1":
+            for key, info in HUSTLES.items():
+                btn = discord.ui.Button(
+                    label=info["name"], emoji=info["emoji"],
+                    style=discord.ButtonStyle.primary,
+                )
+                btn.callback = self._make_stage1_cb(key)
+                self.add_item(btn)
+        elif self.stage == "stage2":
+            encounter = self.state["encounter"]
+            for choice in encounter["choices"]:
+                btn = discord.ui.Button(
+                    label=choice["label"], emoji=choice["emoji"],
+                    style=discord.ButtonStyle.secondary,
+                )
+                btn.callback = self._make_stage2_cb(choice["outcome"])
+                self.add_item(btn)
+        elif self.stage == "stage3":
+            for choice in STAGE3_CHOICES:
+                style = (discord.ButtonStyle.success if choice["outcome"] == "bank"
+                         else discord.ButtonStyle.danger if choice["outcome"] == "double"
+                         else discord.ButtonStyle.secondary)
+                btn = discord.ui.Button(
+                    label=choice["label"], emoji=choice["emoji"], style=style,
+                )
+                btn.callback = self._make_stage3_cb(choice["outcome"])
+                self.add_item(btn)
+
+    def _make_stage1_cb(self, hustle_key):
+        async def cb(interaction: discord.Interaction):
+            await self._handle_stage1(interaction, hustle_key)
+        return cb
+
+    def _make_stage2_cb(self, outcome_key):
+        async def cb(interaction: discord.Interaction):
+            await self._handle_stage2(interaction, outcome_key)
+        return cb
+
+    def _make_stage3_cb(self, outcome_key):
+        async def cb(interaction: discord.Interaction):
+            await self._handle_stage3(interaction, outcome_key)
+        return cb
+
+    async def _handle_stage1(self, interaction, hustle_key):
+        hustle = _run_get_hustle(hustle_key)
+        # Roll the initial pot based on hustle
+        pot = int(hustle["base_pot"] * random.uniform(1 - hustle["variance"]/2, 1 + hustle["variance"]/2))
+        self.state.update({
+            "hustle": hustle_key,
+            "pot": pot,
+            "heat": 0,
+            "log": [f"{hustle['emoji']} **{hustle['name']}** — _{hustle['intro']}_", f"💰 Pot starts at **{pot:,}** coins."],
+        })
+        encounter = random.choice(STAGE2_ENCOUNTERS)
+        self.state["encounter"] = encounter
+        await self._render_stage2(interaction)
+
+    async def _handle_stage2(self, interaction, outcome_key):
+        outcome = STAGE2_OUTCOMES[outcome_key]
+        # Resolve risk roll if present (failure = pot wiped to 50%)
+        risk_failed = False
+        if "risk_roll" in outcome:
+            if random.random() > outcome["risk_roll"]:
+                risk_failed = True
+
+        if risk_failed:
+            old_pot = self.state["pot"]
+            self.state["pot"] = int(old_pot * 0.5)
+            self.state["heat"] += 15
+            self.state["log"].append(f"💥 _It went sideways._ Pot: **{old_pot:,} → {self.state['pot']:,}** • Heat +15")
+        else:
+            old_pot = self.state["pot"]
+            self.state["pot"] = int(old_pot * outcome["pot_mult"])
+            self.state["heat"] += outcome["heat"]
+            self.state["log"].append(outcome["text"])
+            self.state["log"].append(f"💰 Pot: **{old_pot:,} → {self.state['pot']:,}** • Heat **{self.state['heat']}**")
+
+        # Move to stage 3
+        await self._render_stage3(interaction)
+
+    async def _handle_stage3(self, interaction, outcome_key):
+        pot = self.state["pot"]
+        heat = self.state["heat"]
+        result_text = ""
+        final_payout = 0
+
+        if outcome_key == "bank":
+            # Safe — take what you got
+            final_payout = pot
+            result_text = f"💼 **You banked it.** Smart play. Walked off with **{pot:,}** coins."
+
+        elif outcome_key == "push":
+            # 60% small bump, 30% modest gain, 10% bust
+            # Heat impacts bust chance
+            bust_chance = 0.10 + max(0, (heat - 20) * 0.01)
+            roll = random.random()
+            if roll < bust_chance:
+                final_payout = 0
+                result_text = f"🚨 **BUSTED.** You pushed too hard. Cops show up. Pot **{pot:,}** → **0**."
+            elif roll < 0.45:
+                final_payout = int(pot * 1.15)
+                result_text = f"🔥 **Squeezed a little more.** Pot **{pot:,}** → **{final_payout:,}**."
+            else:
+                final_payout = int(pot * 1.4)
+                result_text = f"🔥 **One more big mark.** Pot **{pot:,}** → **{final_payout:,}**."
+
+        elif outcome_key == "double":
+            # 50% bust, 35% big gain, 14% huge, 1% JACKPOT
+            bust_chance = 0.45 + max(0, (heat - 10) * 0.015)
+            roll = random.random()
+            if roll < 0.01:
+                # JACKPOT — pot * 5-10x
+                final_payout = int(pot * random.uniform(5, 10))
+                result_text = f"💎💎💎 **JACKPOT.** The entire crowd dumped their wallets. **{pot:,} → {final_payout:,}** coins."
+                self.state["jackpot"] = True
+            elif roll < bust_chance:
+                final_payout = 0
+                result_text = f"💀 **TOTAL BUST.** Everyone caught on. Lost the entire **{pot:,}** pot."
+            elif roll < bust_chance + 0.34:
+                final_payout = int(pot * 2.2)
+                result_text = f"💀 **Doubled down and won.** Pot **{pot:,}** → **{final_payout:,}**."
+            else:
+                final_payout = int(pot * 3.5)
+                result_text = f"💀 **You went WILD.** Pot **{pot:,}** → **{final_payout:,}**."
+
+        # Calculate profit (already paid 100 entry cost)
+        net = final_payout - RUN_ENTRY_COST
+        if final_payout > 0:
+            economy.add(self.user_id, final_payout, f"run payout ({outcome_key})")
+
+        # Build final embed
+        hustle = _run_get_hustle(self.state["hustle"])
+        log_str = "\n".join(self.state["log"]) + "\n\n" + result_text
+
+        color = discord.Color.green() if net > 0 else (discord.Color.red() if net < 0 else discord.Color.greyple())
+        if self.state.get("jackpot"):
+            color = discord.Color.gold()
+
+        emoji_prefix = "💎" if self.state.get("jackpot") else ("✅" if net > 0 else "❌")
+        title = f"{emoji_prefix} {hustle['name']} Run — {'+' if net >= 0 else ''}{net:,} coins"
+
+        embed = discord.Embed(title=title, description=log_str, color=color)
+        embed.add_field(name="💰 Final Payout", value=f"{final_payout:,} coins", inline=True)
+        embed.add_field(name="💸 Net (after entry)", value=f"{'+' if net >= 0 else ''}{net:,}", inline=True)
+        embed.add_field(name="🔥 Final Heat", value=f"{self.state['heat']}", inline=True)
+        bal = economy.balance(self.user_id)
+        embed.set_footer(text=f"Balance: {bal:,} coins • Run again with /run")
+
+        # Quest + tournament tracking
+        try:
+            track_quest_progress(self.user_id, "games_played")
+            if net > 0:
+                track_quest_progress(self.user_id, "games_won")
+                track_quest_progress(self.user_id, "coins_earned", final_payout)
+                add_tournament_score(self.user_id, coins_earned=final_payout, games_won=1)
+            track_economy_event("earned" if net > 0 else "spent", abs(net))
+            track_feature_use("run")
+            display_name = interaction.user.display_name
+            if self.state.get("jackpot"):
+                track_activity("run_jackpot", self.user_id, display_name, f"JACKPOT — +{final_payout:,} coins on {hustle['name']}")
+            elif net > 500:
+                track_activity("run_big_win", self.user_id, display_name, f"won {net:,} on {hustle['name']}")
+        except Exception:
+            pass
+
+        await interaction.response.edit_message(embed=embed, view=None)
+        ACTIVE_RUNS.pop(self.user_id, None)
+
+        # Announce jackpots to the notifications channel
+        if self.state.get("jackpot"):
+            try:
+                cfg = load_config()
+                notif_id = get_notification_channel_id(cfg)
+                if notif_id:
+                    ch = client.get_channel(int(notif_id))
+                    if ch:
+                        await ch.send(
+                            f"💎 **JACKPOT** 💎\n"
+                            f"<@{self.user_id}> hit a jackpot on `/run` — **+{final_payout:,}** coins on a {hustle['name']}!",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+            except Exception:
+                pass
+
+    async def _render_stage2(self, interaction):
+        hustle = _run_get_hustle(self.state["hustle"])
+        encounter = self.state["encounter"]
+        log_str = "\n".join(self.state["log"])
+        embed = discord.Embed(
+            title=f"{hustle['emoji']} Stage 2: Something happens",
+            description=f"{log_str}\n\n**{encounter['text']}**\n\n_What do you do?_",
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text=f"Pot: {self.state['pot']:,} • Heat: {self.state['heat']}")
+        new_view = RunView(self.user_id, "stage2", self.state)
+        ACTIVE_RUNS[self.user_id]["view"] = new_view
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+    async def _render_stage3(self, interaction):
+        hustle = _run_get_hustle(self.state["hustle"])
+        log_str = "\n".join(self.state["log"])
+        heat = self.state["heat"]
+        pressure = "🟢 LOW" if heat < 10 else "🟡 MEDIUM" if heat < 25 else "🔴 HIGH"
+        embed = discord.Embed(
+            title=f"{hustle['emoji']} Stage 3: Pressure Point",
+            description=(
+                f"{log_str}\n\n"
+                f"**You've got {self.state['pot']:,} coins on the table. Heat is {pressure}.**\n\n"
+                f"💼 **Bank it** — take the safe money\n"
+                f"🔥 **Push** — squeeze one more mark (small risk)\n"
+                f"💀 **Double down** — go all in (50%+ bust risk, but JACKPOT possible)"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"Pot: {self.state['pot']:,} • Heat: {self.state['heat']}")
+        new_view = RunView(self.user_id, "stage3", self.state)
+        ACTIVE_RUNS[self.user_id]["view"] = new_view
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+
+@tree.command(name="run", description="🏃 The Street Hustle — branching choose-your-own-adventure for coins.")
+async def run_command(interaction: discord.Interaction):
+    user = interaction.user
+
+    # Block if already in a run
+    if user.id in ACTIVE_RUNS:
+        await interaction.response.send_message(
+            "You're already in the middle of a run. Finish that one first.",
+            ephemeral=True,
+        )
+        return
+
+    # Entry cost
+    if economy.balance(user.id) < RUN_ENTRY_COST:
+        await interaction.response.send_message(
+            f"❌ The hustle costs **{RUN_ENTRY_COST}** coins to start. You have **{economy.balance(user.id):,}**.\n"
+            f"_Run `/work` or `/daily` to get some bread first._",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -RUN_ENTRY_COST, "run entry")
+    track_economy_event("spent", RUN_ENTRY_COST)
+
+    state = {"hustle": None, "pot": 0, "heat": 0, "log": []}
+    ACTIVE_RUNS[user.id] = {"state": state}
+
+    embed = discord.Embed(
+        title="🏃 THE STREET HUSTLE",
+        description=(
+            f"_Tonight you've got **{RUN_ENTRY_COST}** coins and a plan._\n\n"
+            f"**Pick your hustle:**\n\n"
+            + "\n".join(
+                f"{h['emoji']} **{h['name']}** — _{h['desc']}_"
+                for h in HUSTLES.values()
+            )
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text="60 seconds to choose. Bail at any stage = half refund.")
+
+    view = RunView(user.id, "stage1", state)
+    await interaction.response.send_message(embed=embed, view=view)
+    msg = await interaction.original_response()
+    ACTIVE_RUNS[user.id]["message"] = msg
+    ACTIVE_RUNS[user.id]["view"] = view
+
+
 @tree.command(name="commands", description="See all bot commands organized by category.")
 async def commands_command(interaction: discord.Interaction):
     embed = _build_commands_home_embed()
@@ -13504,6 +13951,16 @@ def _build_commands_home_embed() -> discord.Embed:
             "**Use `/` to type any command, or `_` as a prefix shortcut (e.g. `_balance`)**"
         ),
         color=discord.Color.gold(),
+    )
+
+    embed.add_field(
+        name="\U0001F3C3 \u2b50 FLAGSHIP: THE STREET HUSTLE",
+        value=(
+            "**`/run`** \u2014 _Choose-your-own-adventure street hustle._\n"
+            "Pick your hustle, navigate encounters, take your shot at a JACKPOT.\n"
+            "**100 coin entry. No cooldown. Different every time.**"
+        ),
+        inline=False,
     )
 
     embed.add_field(
@@ -13556,6 +14013,7 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
             "title": "\U0001F4B0 ECONOMY \u2014 Earn & Spend",
             "color": discord.Color.gold(),
             "fields": [
+                ("\u2b50 FLAGSHIP", "**`/run`** \u2014 Street Hustle: branching adventure for coins. Jackpots possible. No cooldown."),
                 ("Earning", "`/daily` Daily reward (24h)\n`/weekly` Weekly reward (7d)\n`/work` Work for coins (45m)\n`/beg` Beg for change (10m)"),
                 ("Spending & Transfers", "`/balance` Check wallet\n`/pay` Send coins to a user\n`/leaderboard` Richest users"),
                 ("Risky Plays", "`/rob` Try to rob someone (2h cd)\n`/crime` Commit a crime (2h cd)\n`/bet` Double or nothing"),
@@ -13848,6 +14306,8 @@ PREFIX_COMMANDS = {
     "daily":        ("daily",         []),
     "weekly":       ("weekly",        []),
     "work":         ("work",          []),
+    "run":          ("run",           []),
+    "hustle":       ("run",           []),
     "beg":          ("beg",           []),
     "rob":          ("rob",           [{"name":"target","type":"user","required":True}]),
     "pay":          ("pay",           [{"name":"user","type":"user","required":True},{"name":"amount","type":"int","required":True}]),
