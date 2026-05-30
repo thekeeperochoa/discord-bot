@@ -2818,18 +2818,6 @@ async def flip_command(interaction: discord.Interaction):
     await msg.edit(content=result)
 
 
-@tree.command(name="8ball", description="Ask the magic 8-ball a question.")
-@discord.app_commands.describe(question="Your yes/no question")
-async def eightball_command(interaction: discord.Interaction, question: str):
-    answers = [
-        "Absolutely.", "No chance.", "Without a doubt.", "Definitely not.",
-        "Ask again later.", "My sources say yes.", "Very doubtful.",
-        "Outlook good.", "It is certain.", "Don't count on it.",
-        "Signs point to yes.", "Reply hazy, try again.", "Cannot predict now.",
-        "Better not tell you now.", "Concentrate and ask again.",
-    ]
-    answer = random.choice(answers)
-    await interaction.response.send_message(f"🎱 **Q:** {question}\n**A:** {answer}")
 
 
 @tree.command(name="rps", description="Play rock paper scissors against the bot.")
@@ -2858,106 +2846,7 @@ async def rps_command(interaction: discord.Interaction, choice: discord.app_comm
     )
 
 
-@tree.command(name="rate", description="Rate something out of 10.")
-@discord.app_commands.describe(thing="What should I rate?")
-async def rate_command(interaction: discord.Interaction, thing: str):
-    score = random.randint(0, 10)
-    bar = "🟩" * score + "⬜" * (10 - score)
-    comments = {
-        0:"absolute trash", 1:"barely registers", 2:"yikes", 3:"questionable",
-        4:"meh", 5:"average", 6:"not bad", 7:"solid", 8:"impressive",
-        9:"elite", 10:"perfection"
-    }
-    await interaction.response.send_message(
-        f"**{thing}**\n{bar} **{score}/10** — _{comments[score]}_"
-    )
 
-
-@tree.command(name="ship", description="Ship two users together. See compatibility %.")
-@discord.app_commands.describe(user1="First person (mention or name)", user2="Second person (mention or name)")
-async def ship_command(interaction: discord.Interaction, user1: str, user2: str):
-    # Try to resolve as Discord members first, fall back to plain text
-    def resolve(s: str):
-        s = s.strip()
-        # Mention format <@123> or <@!123>
-        m = re.match(r"<@!?(\d+)>", s)
-        if m and interaction.guild:
-            member = interaction.guild.get_member(int(m.group(1)))
-            if member:
-                return member.display_name, member.id, member.mention
-        # Try by name in guild
-        if interaction.guild:
-            for member in interaction.guild.members:
-                if s.lower() in (member.display_name.lower(), member.name.lower()):
-                    return member.display_name, member.id, member.mention
-        # Fallback: just use the string, no mention
-        return s, hash(s.lower()), s
-
-    name1, id1, mention1 = resolve(user1)
-    name2, id2, mention2 = resolve(user2)
-
-    seed = int(id1) ^ int(id2)
-    rng = random.Random(seed)
-    score = rng.randint(0, 100)
-    bar_len = 20
-    filled = round(score / 100 * bar_len)
-    ship_name = name1[:max(1, len(name1)//2)] + name2[len(name2)//2:]
-    if score < 20:    verdict = "💀 disaster"
-    elif score < 40:  verdict = "😬 awkward"
-    elif score < 60:  verdict = "🤔 mid"
-    elif score < 80:  verdict = "😍 promising"
-    else:             verdict = "💍 soulmates"
-
-    header = f"💞 {mention1} + {mention2}\n*Calculating compatibility...*"
-    # Suppress mention pings on the animation frames so we don't ping users repeatedly
-    silent = discord.AllowedMentions.none()
-
-    await interaction.response.send_message(
-        f"💞 {mention1} + {mention2}\n\n🔍 *analyzing chemistry...*",
-        allowed_mentions=silent,
-    )
-    msg = await interaction.original_response()
-    await asyncio.sleep(1.0)
-
-    # Loading bar fills up
-    for i in range(1, bar_len + 1):
-        bar = "💗" * i + "⬜" * (bar_len - i)
-        await msg.edit(
-            content=f"💞 {mention1} + {mention2}\n{bar}",
-            allowed_mentions=silent,
-        )
-        await asyncio.sleep(0.12)
-
-    await asyncio.sleep(0.4)
-    # Brief suspense
-    await msg.edit(
-        content=f"💞 {mention1} + {mention2}\n{'💗' * bar_len}\n*results incoming...*",
-        allowed_mentions=silent,
-    )
-    await asyncio.sleep(1.0)
-
-    # Number rolls up to final score (last frame pings nobody to avoid double-ping)
-    steps = max(score, 1)
-    increments = list(range(0, score + 1, max(1, score // 12))) or [0]
-    if increments[-1] != score:
-        increments.append(score)
-    for s in increments:
-        f = round(s / 100 * bar_len)
-        bar = "💗" * f + "🖤" * (bar_len - f)
-        await msg.edit(
-            content=f"💞 {mention1} + {mention2}\n{bar}  **{s}%**",
-            allowed_mentions=silent,
-        )
-        await asyncio.sleep(0.18)
-
-    # Final reveal — this one pings the actual users
-    final_bar = "💗" * filled + "🖤" * (bar_len - filled)
-    final = (
-        f"## 💞 {mention1} + {mention2} = **{ship_name}**\n"
-        f"{final_bar}\n"
-        f"### **{score}%** — _{verdict}_"
-    )
-    await msg.edit(content=final)
 
 
 # ── 🔫 /duel ─────────────────────────────────────────────────────────────────
@@ -3149,55 +3038,6 @@ HEIST_LOOT = [
     ("📿", "pearl necklace"), ("🪙", "gold coin"),
 ]
 
-
-@tree.command(name="hack", description="Hack into a user's most embarrassing data.")
-@discord.app_commands.describe(target="Who to hack")
-async def hack_command(interaction: discord.Interaction, target: discord.Member):
-    silent = discord.AllowedMentions.none()
-    await interaction.response.defer()
-
-    async def edit(content):
-        try:
-            await interaction.edit_original_response(content=content, allowed_mentions=silent)
-        except Exception:
-            pass
-
-    await edit(f"```\n> initiating hack on {target.display_name}...\n```")
-    await asyncio.sleep(0.8)
-
-    log_lines = [f"> initiating hack on {target.display_name}..."]
-    stages = [
-        "> bypassing firewall...",
-        "> spoofing IP address...",
-        "> connecting to mainframe...",
-        "> [████░░░░░░] 40%",
-        "> [████████░░] 80%",
-        "> [██████████] 100%",
-        "> ACCESS GRANTED",
-        "> decrypting data...",
-    ]
-    for s in stages:
-        log_lines.append(s)
-        terminal = "```\n" + "\n".join(log_lines[-8:]) + "\n```"
-        await edit(terminal)
-        await asyncio.sleep(0.5)
-
-    findings = random.sample(HACK_FAKE_FINDINGS, 4)
-    final_terminal = (
-        "```\n"
-        + "\n".join(log_lines[-4:])
-        + "\n\n"
-        + "=== CONFIDENTIAL FILE ===\n"
-        + f"target: {target.display_name}\n\n"
-        + "\n".join(f"  - {f}" for f in findings)
-        + "\n\n=== END OF FILE ===\n"
-        + "```"
-    )
-    final = f"💻 **HACK SUCCESSFUL** on {target.mention}\n\n{final_terminal}"
-    try:
-        await interaction.edit_original_response(content=final)
-    except Exception:
-        pass
 
 
 # ── 🥊 /rps-tournament ───────────────────────────────────────────────────────
@@ -8825,6 +8665,14 @@ async def on_reaction_add(reaction: discord.Reaction, user):
     # Ignore bots and self-reactions
     if user.bot:
         return
+
+    # ── Coin drop grab — handle BEFORE the bot-author bailout ──
+    try:
+        if await handle_coin_drop_grab(reaction, user):
+            return  # claim handled, skip reaction reward
+    except Exception as e:
+        log.warning("coin drop grab failed: %s", e)
+
     msg = reaction.message
     if msg.author.bot or msg.author.id == user.id:
         return
@@ -14026,8 +13874,8 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
                 ("Casino", "`/slots` Spin the slots\n`/blackjack` Beat the dealer\n`/wheel` Wheel of fortune\n`/casino` Browse casino games"),
                 ("Multiplayer PvP", "`/duel` Quick 1v1 duel\n`/fight` 60s fight w/ spectator bets\n`/gun` Russian roulette (2-4p)"),
                 ("Lobby Games", "`/rs` Race tag (up to 3)\n`/shootout` Lobby + doors\n`/bomb` Hot potato\n`/connect4` Classic Connect 4\n`/rps` Rock-paper-scissors\n`/rps-tournament` Bracket RPS\n`/lieordie` Lie detector"),
-                ("Fun & Solo", "`/roll` Dice\n`/flip` Coin flip\n`/8ball` Magic 8-ball\n`/rate` Get rated\n`/ship` Ship two users\n`/quest` AI choose-adventure"),
-                ("AI Roleplay", "`/court` Criminal trial (no $)\n`/lawsuit` Civil suit (real $)\n`/tarot` Tarot reading\n`/roast` AI roast\n`/bio` Generate a bio\n`/analyze` Analyze a user\n`/hack` Pretend hack"),
+                ("Fun & Solo", "`/roll` Dice\n`/flip` Coin flip\n`/quest` AI choose-adventure"),
+                ("AI Roleplay", "`/court` Criminal trial (no $)\n`/lawsuit` Civil suit (real $)\n`/tarot` Tarot reading\n`/roast` AI roast\n`/bio` Generate a bio\n`/analyze` Analyze a user"),
             ],
         },
         "passive": {
@@ -14404,11 +14252,7 @@ PREFIX_COMMANDS = {
     "notifications":("notifications", []),
     "notif":        ("notifications", []),
     "dms":          ("notifications", []),
-    "hack":         ("hack",          [{"name":"target","type":"user","required":True}]),
     # Fun
-    "ship":         ("ship",          [{"name":"user1","type":"str","required":True},{"name":"user2","type":"str","required":True}]),
-    "rate":         ("rate",          [{"name":"thing","type":"rest_str","required":True}]),
-    "8ball":        ("8ball",         [{"name":"question","type":"rest_str","required":True}]),
     "rps":          ("rps",           [{"name":"choice","type":"str","required":True}]),
     "roll":         ("roll",          [{"name":"sides","type":"int","required":False,"default":100}]),
     "flip":         ("flip",          []),
@@ -14593,6 +14437,162 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     return True
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 💰 RANDOM COIN DROPS
+# Passive engagement system. Every X messages in a channel, coins drop.
+# First person to react with 💰 grabs them. Adds an "always something
+# happening" feel to active channels without needing any slash command.
+# ─────────────────────────────────────────────────────────────────────────────
+COINDROP_FILE = MEMORY_DIR / "coindrop.json"
+COINDROP_MESSAGES_NEEDED = 30  # messages in channel between possible drops
+COINDROP_CHANCE = 0.15  # 15% chance to drop once threshold met
+COINDROP_MIN = 50
+COINDROP_MAX = 500
+COINDROP_RARE_CHANCE = 0.05  # 5% of drops are big drops (5-25 coins → 500-2500)
+COINDROP_GRAB_TIMEOUT = 120  # seconds before drop expires
+COINDROP_MIN_INTERVAL = 600  # min 10 min between drops per channel
+
+# In-memory tracking
+_coindrop_msg_counts: dict[str, int] = {}  # channel_id -> messages since last drop
+_coindrop_last_fired: dict[str, float] = {}  # channel_id -> ts of last drop
+_active_drops: dict[int, dict] = {}  # message_id -> {channel_id, amount, expires_at}
+
+
+def _load_coindrop_cfg() -> dict:
+    if COINDROP_FILE.exists():
+        try:
+            with open(COINDROP_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"enabled": True, "disabled_channels": []}
+
+
+def _save_coindrop_cfg(data: dict):
+    with open(COINDROP_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+async def handle_coin_drop(message: discord.Message):
+    """Called on every non-bot message. Maybe drops coins in active channels."""
+    if not message.guild:
+        return
+    cfg = _load_coindrop_cfg()
+    if not cfg.get("enabled", True):
+        return
+    channel_id = str(message.channel.id)
+    if channel_id in cfg.get("disabled_channels", []):
+        return
+
+    # Increment message counter
+    _coindrop_msg_counts[channel_id] = _coindrop_msg_counts.get(channel_id, 0) + 1
+
+    # Need enough messages since last drop
+    if _coindrop_msg_counts[channel_id] < COINDROP_MESSAGES_NEEDED:
+        return
+
+    # Cooldown — no drops within 10min of the last one in this channel
+    last = _coindrop_last_fired.get(channel_id, 0)
+    if time.time() - last < COINDROP_MIN_INTERVAL:
+        return
+
+    # Roll
+    if random.random() > COINDROP_CHANCE:
+        return
+
+    # Drop!
+    _coindrop_msg_counts[channel_id] = 0
+    _coindrop_last_fired[channel_id] = time.time()
+
+    is_rare = random.random() < COINDROP_RARE_CHANCE
+    if is_rare:
+        amount = random.randint(COINDROP_MIN * 10, COINDROP_MAX * 5)
+        emoji = "💎"
+        title = "💎 RARE COIN DROP!"
+    else:
+        amount = random.randint(COINDROP_MIN, COINDROP_MAX)
+        emoji = "💰"
+        title = "💰 Coins dropped!"
+
+    embed = discord.Embed(
+        title=title,
+        description=f"**{amount:,} coins** appeared!\nReact with {emoji} to grab them.",
+        color=discord.Color.gold() if is_rare else discord.Color.dark_gold(),
+    )
+    embed.set_footer(text=f"First to react wins • Expires in {COINDROP_GRAB_TIMEOUT}s")
+
+    try:
+        drop_msg = await message.channel.send(embed=embed)
+        await drop_msg.add_reaction(emoji)
+        _active_drops[drop_msg.id] = {
+            "channel_id": message.channel.id,
+            "amount": amount,
+            "emoji": emoji,
+            "is_rare": is_rare,
+            "expires_at": time.time() + COINDROP_GRAB_TIMEOUT,
+            "claimed": False,
+        }
+        # Schedule cleanup
+        asyncio.create_task(_expire_coin_drop(drop_msg.id, drop_msg))
+    except Exception as e:
+        log.warning("coin drop send failed: %s", e)
+
+
+async def _expire_coin_drop(msg_id: int, drop_msg):
+    """Wait, then expire the drop if unclaimed."""
+    await asyncio.sleep(COINDROP_GRAB_TIMEOUT)
+    drop = _active_drops.get(msg_id)
+    if not drop or drop["claimed"]:
+        _active_drops.pop(msg_id, None)
+        return
+    _active_drops.pop(msg_id, None)
+    try:
+        await drop_msg.edit(embed=discord.Embed(
+            title="💨 Coin drop expired",
+            description=f"_The {drop['amount']:,} coins blew away in the wind._",
+            color=discord.Color.greyple(),
+        ))
+        await drop_msg.clear_reactions()
+    except Exception:
+        pass
+
+
+async def handle_coin_drop_grab(reaction: discord.Reaction, user):
+    """Called from on_reaction_add when someone reacts to a coin drop."""
+    if user.bot:
+        return False
+    msg_id = reaction.message.id
+    drop = _active_drops.get(msg_id)
+    if not drop:
+        return False
+    if drop["claimed"]:
+        return False
+    if str(reaction.emoji) != drop["emoji"]:
+        return False
+    # Grab it!
+    drop["claimed"] = True
+    amount = drop["amount"]
+    new_bal = economy.add(user.id, amount, "coin drop grab")
+    try:
+        track_economy_event("earned", amount)
+        track_activity("coin_drop", user.id, user.display_name, f"grabbed {amount:,} coins from a drop")
+    except Exception:
+        pass
+
+    title_suffix = " — 💎 RARE!" if drop["is_rare"] else ""
+    try:
+        await reaction.message.edit(embed=discord.Embed(
+            title=f"✅ Coins grabbed{title_suffix}",
+            description=f"{user.mention} grabbed **{amount:,} coins**!\n💰 New balance: **{new_bal:,}**",
+            color=discord.Color.green(),
+        ))
+        await reaction.message.clear_reactions()
+    except Exception:
+        pass
+    _active_drops.pop(msg_id, None)
+    return True
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot and message.author != client.user:
@@ -14618,6 +14618,12 @@ async def on_message(message: discord.Message):
             asyncio.create_task(handle_voice_transcription(message))
     except Exception as e:
         log.warning("voice transcription failed: %s", e)
+
+    # ── Random coin drops (passive — fires on message activity) ──────────────
+    try:
+        await handle_coin_drop(message)
+    except Exception as e:
+        log.warning("coin drop failed: %s", e)
 
     # ── Random events: check if this answers an active event ─────────────────
     try:
