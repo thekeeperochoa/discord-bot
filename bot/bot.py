@@ -14621,6 +14621,510 @@ async def market_expire_scheduler():
             log.exception("market_expire_scheduler: %s", e)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏘️ /realestate — Property investment
+# 9 property tiers + 3 LEGENDARY unique properties.
+# Rent income + price appreciation. Condition decays without upkeep.
+# ─────────────────────────────────────────────────────────────────────────────
+REALESTATE_FILE = MEMORY_DIR / "realestate.json"
+RE_CONDITION_DECAY_PER_HOUR = 1.5  # condition drops 1.5/hr (100/hr → ~67 hr to fall to 0)
+RE_MIN_CONDITION_FOR_RENT = 30  # below this, no rent income
+RE_MAX_CONDITION = 100
+RE_RENT_COLLECT_COOLDOWN_HOURS = 6
+RE_PRICE_FLUCTUATION_PCT = 0.05  # ±5% daily drift
+RE_APPRECIATION_PER_DAY = 0.005  # 0.5%/day baseline appreciation
+RE_MAX_PROPERTIES_PER_USER = 8
+
+# Property catalog
+PROPERTIES = {
+    # ── Common (tier 1) ────────────────────────────────────────────────────
+    "studio": {
+        "emoji": "🏚️", "name": "Studio Apartment", "tier": 1, "unique": False,
+        "base_price": 5_000, "rent_per_hour": 60,
+        "desc": "Tiny, but it's yours.",
+    },
+    "condo": {
+        "emoji": "🏘️", "name": "City Condo", "tier": 1, "unique": False,
+        "base_price": 15_000, "rent_per_hour": 180,
+        "desc": "Decent views. Decent tenants.",
+    },
+    # ── Mid (tier 2) ────────────────────────────────────────────────────────
+    "townhouse": {
+        "emoji": "🏠", "name": "Townhouse", "tier": 2, "unique": False,
+        "base_price": 40_000, "rent_per_hour": 480,
+        "desc": "Suburb starter. Steady cash.",
+    },
+    "duplex": {
+        "emoji": "🏡", "name": "Rental Duplex", "tier": 2, "unique": False,
+        "base_price": 75_000, "rent_per_hour": 950,
+        "desc": "Two units, two rent checks.",
+    },
+    # ── High (tier 3) ───────────────────────────────────────────────────────
+    "loft": {
+        "emoji": "🏢", "name": "Industrial Loft", "tier": 3, "unique": False,
+        "base_price": 150_000, "rent_per_hour": 2_000,
+        "desc": "Exposed brick. Trust fund tenants.",
+    },
+    "beachhouse": {
+        "emoji": "🏖️", "name": "Beach House", "tier": 3, "unique": False,
+        "base_price": 300_000, "rent_per_hour": 4_200,
+        "desc": "Airbnb gold mine.",
+    },
+    # ── Elite (tier 4) ──────────────────────────────────────────────────────
+    "mansion": {
+        "emoji": "🏰", "name": "Hillside Mansion", "tier": 4, "unique": False,
+        "base_price": 600_000, "rent_per_hour": 9_000,
+        "desc": "Pool. View. Trouble.",
+    },
+    "skytower": {
+        "emoji": "🏙️", "name": "Sky Tower Floor", "tier": 4, "unique": False,
+        "base_price": 1_200_000, "rent_per_hour": 18_000,
+        "desc": "Own a whole floor. Hedge fund clients.",
+    },
+    # ── LEGENDARY (unique — only ONE owner ever) ───────────────────────────
+    "penthouse": {
+        "emoji": "🌃", "name": "Times Square Penthouse", "tier": 5, "unique": True,
+        "base_price": 5_000_000, "rent_per_hour": 80_000,
+        "desc": "🏆 LEGENDARY — Only ONE exists. Whoever owns it owns the skyline.",
+    },
+    "casino": {
+        "emoji": "🎰", "name": "Off-Strip Casino", "tier": 5, "unique": True,
+        "base_price": 8_000_000, "rent_per_hour": 130_000,
+        "desc": "🏆 LEGENDARY — Print money. Attract problems.",
+    },
+    "island": {
+        "emoji": "🏝️", "name": "Private Island", "tier": 5, "unique": True,
+        "base_price": 12_000_000, "rent_per_hour": 200_000,
+        "desc": "🏆 LEGENDARY — The ultimate flex. One per server.",
+    },
+}
+
+
+def _load_re() -> dict:
+    if REALESTATE_FILE.exists():
+        try:
+            with open(REALESTATE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}, "market_date": "", "market_modifiers": {}, "legendary_owners": {}}
+
+
+def _save_re(data: dict):
+    with open(REALESTATE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _re_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _re_update_market(data: dict):
+    """Apply daily price drift (±5%) and baseline appreciation (+0.5%/day)."""
+    today = _re_today()
+    if data.get("market_date") == today:
+        return
+    mods = data.get("market_modifiers", {})
+    for key in PROPERTIES:
+        cur = mods.get(key, 1.0)
+        # Daily drift
+        drift = random.uniform(-RE_PRICE_FLUCTUATION_PCT, RE_PRICE_FLUCTUATION_PCT)
+        # Long-term baseline appreciation
+        new_mod = cur * (1 + drift + RE_APPRECIATION_PER_DAY)
+        # Cap drift so values don't go insane
+        new_mod = max(0.5, min(3.5, new_mod))
+        mods[key] = new_mod
+    data["market_modifiers"] = mods
+    data["market_date"] = today
+    _save_re(data)
+
+
+def _re_current_price(prop_key: str, data: dict = None) -> int:
+    if data is None:
+        data = _load_re()
+    base = PROPERTIES[prop_key]["base_price"]
+    mod = data.get("market_modifiers", {}).get(prop_key, 1.0)
+    return int(base * mod)
+
+
+def _re_decay_condition(prop: dict):
+    """Apply condition decay since last_updated."""
+    now = time.time()
+    last = prop.get("last_updated", now)
+    hours = (now - last) / 3600
+    if hours <= 0:
+        return
+    decay = hours * RE_CONDITION_DECAY_PER_HOUR
+    prop["condition"] = max(0, prop.get("condition", RE_MAX_CONDITION) - decay)
+    prop["last_updated"] = now
+
+
+def _re_pending_rent(prop: dict) -> int:
+    """Rent accumulated since last collect."""
+    _re_decay_condition(prop)
+    if prop.get("condition", 0) < RE_MIN_CONDITION_FOR_RENT:
+        return 0
+    now = time.time()
+    last = prop.get("last_rent_collected", prop.get("purchased_at", now))
+    hours_since = (now - last) / 3600
+    # Cap accumulation at 48 hours
+    hours_since = min(hours_since, 48)
+    if hours_since < RE_RENT_COLLECT_COOLDOWN_HOURS:
+        return 0
+    info = PROPERTIES.get(prop["type"])
+    if not info:
+        return 0
+    rent = int(info["rent_per_hour"] * hours_since)
+    # Apply condition penalty
+    cond_pct = prop["condition"] / RE_MAX_CONDITION
+    rent = int(rent * cond_pct)
+    return rent
+
+
+def _user_properties(uid: int) -> list:
+    data = _load_re()
+    return data.get("users", {}).get(str(uid), [])
+
+
+# ── /realestate command (multi-action dispatcher) ────────────────────────────
+@tree.command(name="realestate", description="🏘️ Buy property, collect rent, manage condition. Long-term wealth.")
+@discord.app_commands.describe(action="What do you want to do?")
+@discord.app_commands.choices(
+    action=[
+        discord.app_commands.Choice(name="🏬 Market — see all properties and prices", value="market"),
+        discord.app_commands.Choice(name="🏠 Portfolio — see your properties", value="portfolio"),
+        discord.app_commands.Choice(name="💰 Buy — purchase a property", value="buy"),
+        discord.app_commands.Choice(name="💸 Sell — list to market (instant cash)", value="sell"),
+        discord.app_commands.Choice(name="🧰 Repair — restore property condition", value="repair"),
+        discord.app_commands.Choice(name="🪙 Collect Rent — claim earnings", value="collect"),
+    ]
+)
+@discord.app_commands.describe(
+    property_type="(For Buy/Sell/Repair) Which property (run market to see options)",
+    slot="(For Sell/Repair) Slot index (1-based, see portfolio)",
+)
+async def realestate_command(
+    interaction: discord.Interaction,
+    action: discord.app_commands.Choice[str],
+    property_type: str = None,
+    slot: int = None,
+):
+    data = _load_re()
+    _re_update_market(data)
+
+    if action.value == "market":
+        await _re_market(interaction, data)
+    elif action.value == "portfolio":
+        await _re_portfolio(interaction)
+    elif action.value == "buy":
+        await _re_buy(interaction, data, property_type)
+    elif action.value == "sell":
+        await _re_sell(interaction, data, slot)
+    elif action.value == "repair":
+        await _re_repair(interaction, data, slot)
+    elif action.value == "collect":
+        await _re_collect(interaction, data)
+
+
+async def _re_market(interaction, data):
+    today = _re_today()
+    embed = discord.Embed(
+        title=f"🏬 Real Estate Market — {today}",
+        description=f"_Prices fluctuate daily ±5% with long-term appreciation. {RE_APPRECIATION_PER_DAY*100:.1f}%/day baseline._",
+        color=discord.Color.dark_gold(),
+    )
+    # Group by tier
+    tiers = {}
+    for key, info in PROPERTIES.items():
+        tiers.setdefault(info["tier"], []).append((key, info))
+
+    tier_names = {1: "🥉 Tier 1 — Starter", 2: "🥈 Tier 2 — Mid", 3: "🥇 Tier 3 — Premium",
+                  4: "💎 Tier 4 — Elite", 5: "🏆 Tier 5 — LEGENDARY (unique)"}
+
+    legendary_owners = data.get("legendary_owners", {})
+
+    for tier in sorted(tiers.keys()):
+        lines = []
+        for key, info in tiers[tier]:
+            price = _re_current_price(key, data)
+            base = info["base_price"]
+            change_pct = ((price / base) - 1) * 100
+            arrow = "📈" if change_pct > 5 else "📉" if change_pct < -5 else "➖"
+            if info["unique"]:
+                owner_id = legendary_owners.get(key)
+                if owner_id:
+                    lines.append(f"{info['emoji']} **{info['name']}** — _OWNED_ by <@{owner_id}> ❌")
+                else:
+                    lines.append(
+                        f"{info['emoji']} **{info['name']}** {arrow} **{price:,}** ({change_pct:+.1f}%)\n"
+                        f"   💰 {info['rent_per_hour']:,}/hr • _{info['desc']}_"
+                    )
+            else:
+                lines.append(
+                    f"{info['emoji']} **{info['name']}** {arrow} **{price:,}** ({change_pct:+.1f}%)\n"
+                    f"   💰 {info['rent_per_hour']:,}/hr • `{key}`"
+                )
+        embed.add_field(name=tier_names.get(tier, f"Tier {tier}"), value="\n".join(lines), inline=False)
+    embed.set_footer(text="Buy with: /realestate action:buy property_type:<key>")
+    await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _re_portfolio(interaction):
+    props = _user_properties(interaction.user.id)
+    if not props:
+        await interaction.response.send_message(
+            "_You don't own any properties. Hit `/realestate action:market` to see what's for sale._",
+            ephemeral=True,
+        )
+        return
+    data = _load_re()
+    embed = discord.Embed(
+        title=f"🏠 {interaction.user.display_name}'s Real Estate Portfolio",
+        color=discord.Color.gold(),
+    )
+    total_value = 0
+    total_pending = 0
+    for i, prop in enumerate(props, start=1):
+        info = PROPERTIES.get(prop["type"], {"emoji": "🏚️", "name": "?"})
+        _re_decay_condition(prop)
+        cond = int(prop["condition"])
+        cond_emoji = "🟢" if cond >= 70 else "🟡" if cond >= 40 else "🔴"
+        value = _re_current_price(prop["type"], data)
+        pending = _re_pending_rent(prop)
+        total_value += value
+        total_pending += pending
+        lines = [
+            f"💰 Value: **{value:,}** • Rent: **{info.get('rent_per_hour', 0):,}/hr**",
+            f"{cond_emoji} Condition: **{cond}/100**",
+            f"💵 Pending rent: **{pending:,}**" if pending > 0 else "💵 Pending rent: _none yet (6h cooldown)_",
+        ]
+        if cond < RE_MIN_CONDITION_FOR_RENT:
+            lines.append(f"⚠️ **Below {RE_MIN_CONDITION_FOR_RENT}% — no rent until repaired**")
+        embed.add_field(
+            name=f"#{i} {info['emoji']} {info['name']}",
+            value="\n".join(lines),
+            inline=False,
+        )
+    _save_re(data)  # persist condition decay
+    embed.add_field(
+        name="📊 TOTALS",
+        value=f"Total value: **{total_value:,}**\nPending rent: **{total_pending:,}**",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+async def _re_buy(interaction, data, property_type):
+    if not property_type:
+        await interaction.response.send_message(
+            "❌ Specify `property_type:` (e.g. `studio`, `condo`, `mansion`).\n_See options with `action:market`._",
+            ephemeral=True,
+        )
+        return
+    property_type = property_type.lower().strip()
+    if property_type not in PROPERTIES:
+        await interaction.response.send_message(
+            f"❌ Unknown property. Choose from: {', '.join(PROPERTIES.keys())}",
+            ephemeral=True,
+        )
+        return
+    info = PROPERTIES[property_type]
+    user = interaction.user
+
+    # Max properties guard
+    user_props = data.get("users", {}).get(str(user.id), [])
+    if len(user_props) >= RE_MAX_PROPERTIES_PER_USER:
+        await interaction.response.send_message(
+            f"❌ Max **{RE_MAX_PROPERTIES_PER_USER}** properties per user. Sell something first.",
+            ephemeral=True,
+        )
+        return
+
+    # Legendary uniqueness check
+    if info["unique"]:
+        owners = data.get("legendary_owners", {})
+        if property_type in owners:
+            await interaction.response.send_message(
+                f"❌ The **{info['name']}** is already owned by <@{owners[property_type]}>. Only one exists.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+    price = _re_current_price(property_type, data)
+    if economy.balance(user.id) < price:
+        await interaction.response.send_message(
+            f"❌ Need **{price:,}** coins. You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    economy.add(user.id, -price, f"realestate buy {property_type}")
+    now = time.time()
+    prop_data = {
+        "type": property_type,
+        "purchased_at": now,
+        "purchase_price": price,
+        "condition": RE_MAX_CONDITION,
+        "last_updated": now,
+        "last_rent_collected": now,
+    }
+    data.setdefault("users", {}).setdefault(str(user.id), []).append(prop_data)
+    if info["unique"]:
+        data.setdefault("legendary_owners", {})[property_type] = user.id
+    _save_re(data)
+
+    legendary_str = " 🏆 LEGENDARY" if info["unique"] else ""
+    await interaction.response.send_message(
+        f"# {info['emoji']} PROPERTY ACQUIRED{legendary_str}\n\n"
+        f"You bought **{info['name']}** for **{price:,}** coins.\n"
+        f"💰 Rent: **{info['rent_per_hour']:,}/hr** • Condition: **100/100**\n\n"
+        f"_Condition decays 1.5%/hr. Below 30% = no rent. Repair regularly._"
+    )
+    try:
+        track_economy_event("spent", price)
+        track_feature_use("realestate")
+        track_activity("realestate_buy", user.id, user.display_name, f"bought {info['name']} for {price:,}{legendary_str}")
+        if info["unique"]:
+            # Broadcast LEGENDARY purchases
+            cfg = load_config()
+            nc = get_notification_channel_id(cfg)
+            if nc:
+                ch = client.get_channel(int(nc))
+                if ch:
+                    await ch.send(
+                        f"🏆 **LEGENDARY PURCHASE** 🏆\n"
+                        f"{user.mention} just bought the **{info['name']}** for **{price:,}** coins. "
+                        f"Only one exists.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+    except Exception:
+        pass
+
+
+async def _re_sell(interaction, data, slot):
+    user = interaction.user
+    props = data.get("users", {}).get(str(user.id), [])
+    if not props:
+        await interaction.response.send_message("❌ You don't own any properties.", ephemeral=True)
+        return
+    if slot is None or slot < 1 or slot > len(props):
+        await interaction.response.send_message(
+            f"❌ Specify a valid `slot:` between 1 and {len(props)}. Check `action:portfolio`.",
+            ephemeral=True,
+        )
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"])
+    # Market sale (instant) — current price × condition factor (90% min)
+    current = _re_current_price(prop["type"], data)
+    _re_decay_condition(prop)
+    cond_factor = max(0.5, prop["condition"] / RE_MAX_CONDITION * 0.5 + 0.5)
+    payout = int(current * cond_factor)
+
+    # Remove property
+    props.pop(slot - 1)
+    # If legendary, free the unique slot
+    if info and info.get("unique"):
+        owners = data.get("legendary_owners", {})
+        if owners.get(prop["type"]) == user.id:
+            owners.pop(prop["type"], None)
+    _save_re(data)
+
+    economy.add(user.id, payout, "realestate sell")
+    await interaction.response.send_message(
+        f"💰 **SOLD** {info['emoji']} **{info['name']}** for **{payout:,}** coins "
+        f"_(condition factor {cond_factor:.0%})_\n"
+        f"Original purchase: {prop.get('purchase_price', 0):,} • P/L: **{payout - prop.get('purchase_price', 0):+,}**"
+    )
+    try:
+        track_economy_event("earned", payout)
+        track_activity("realestate_sell", user.id, user.display_name, f"sold {info['name']} for {payout:,}")
+    except Exception:
+        pass
+
+
+async def _re_repair(interaction, data, slot):
+    user = interaction.user
+    props = data.get("users", {}).get(str(user.id), [])
+    if not props or slot is None or slot < 1 or slot > len(props):
+        await interaction.response.send_message(
+            f"❌ Specify a valid `slot:` (1-{len(props)}). Check `action:portfolio`.",
+            ephemeral=True,
+        )
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"])
+    _re_decay_condition(prop)
+    cond = prop["condition"]
+    if cond >= RE_MAX_CONDITION - 1:
+        await interaction.response.send_message(
+            f"✅ **{info['name']}** is already in perfect condition.",
+            ephemeral=True,
+        )
+        return
+    # Repair cost = 0.5% of base price per point of damage
+    damage = RE_MAX_CONDITION - cond
+    cost = int(info["base_price"] * 0.005 * damage)
+    if economy.balance(user.id) < cost:
+        await interaction.response.send_message(
+            f"❌ Repair costs **{cost:,}** ({damage:.0f} damage). You have **{economy.balance(user.id):,}**.",
+            ephemeral=True,
+        )
+        return
+    economy.add(user.id, -cost, "realestate repair")
+    prop["condition"] = RE_MAX_CONDITION
+    prop["last_updated"] = time.time()
+    _save_re(data)
+    await interaction.response.send_message(
+        f"🧰 **REPAIRED** {info['emoji']} **{info['name']}** to **100/100** for **{cost:,}** coins."
+    )
+    try:
+        track_economy_event("spent", cost)
+        track_activity("realestate_repair", user.id, user.display_name, f"repaired {info['name']} for {cost:,}")
+    except Exception:
+        pass
+
+
+async def _re_collect(interaction, data):
+    user = interaction.user
+    props = data.get("users", {}).get(str(user.id), [])
+    if not props:
+        await interaction.response.send_message("❌ You don't own any properties.", ephemeral=True)
+        return
+    total = 0
+    lines = []
+    for i, prop in enumerate(props, start=1):
+        info = PROPERTIES.get(prop["type"], {})
+        pending = _re_pending_rent(prop)
+        if pending > 0:
+            total += pending
+            prop["last_rent_collected"] = time.time()
+            lines.append(f"#{i} {info.get('emoji', '🏚️')} **{info.get('name', '?')}** — +{pending:,}")
+    _save_re(data)
+    if total <= 0:
+        await interaction.response.send_message(
+            "💤 No rent ready to collect yet. _(6h cooldown or condition too low)_",
+            ephemeral=True,
+        )
+        return
+    economy.add(user.id, total, "realestate rent")
+    response = (
+        f"# 🪙 RENT COLLECTED\n\n"
+        + "\n".join(lines)
+        + f"\n\n💰 **Total: {total:,}** • Balance: **{economy.balance(user.id):,}**"
+    )
+    if len(response) > 2000:
+        response = response[:1990] + "..."
+    await interaction.response.send_message(response)
+    try:
+        track_economy_event("earned", total)
+        track_feature_use("realestate")
+        track_activity("realestate_rent", user.id, user.display_name, f"collected {total:,} rent")
+    except Exception:
+        pass
+
+
 @tree.command(name="commands", description="See all bot commands organized by category.")
 async def commands_command(interaction: discord.Interaction):
     embed = _build_commands_home_embed()
@@ -14723,6 +15227,7 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
                 ("\U0001F436 Pets", "`/adopt` Get a pet (1,500)\n`/pet` View stats\n`/feed` Feed (50)\n`/collect` Claim earnings\n`/abandon` Give up your pet"),
                 ("\U0001F3E2 Businesses", "`/buybusiness` Buy (8 tiers)\n`/businesses` Portfolio\n`/collectbusiness` Claim earnings\n`/hire` Hire employee\n`/fire` Fire employee\n`/sabotage` Sabotage a rival"),
                 ("\U0001F303 Nightlife", "`/buyvenue` Open bar/club (7 tiers)\n`/venues` Portfolio\n`/collectvenue` Claim earnings\n`/hirestaff` Hire bartender/bouncer/DJ\n`/stockliquor` Stock liquor"),
+                ("\U0001F3D8\uFE0F Real Estate", "`/realestate action:market` See properties\n`/realestate action:buy` Buy property\n`/realestate action:collect` Claim rent\n`/realestate action:repair` Fix condition\n`/realestate action:portfolio` View yours"),
             ],
         },
         "dealer": {
@@ -14995,6 +15500,9 @@ PREFIX_COMMANDS = {
     "work":         ("work",          []),
     "marketplace":  ("marketplace",   [{"name":"action","type":"str","required":True},{"name":"listing_id","type":"str","required":False,"default":None},{"name":"bid_amount","type":"int","required":False,"default":None}]),
     "market":       ("marketplace",   [{"name":"action","type":"str","required":True},{"name":"listing_id","type":"str","required":False,"default":None},{"name":"bid_amount","type":"int","required":False,"default":None}]),
+    "realestate":   ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
+    "re":           ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
+    "property":     ("realestate",    [{"name":"action","type":"str","required":True},{"name":"property_type","type":"str","required":False,"default":None},{"name":"slot","type":"int","required":False,"default":None}]),
     "run":          ("run",           []),
     "hustle":       ("run",           []),
     "beg":          ("beg",           []),
@@ -15205,6 +15713,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name == "realestate":
+        action_val = kwargs.get("action", "").lower()
+        valid_actions = {"market", "portfolio", "buy", "sell", "repair", "collect"}
+        if action_val not in valid_actions:
+            await message.channel.send(
+                f"❌ Action must be one of: {', '.join(valid_actions)}"
+            )
+            return True
+        kwargs["action"] = discord.app_commands.Choice(name=action_val, value=action_val)
 
     if slash_name == "marketplace":
         action_val = kwargs.get("action", "").lower()
