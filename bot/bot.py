@@ -1543,6 +1543,14 @@ async def trigger_game_win(user_id: int, game: str, channel=None):
     _bump_counter(user_id, f"wins_{game}")
     _reset_counter(user_id, "loss_streak")
 
+    # Quest + tournament tracking
+    try:
+        track_quest_progress(user_id, "games_won")
+        track_quest_progress(user_id, "games_played")
+        add_tournament_score(user_id, games_won=1)
+    except Exception:
+        pass
+
     if wins == 1:
         await _grant_achievement(user_id, "first_win", channel)
     if wins >= 10:
@@ -1587,8 +1595,24 @@ async def trigger_game_win(user_id: int, game: str, channel=None):
                 await _grant_achievement(user_id, "lieordie_pro", channel)
 
 
+async def trigger_game_played(user_id: int, game: str):
+    """Lightweight tracker for games that don't call trigger_game_win/loss.
+    Records play for quest tracking + tournament + dashboard analytics.
+    Call this once per game START (before win/loss is known)."""
+    try:
+        track_quest_progress(user_id, "games_played")
+        add_tournament_score(user_id, commands_used=0)  # noop bump just to record activity
+    except Exception:
+        pass
+
+
 async def trigger_game_loss(user_id: int, game: str, channel=None):
     losses = _bump_counter(user_id, "total_losses")
+    # Quest tracking — losses still count toward "games played"
+    try:
+        track_quest_progress(user_id, "games_played")
+    except Exception:
+        pass
     if losses == 1:
         await _grant_achievement(user_id, "first_loss", channel)
 
@@ -2217,6 +2241,8 @@ async def race_command(
     racer2: discord.Member = None,
     racer3: discord.Member = None,
 ):
+    try: await trigger_game_played(interaction.user.id, "rs")
+    except Exception: pass
     channel_id = str(interaction.channel_id)
     if channel_id in active_races:
         await interaction.response.send_message("🏁 A race is already running here!", ephemeral=True)
@@ -2814,6 +2840,8 @@ async def eightball_command(interaction: discord.Interaction, question: str):
     discord.app_commands.Choice(name="✂️ Scissors", value="scissors"),
 ])
 async def rps_command(interaction: discord.Interaction, choice: discord.app_commands.Choice[str]):
+    try: await trigger_game_played(interaction.user.id, "rps")
+    except Exception: pass
     user = choice.value
     bot = random.choice(["rock", "paper", "scissors"])
     emoji = {"rock":"🪨","paper":"📄","scissors":"✂️"}
@@ -3181,6 +3209,8 @@ async def rps_tournament_command(
     p3: discord.Member,
     p4: discord.Member,
 ):
+    try: await trigger_game_played(interaction.user.id, "rps-tournament")
+    except Exception: pass
     silent = discord.AllowedMentions.none()
     starter = interaction.user
     candidates = [starter, p2, p3, p4]
@@ -3269,6 +3299,8 @@ SLOT_PAYOUT = {
 @tree.command(name="slots", description="Pull the lever! Bet coins to spin the slot machine.")
 @discord.app_commands.describe(bet="How many coins to bet (default 100)")
 async def slots_command(interaction: discord.Interaction, bet: int = 100):
+    try: await trigger_game_played(interaction.user.id, "slots")
+    except Exception: pass
     silent = discord.AllowedMentions.none()
     user = interaction.user
 
@@ -4456,6 +4488,8 @@ WHEEL_OUTCOMES = [
 
 @tree.command(name="wheel", description="Spin the wheel of fortune for a random outcome.")
 async def wheel_command(interaction: discord.Interaction):
+    try: await trigger_game_played(interaction.user.id, "wheel")
+    except Exception: pass
     user = interaction.user
     silent = discord.AllowedMentions.none()
     remaining = economy.get_cooldown_remaining(user.id, "wheel")
@@ -6927,6 +6961,8 @@ class ShootoutDoorView(discord.ui.View):
 @tree.command(name="shootout", description="Host a hostage shootout. Players pick doors. Last alive wins the pot.")
 @discord.app_commands.describe(buy_in="How many coins each player puts into the pot")
 async def shootout_command(interaction: discord.Interaction, buy_in: int = 200):
+    try: await trigger_game_played(interaction.user.id, "shootout")
+    except Exception: pass
     if buy_in <= 0:
         await interaction.response.send_message("Buy-in must be positive.", ephemeral=True)
         return
@@ -7039,6 +7075,8 @@ class BombHoldView(discord.ui.View):
 @tree.command(name="bomb", description="Hot potato. Pass the bomb to a user. Whoever holds it when it explodes loses coins.")
 @discord.app_commands.describe(target="Who you're throwing the bomb to first", stakes="Coins the loser pays (default 500)")
 async def bomb_command(interaction: discord.Interaction, target: discord.Member, stakes: int = 500):
+    try: await trigger_game_played(interaction.user.id, "bomb")
+    except Exception: pass
     channel_id = str(interaction.channel_id)
     if channel_id in ACTIVE_BOMBS and not ACTIVE_BOMBS[channel_id].get("exploded"):
         await interaction.response.send_message("A bomb is already in play here.", ephemeral=True)
@@ -7252,6 +7290,8 @@ class C4View(discord.ui.View):
 @tree.command(name="connect4", description="Challenge a user to Connect 4. Winner takes the pot.")
 @discord.app_commands.describe(opponent="Who to challenge", wager="Coins each player wagers (default 200)")
 async def connect4_command(interaction: discord.Interaction, opponent: discord.Member, wager: int = 200):
+    try: await trigger_game_played(interaction.user.id, "connect4")
+    except Exception: pass
     challenger = interaction.user
     if opponent.id == challenger.id:
         await interaction.response.send_message("Can't challenge yourself.", ephemeral=True)
@@ -8072,6 +8112,8 @@ class LieOrDieView(discord.ui.View):
 @tree.command(name="lieordie", description="AI generates a fact about a user. Vote TRUE or FALSE — winners take losers' coins.")
 @discord.app_commands.describe(target="Who is the fact about?")
 async def lieordie_command(interaction: discord.Interaction, target: discord.Member):
+    try: await trigger_game_played(interaction.user.id, "lieordie")
+    except Exception: pass
     cfg = load_config()
     if target.bot:
         await interaction.response.send_message("Can't run this on a bot.", ephemeral=True)
