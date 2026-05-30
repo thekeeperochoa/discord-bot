@@ -13897,6 +13897,730 @@ async def run_command(interaction: discord.Interaction):
     ACTIVE_RUNS[user.id]["view"] = view
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛒 /marketplace — Peer-to-Peer Trading
+# Users list pets/businesses/venues/items for fixed price OR auction.
+# 5% house fee taken from seller on every sale. Listings expire in 48h.
+# ─────────────────────────────────────────────────────────────────────────────
+MARKETPLACE_FILE = MEMORY_DIR / "marketplace.json"
+MARKET_HOUSE_FEE = 0.05
+MARKET_LISTING_DURATION_HOURS = 48
+MARKET_MIN_PRICE = 100
+MARKET_MAX_PRICE = 10_000_000
+MARKET_AUCTION_MIN_BID_INCREMENT = 0.05  # 5% over current bid
+
+# Items that can be transferred (timed boosts on user record)
+TRANSFERABLE_ITEMS = {
+    "vip":           {"key": "vip_until",         "emoji": "💎", "name": "VIP Status",         "type": "timed"},
+    "xp_boost":      {"key": "xp_boost_until",    "emoji": "⚡", "name": "XP Boost",           "type": "timed"},
+    "insurance":     {"key": "insurance_until",   "emoji": "🛡️", "name": "Insurance",          "type": "timed"},
+    "heist_tools":   {"key": "heist_tools_until", "emoji": "🦝", "name": "Heist Tools",        "type": "timed"},
+    "lottery_mult":  {"key": "lottery_mult",      "emoji": "🎰", "name": "Lottery Multiplier", "type": "consumable"},
+}
+
+
+def _load_market() -> dict:
+    if MARKETPLACE_FILE.exists():
+        try:
+            with open(MARKETPLACE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"listings": {}, "next_id": 1}
+
+
+def _save_market(data: dict):
+    with open(MARKETPLACE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _market_next_id(data: dict) -> str:
+    nid = data.get("next_id", 1)
+    data["next_id"] = nid + 1
+    return f"L{nid:05d}"
+
+
+def _format_listing_item(listing: dict) -> str:
+    """Pretty string of what's being sold."""
+    asset_type = listing["asset_type"]
+    asset = listing["asset_data"]
+    if asset_type == "pet":
+        pet_info = PET_TYPES.get(asset.get("type"), {"emoji": "🐾", "name": "?"})
+        return f"{pet_info['emoji']} **{asset.get('name', '?')}** — Lv. {asset.get('level', 1)} {pet_info['name']}"
+    if asset_type == "business":
+        biz_info = BUSINESS_TYPES.get(asset.get("type"), {"emoji": "🏢", "name": "?"})
+        return f"{biz_info['emoji']} **{biz_info['name']}** — Lv. {asset.get('upgrade_level', 0) + 1}"
+    if asset_type == "venue":
+        v_info = VENUE_TYPES.get(asset.get("type"), {"emoji": "🌃", "name": "?"})
+        return f"{v_info['emoji']} **{v_info['name']}** — {len(asset.get('staff', []))} staff"
+    if asset_type == "item":
+        item_info = TRANSFERABLE_ITEMS.get(asset.get("key"), {"emoji": "📦", "name": "?"})
+        meta = ""
+        if asset.get("type") == "timed":
+            secs_left = int(asset.get("remaining_seconds", 0))
+            meta = f" ({fmt_cooldown(secs_left)} left)"
+        elif asset.get("type") == "consumable":
+            meta = f" (×{asset.get('quantity', 1)})"
+        return f"{item_info['emoji']} **{item_info['name']}**{meta}"
+    return f"❓ Unknown item"
+
+
+def _market_expire_listings(data: dict) -> int:
+    """Auto-expire listings older than the duration. Refund auction bidders.
+    Returns number of listings expired."""
+    expired = 0
+    now = time.time()
+    cutoff = now - (MARKET_LISTING_DURATION_HOURS * 3600)
+    for lid in list(data["listings"].keys()):
+        listing = data["listings"][lid]
+        if listing.get("status") != "active":
+            continue
+        if listing.get("created_at", now) < cutoff:
+            _market_cancel_listing(data, lid, reason="expired")
+            expired += 1
+    return expired
+
+
+def _market_cancel_listing(data: dict, listing_id: str, reason: str = "cancelled"):
+    """Return asset to seller, refund highest bidder if auction, mark closed."""
+    listing = data["listings"].get(listing_id)
+    if not listing:
+        return
+    # Refund highest auction bidder
+    if listing.get("mode") == "auction" and listing.get("current_bidder"):
+        try:
+            economy.add(int(listing["current_bidder"]), listing.get("current_bid", 0), f"auction refund {listing_id}")
+        except Exception:
+            pass
+    # Return asset to seller
+    try:
+        _return_asset_to_seller(listing)
+    except Exception as e:
+        log.warning("return asset failed: %s", e)
+    listing["status"] = reason
+    listing["closed_at"] = time.time()
+
+
+def _return_asset_to_seller(listing: dict):
+    """Put the asset back where it came from."""
+    seller_id = int(listing["seller_id"])
+    asset_type = listing["asset_type"]
+    asset = listing["asset_data"]
+
+    if asset_type == "pet":
+        pets = _load_pets()
+        pets[str(seller_id)] = asset
+        _save_pets(pets)
+    elif asset_type == "business":
+        bdata = _load_businesses()
+        bdata["users"].setdefault(str(seller_id), []).append(asset)
+        _save_businesses(bdata)
+    elif asset_type == "venue":
+        ndata = _load_nightlife()
+        ndata["users"].setdefault(str(seller_id), []).append(asset)
+        _save_nightlife(ndata)
+    elif asset_type == "item":
+        u = economy._user(seller_id)
+        key = asset.get("key")
+        if asset.get("type") == "timed":
+            # Restore the absolute timestamp
+            secs = asset.get("remaining_seconds", 0)
+            u[key] = time.time() + secs
+        elif asset.get("type") == "consumable":
+            u[key] = u.get(key, 0) + asset.get("quantity", 1)
+        economy._save()
+
+
+def _transfer_asset_to_buyer(listing: dict, buyer_id: int):
+    """Move the asset from escrow into the buyer's inventory."""
+    asset_type = listing["asset_type"]
+    asset = listing["asset_data"]
+
+    if asset_type == "pet":
+        pets = _load_pets()
+        # If buyer already has a pet, return that pet to escrow ... actually just refuse.
+        # We're already past the gate by then. Best path: replace.
+        pets[str(buyer_id)] = asset
+        _save_pets(pets)
+    elif asset_type == "business":
+        bdata = _load_businesses()
+        bdata["users"].setdefault(str(buyer_id), []).append(asset)
+        _save_businesses(bdata)
+    elif asset_type == "venue":
+        ndata = _load_nightlife()
+        ndata["users"].setdefault(str(buyer_id), []).append(asset)
+        _save_nightlife(ndata)
+    elif asset_type == "item":
+        u = economy._user(buyer_id)
+        key = asset.get("key")
+        if asset.get("type") == "timed":
+            secs = asset.get("remaining_seconds", 0)
+            cur = u.get(key, 0)
+            # If buyer already has time, add the bought time on top
+            base = max(cur, time.time())
+            u[key] = base + secs
+        elif asset.get("type") == "consumable":
+            u[key] = u.get(key, 0) + asset.get("quantity", 1)
+        economy._save()
+
+
+def _remove_asset_from_seller(seller_id: int, asset_type: str, asset_identifier) -> dict | None:
+    """Remove the asset from the seller and return the asset_data dict.
+    asset_identifier varies by type:
+      - pet: ignored (only one pet per user)
+      - business / venue: index into the user's list
+      - item: the item key
+    Returns the asset dict on success, None on failure.
+    """
+    if asset_type == "pet":
+        pets = _load_pets()
+        pet = pets.pop(str(seller_id), None)
+        _save_pets(pets)
+        return pet
+    if asset_type == "business":
+        bdata = _load_businesses()
+        bizs = bdata["users"].get(str(seller_id), [])
+        idx = asset_identifier
+        if not (0 <= idx < len(bizs)):
+            return None
+        biz = bizs.pop(idx)
+        _save_businesses(bdata)
+        return biz
+    if asset_type == "venue":
+        ndata = _load_nightlife()
+        venues = ndata["users"].get(str(seller_id), [])
+        idx = asset_identifier
+        if not (0 <= idx < len(venues)):
+            return None
+        v = venues.pop(idx)
+        _save_nightlife(ndata)
+        return v
+    if asset_type == "item":
+        item_key = asset_identifier  # 'vip', 'xp_boost', etc.
+        info = TRANSFERABLE_ITEMS.get(item_key)
+        if not info:
+            return None
+        u = economy._user(seller_id)
+        if info["type"] == "timed":
+            until_ts = u.get(info["key"], 0)
+            if until_ts <= time.time():
+                return None  # not active
+            remaining = int(until_ts - time.time())
+            u[info["key"]] = 0
+            economy._save()
+            return {"key": item_key, "type": "timed", "remaining_seconds": remaining}
+        if info["type"] == "consumable":
+            qty = u.get(info["key"], 0)
+            if qty <= 0:
+                return None
+            u[info["key"]] = 0
+            economy._save()
+            return {"key": item_key, "type": "consumable", "quantity": qty}
+    return None
+
+
+def _seller_owns_inventory_summary(seller_id: int) -> list:
+    """Return a list of (label, asset_type, identifier) for items this seller can list."""
+    out = []
+    # Pet
+    pets = _load_pets()
+    pet = pets.get(str(seller_id))
+    if pet:
+        info = PET_TYPES.get(pet.get("type"), {"emoji": "🐾", "name": "?"})
+        out.append((f"{info['emoji']} {pet.get('name', '?')} (Lv {pet.get('level', 1)} {info['name']})", "pet", 0))
+    # Businesses
+    bdata = _load_businesses()
+    for i, biz in enumerate(bdata["users"].get(str(seller_id), [])):
+        info = BUSINESS_TYPES.get(biz.get("type"), {"emoji": "🏢", "name": "?"})
+        out.append((f"{info['emoji']} {info['name']} (#{i+1})", "business", i))
+    # Venues
+    ndata = _load_nightlife()
+    for i, v in enumerate(ndata["users"].get(str(seller_id), [])):
+        info = VENUE_TYPES.get(v.get("type"), {"emoji": "🌃", "name": "?"})
+        out.append((f"{info['emoji']} {info['name']} (#{i+1})", "venue", i))
+    # Items
+    u = economy._user(seller_id)
+    for key, info in TRANSFERABLE_ITEMS.items():
+        if info["type"] == "timed":
+            until = u.get(info["key"], 0)
+            if until > time.time():
+                secs = int(until - time.time())
+                out.append((f"{info['emoji']} {info['name']} ({fmt_cooldown(secs)} left)", "item", key))
+        elif info["type"] == "consumable":
+            qty = u.get(info["key"], 0)
+            if qty > 0:
+                out.append((f"{info['emoji']} {info['name']} (×{qty})", "item", key))
+    return out
+
+
+# ── /marketplace command ─────────────────────────────────────────────────────
+@tree.command(name="marketplace", description="🛒 Browse, list, buy, and bid on player-owned items.")
+@discord.app_commands.describe(action="What do you want to do?")
+@discord.app_commands.choices(
+    action=[
+        discord.app_commands.Choice(name="🛍️ Browse — see all active listings", value="browse"),
+        discord.app_commands.Choice(name="📝 List — sell something of yours", value="list"),
+        discord.app_commands.Choice(name="📋 My Listings — see yours / cancel", value="my"),
+        discord.app_commands.Choice(name="💰 Buy / Bid by listing ID", value="buy"),
+    ]
+)
+@discord.app_commands.describe(
+    listing_id="(For Buy mode) Listing ID like L00012",
+    bid_amount="(For Buy mode auctions) Your bid amount",
+)
+async def marketplace_command(
+    interaction: discord.Interaction,
+    action: discord.app_commands.Choice[str],
+    listing_id: str = None,
+    bid_amount: int = None,
+):
+    data = _load_market()
+    _market_expire_listings(data)
+    _save_market(data)
+
+    if action.value == "browse":
+        await _market_browse(interaction, data)
+    elif action.value == "list":
+        await _market_list_picker(interaction, data)
+    elif action.value == "my":
+        await _market_my_listings(interaction, data)
+    elif action.value == "buy":
+        if not listing_id:
+            await interaction.response.send_message(
+                "❌ You need to specify `listing_id:` (e.g. `L00012`).\n"
+                "_Run `/marketplace action:browse` to see active listing IDs._",
+                ephemeral=True,
+            )
+            return
+        await _market_buy_or_bid(interaction, data, listing_id.upper().strip(), bid_amount)
+
+
+async def _market_browse(interaction, data):
+    listings = [l for l in data["listings"].values() if l.get("status") == "active"]
+    listings.sort(key=lambda l: l.get("created_at", 0), reverse=True)
+    if not listings:
+        await interaction.response.send_message(
+            "🛍️ **MARKETPLACE** — _Empty._ Be the first to list with `/marketplace action:list`.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="🛍️ MARKETPLACE — Active Listings",
+        description=f"_Showing **{len(listings)}** active listings. Use `/marketplace action:buy listing_id:LXXXXX` to purchase._",
+        color=discord.Color.dark_gold(),
+    )
+
+    # Show up to 15 listings
+    for listing in listings[:15]:
+        lid = listing["listing_id"]
+        item_str = _format_listing_item(listing)
+        seller = f"<@{listing['seller_id']}>"
+        mode = listing.get("mode", "fixed")
+        secs_left = int((listing.get("created_at", 0) + MARKET_LISTING_DURATION_HOURS * 3600) - time.time())
+        time_left = fmt_cooldown(max(0, secs_left))
+        if mode == "fixed":
+            price_str = f"💰 **{listing['price']:,}**"
+        else:
+            cb = listing.get("current_bid", listing.get("starting_bid", 0))
+            bidder = listing.get("current_bidder")
+            bidder_str = f" by <@{bidder}>" if bidder else " (no bids)"
+            price_str = f"🔨 Current bid: **{cb:,}**{bidder_str}"
+        embed.add_field(
+            name=f"`{lid}` — {item_str}",
+            value=f"{price_str}\n{seller} • {time_left} left • {'Auction' if mode == 'auction' else 'Fixed price'}",
+            inline=False,
+        )
+    if len(listings) > 15:
+        embed.set_footer(text=f"Showing 15 of {len(listings)}. Refine your search by listing ID.")
+    else:
+        embed.set_footer(text=f"5% house fee taken from sellers • Listings expire after {MARKET_LISTING_DURATION_HOURS}h")
+    await interaction.response.send_message(embed=embed)
+
+
+async def _market_list_picker(interaction, data):
+    """Show user their inventory and prompt them to pick something."""
+    inv = _seller_owns_inventory_summary(interaction.user.id)
+    if not inv:
+        await interaction.response.send_message(
+            "❌ You don't own anything sellable.\n"
+            "_Sellable: pets, businesses, venues, and active boosts (VIP, XP Boost, Insurance, Heist Tools, Lottery Multiplier)._",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="📝 Pick something to list",
+        description=(
+            "Use the dropdown below to choose what to sell, then set price and mode.\n"
+            f"_5% house fee on sales. Listings expire after {MARKET_LISTING_DURATION_HOURS}h._"
+        ),
+        color=discord.Color.blurple(),
+    )
+    view = MarketListPickerView(interaction.user.id, inv)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class MarketListPickerView(discord.ui.View):
+    def __init__(self, user_id: int, inventory: list):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        # Discord select limits to 25 options
+        options = []
+        for i, (label, asset_type, ident) in enumerate(inventory[:25]):
+            options.append(discord.SelectOption(
+                label=label[:100],
+                value=f"{asset_type}:{ident}",
+            ))
+        select = discord.ui.Select(placeholder="Pick what to sell...", options=options)
+        select.callback = self._on_pick
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        asset_type, ident = value.split(":", 1)
+        # Convert ident
+        if asset_type in ("business", "venue", "pet"):
+            try:
+                ident = int(ident)
+            except ValueError:
+                ident = 0
+        await interaction.response.send_modal(MarketListModal(asset_type, ident))
+
+
+class MarketListModal(discord.ui.Modal, title="📝 Create Listing"):
+    price_input = discord.ui.TextInput(
+        label="Price (or starting bid for auctions)",
+        placeholder=f"Min {MARKET_MIN_PRICE}, max {MARKET_MAX_PRICE:,}",
+        required=True,
+        max_length=12,
+    )
+    mode_input = discord.ui.TextInput(
+        label="Mode: 'fixed' or 'auction'",
+        placeholder="Type fixed or auction",
+        required=True,
+        max_length=10,
+        default="fixed",
+    )
+
+    def __init__(self, asset_type: str, ident):
+        super().__init__()
+        self.asset_type = asset_type
+        self.ident = ident
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(str(self.price_input).strip().replace(",", ""))
+        except ValueError:
+            await interaction.response.send_message("❌ Price must be a number.", ephemeral=True)
+            return
+        mode = str(self.mode_input).strip().lower()
+        if mode not in ("fixed", "auction"):
+            await interaction.response.send_message("❌ Mode must be `fixed` or `auction`.", ephemeral=True)
+            return
+        if price < MARKET_MIN_PRICE or price > MARKET_MAX_PRICE:
+            await interaction.response.send_message(
+                f"❌ Price must be between **{MARKET_MIN_PRICE:,}** and **{MARKET_MAX_PRICE:,}**.",
+                ephemeral=True,
+            )
+            return
+
+        # Pull asset out of seller's inventory (into escrow)
+        asset = _remove_asset_from_seller(interaction.user.id, self.asset_type, self.ident)
+        if asset is None:
+            await interaction.response.send_message(
+                "❌ Couldn't find that asset — maybe you sold/abandoned it already?",
+                ephemeral=True,
+            )
+            return
+
+        data = _load_market()
+        lid = _market_next_id(data)
+        listing = {
+            "listing_id": lid,
+            "seller_id": interaction.user.id,
+            "asset_type": self.asset_type,
+            "asset_data": asset,
+            "mode": mode,
+            "created_at": time.time(),
+            "status": "active",
+        }
+        if mode == "fixed":
+            listing["price"] = price
+        else:
+            listing["starting_bid"] = price
+            listing["current_bid"] = price
+            listing["current_bidder"] = None
+        data["listings"][lid] = listing
+        _save_market(data)
+
+        item_str = _format_listing_item(listing)
+        await interaction.response.send_message(
+            f"✅ **Listed `{lid}`**\n{item_str}\n"
+            + (f"💰 Price: **{price:,}**" if mode == "fixed" else f"🔨 Starting bid: **{price:,}**")
+            + f"\n_5% fee on sale. Expires in {MARKET_LISTING_DURATION_HOURS}h._\n"
+            "Anyone can buy with `/marketplace action:buy listing_id:" + lid + "`",
+            ephemeral=True,
+        )
+        # Track activity
+        try:
+            track_activity("market_list", interaction.user.id, interaction.user.display_name,
+                          f"listed {item_str} for {price:,} ({mode})")
+        except Exception:
+            pass
+
+
+async def _market_my_listings(interaction, data):
+    mine = [l for l in data["listings"].values()
+            if l.get("seller_id") == interaction.user.id and l.get("status") == "active"]
+    if not mine:
+        await interaction.response.send_message(
+            "_You have no active listings._",
+            ephemeral=True,
+        )
+        return
+    embed = discord.Embed(
+        title="📋 Your Active Listings",
+        color=discord.Color.blurple(),
+    )
+    for l in mine:
+        item_str = _format_listing_item(l)
+        secs_left = int((l.get("created_at", 0) + MARKET_LISTING_DURATION_HOURS * 3600) - time.time())
+        mode = l.get("mode", "fixed")
+        if mode == "fixed":
+            price_str = f"💰 **{l['price']:,}**"
+        else:
+            cb = l.get("current_bid", l.get("starting_bid", 0))
+            bidder = l.get("current_bidder")
+            bidder_str = f" by <@{bidder}>" if bidder else " (no bids)"
+            price_str = f"🔨 **{cb:,}**{bidder_str}"
+        embed.add_field(
+            name=f"`{l['listing_id']}` — {item_str}",
+            value=f"{price_str}\n⏰ {fmt_cooldown(max(0, secs_left))} left • {mode}",
+            inline=False,
+        )
+    view = MyListingsView(interaction.user.id, [l['listing_id'] for l in mine])
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class MyListingsView(discord.ui.View):
+    def __init__(self, user_id: int, listing_ids: list):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        # Cancel button per listing (max 25)
+        for lid in listing_ids[:25]:
+            btn = discord.ui.Button(label=f"❌ Cancel {lid}", style=discord.ButtonStyle.danger)
+            btn.callback = self._make_cancel_cb(lid)
+            self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    def _make_cancel_cb(self, lid: str):
+        async def cb(interaction: discord.Interaction):
+            data = _load_market()
+            listing = data["listings"].get(lid)
+            if not listing or listing["seller_id"] != self.user_id or listing.get("status") != "active":
+                await interaction.response.send_message("❌ Can't cancel — not yours or already closed.", ephemeral=True)
+                return
+            # If it's an auction with bids, the bid gets refunded automatically
+            _market_cancel_listing(data, lid, reason="cancelled")
+            _save_market(data)
+            await interaction.response.send_message(
+                f"❌ Cancelled `{lid}`. Asset returned to your inventory."
+                + (" (Highest bidder was refunded.)" if listing.get("current_bidder") else ""),
+                ephemeral=True,
+            )
+        return cb
+
+
+async def _market_buy_or_bid(interaction, data, listing_id: str, bid_amount: int):
+    listing = data["listings"].get(listing_id)
+    if not listing:
+        await interaction.response.send_message(f"❌ No listing `{listing_id}`.", ephemeral=True)
+        return
+    if listing.get("status") != "active":
+        await interaction.response.send_message(f"❌ Listing `{listing_id}` is no longer active.", ephemeral=True)
+        return
+    if listing["seller_id"] == interaction.user.id:
+        await interaction.response.send_message("❌ You can't buy your own listing.", ephemeral=True)
+        return
+
+    if listing["mode"] == "fixed":
+        await _market_buy_fixed(interaction, data, listing)
+    else:
+        await _market_place_bid(interaction, data, listing, bid_amount)
+
+
+async def _market_buy_fixed(interaction, data, listing):
+    buyer = interaction.user
+    price = listing["price"]
+    if economy.balance(buyer.id) < price:
+        await interaction.response.send_message(
+            f"❌ Need **{price:,}** coins. You have **{economy.balance(buyer.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    # Pet-specific guard: buyer can't have a pet already
+    if listing["asset_type"] == "pet":
+        pets = _load_pets()
+        if str(buyer.id) in pets:
+            await interaction.response.send_message(
+                "❌ You already have a pet. Sell or abandon yours first.",
+                ephemeral=True,
+            )
+            return
+
+    # Execute trade
+    economy.add(buyer.id, -price, f"market buy {listing['listing_id']}")
+    fee = int(price * MARKET_HOUSE_FEE)
+    seller_take = price - fee
+    economy.add(listing["seller_id"], seller_take, f"market sale {listing['listing_id']}")
+
+    _transfer_asset_to_buyer(listing, buyer.id)
+    listing["status"] = "sold"
+    listing["closed_at"] = time.time()
+    listing["buyer_id"] = buyer.id
+    listing["sold_price"] = price
+    listing["house_fee"] = fee
+    _save_market(data)
+
+    item_str = _format_listing_item(listing)
+    embed = discord.Embed(
+        title="✅ SOLD",
+        description=(
+            f"{item_str}\n"
+            f"💰 **{buyer.mention}** paid **{price:,}** coins\n"
+            f"💵 Seller <@{listing['seller_id']}> got **{seller_take:,}** _(after {int(MARKET_HOUSE_FEE*100)}% fee)_"
+        ),
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+    # Tracking + DM seller
+    try:
+        track_economy_event("transferred", price)
+        track_activity("market_sale", buyer.id, buyer.display_name, f"bought {item_str} for {price:,}")
+        await send_dm(listing["seller_id"], "rep",
+                      content=f"💰 Your listing `{listing['listing_id']}` ({item_str}) sold for **{price:,}** — you got **{seller_take:,}** after fees.")
+    except Exception:
+        pass
+
+
+async def _market_place_bid(interaction, data, listing, bid_amount):
+    buyer = interaction.user
+    if bid_amount is None:
+        await interaction.response.send_message(
+            "❌ Auctions need a `bid_amount`. Use `/marketplace action:buy listing_id:Lxxxxx bid_amount:1000`.",
+            ephemeral=True,
+        )
+        return
+    cb = listing.get("current_bid", listing.get("starting_bid", 0))
+    has_bidder = bool(listing.get("current_bidder"))
+    min_bid = cb if not has_bidder else int(cb * (1 + MARKET_AUCTION_MIN_BID_INCREMENT))
+    if bid_amount < min_bid:
+        await interaction.response.send_message(
+            f"❌ Min bid is **{min_bid:,}**" + (f" (5% above current)" if has_bidder else " (starting)"),
+            ephemeral=True,
+        )
+        return
+    if economy.balance(buyer.id) < bid_amount:
+        await interaction.response.send_message(
+            f"❌ Need **{bid_amount:,}** in escrow. You have **{economy.balance(buyer.id):,}**.",
+            ephemeral=True,
+        )
+        return
+
+    # Refund previous bidder
+    if listing.get("current_bidder"):
+        try:
+            economy.add(listing["current_bidder"], listing["current_bid"], f"auction outbid {listing['listing_id']}")
+            await send_dm(listing["current_bidder"], "rep",
+                          content=f"🔨 You've been outbid on `{listing['listing_id']}`. **{listing['current_bid']:,}** refunded.")
+        except Exception:
+            pass
+    # Escrow new bid
+    economy.add(buyer.id, -bid_amount, f"auction bid {listing['listing_id']}")
+    listing["current_bid"] = bid_amount
+    listing["current_bidder"] = buyer.id
+    _save_market(data)
+
+    item_str = _format_listing_item(listing)
+    await interaction.response.send_message(
+        f"🔨 Bid placed on `{listing['listing_id']}` ({item_str}) for **{bid_amount:,}**.\n"
+        f"_If you're not outbid by expiry, it's yours._",
+    )
+    try:
+        track_activity("market_bid", buyer.id, buyer.display_name, f"bid {bid_amount:,} on {item_str}")
+    except Exception:
+        pass
+
+
+# Auction finalization happens via the expire pass below — but we need to award winners not just refund them.
+# Patch _market_expire_listings to handle auctions:
+def _market_expire_listings(data: dict) -> int:
+    expired = 0
+    now = time.time()
+    cutoff = now - (MARKET_LISTING_DURATION_HOURS * 3600)
+    for lid in list(data["listings"].keys()):
+        listing = data["listings"][lid]
+        if listing.get("status") != "active":
+            continue
+        if listing.get("created_at", now) < cutoff:
+            # AUCTION with a winning bidder — finalize the sale
+            if listing.get("mode") == "auction" and listing.get("current_bidder"):
+                price = listing["current_bid"]
+                fee = int(price * MARKET_HOUSE_FEE)
+                seller_take = price - fee
+                # Funds already in escrow (we took from bidder when they bid)
+                economy.add(listing["seller_id"], seller_take, f"market auction won {lid}")
+                buyer_id = listing["current_bidder"]
+                # Pet guard: if buyer already has a pet, refund them and return to seller
+                if listing["asset_type"] == "pet":
+                    pets = _load_pets()
+                    if str(buyer_id) in pets:
+                        # Refund the bidder, undo seller credit, return pet
+                        economy.add(buyer_id, price, f"auction refund pet-conflict {lid}")
+                        economy.add(listing["seller_id"], -seller_take, f"reversed seller credit {lid}")
+                        _return_asset_to_seller(listing)
+                        listing["status"] = "auction_refunded"
+                        listing["closed_at"] = time.time()
+                        expired += 1
+                        continue
+                _transfer_asset_to_buyer(listing, buyer_id)
+                listing["status"] = "sold_auction"
+                listing["closed_at"] = time.time()
+                listing["buyer_id"] = buyer_id
+                listing["sold_price"] = price
+                listing["house_fee"] = fee
+                expired += 1
+                continue
+            # No bids OR fixed price — cancel & return
+            _market_cancel_listing(data, lid, reason="expired")
+            expired += 1
+    return expired
+
+
+# ── Background scheduler to expire / finalize listings ───────────────────────
+async def market_expire_scheduler():
+    """Run every 10 minutes to expire/finalize listings."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(600)  # 10 min
+        try:
+            data = _load_market()
+            n = _market_expire_listings(data)
+            _save_market(data)
+            if n > 0:
+                log.info("Market: %s listings finalized/expired", n)
+        except Exception as e:
+            log.exception("market_expire_scheduler: %s", e)
+
+
 @tree.command(name="commands", description="See all bot commands organized by category.")
 async def commands_command(interaction: discord.Interaction):
     embed = _build_commands_home_embed()
@@ -13977,7 +14701,7 @@ def _build_commands_category_embed(category: str) -> discord.Embed:
             "fields": [
                 ("\u2b50 FLAGSHIP", "**`/run`** \u2014 Street Hustle: branching adventure for coins. Jackpots possible. No cooldown."),
                 ("Earning", "`/daily` Daily reward (24h)\n`/weekly` Weekly reward (7d)\n`/work` Work for coins (45m)\n`/beg` Beg for change (10m)"),
-                ("Spending & Transfers", "`/balance` Check wallet\n`/pay` Send coins to a user\n`/leaderboard` Richest users"),
+                ("Spending & Transfers", "`/balance` Check wallet\n`/pay` Send coins to a user\n`/leaderboard` Richest users\n`/marketplace` 🛒 Buy/sell from other players"),
                 ("Risky Plays", "`/rob` Try to rob someone (2h cd)\n`/crime` Commit a crime (2h cd)\n`/bet` Double or nothing"),
             ],
         },
@@ -14140,6 +14864,7 @@ async def on_ready():
     client.loop.create_task(loan_shark_scheduler())
     client.loop.create_task(pet_starving_scheduler())
     client.loop.create_task(nightlife_events_scheduler())
+    client.loop.create_task(market_expire_scheduler())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -14268,6 +14993,8 @@ PREFIX_COMMANDS = {
     "daily":        ("daily",         []),
     "weekly":       ("weekly",        []),
     "work":         ("work",          []),
+    "marketplace":  ("marketplace",   [{"name":"action","type":"str","required":True},{"name":"listing_id","type":"str","required":False,"default":None},{"name":"bid_amount","type":"int","required":False,"default":None}]),
+    "market":       ("marketplace",   [{"name":"action","type":"str","required":True},{"name":"listing_id","type":"str","required":False,"default":None},{"name":"bid_amount","type":"int","required":False,"default":None}]),
     "run":          ("run",           []),
     "hustle":       ("run",           []),
     "beg":          ("beg",           []),
@@ -14478,6 +15205,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             )
             return True
         kwargs["business_type"] = discord.app_commands.Choice(name=biz_type, value=biz_type)
+
+    if slash_name == "marketplace":
+        action_val = kwargs.get("action", "").lower()
+        valid_actions = {"browse", "list", "my", "buy"}
+        if action_val not in valid_actions:
+            await message.channel.send(
+                f"❌ Action must be one of: {', '.join(valid_actions)}"
+            )
+            return True
+        kwargs["action"] = discord.app_commands.Choice(name=action_val, value=action_val)
 
     if slash_name in ("buysupply", "sell"):
         # Substance Choice for dealer commands
