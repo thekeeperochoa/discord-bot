@@ -15817,7 +15817,7 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
         f5_lines.append("💍 MARRIED")
     f5 = f5_lines
 
-    # Frame 6 — final assessment
+    # Frame 6 — full dossier (everything visible)
     if net_worth > 1_000_000:
         classification = "★★★★★ HIGH VALUE"
     elif net_worth > 100_000:
@@ -15835,18 +15835,58 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     else:
         threat = "LOW"
 
-    f6 = [
-        "DOSSIER SYSTEM v2.1",
-        "",
-        "◤ ASSESSMENT",
-        shorten(classification, 28),
-        f"THREAT: {threat}",
-        f"NET: {num_compact(net_worth)} coins",
-        "",
-        "> FILE CLOSED",
-        "> [STAMP: CONFIDENTIAL]",
-        "> conn. terminated",
-    ]
+    # Assemble: header + every section + assessment + footer
+    f6 = ["DOSSIER COMPLETE"]
+    f6.append("")
+    f6.append("◤ IDENTITY")
+    f6.append(kv("NAME", target_short, 7))
+    f6.append(kv("HANDLE", handle_short, 7))
+    f6.append(kv("AGE", f"{age_days}d / svr {server_days}d", 7))
+    f6.append(kv("ROLE", shorten(top_role_name, 12), 7))
+    f6.append("")
+    f6.append("◤ FINANCIALS")
+    f6.append(kv("BAL", f"{num_compact(balance)} coins", 7))
+    f6.append(kv("EARNED", num_compact(lifetime_earned), 7))
+    f6.append(kv("SPENT", num_compact(lifetime_spent), 7))
+    f6.append(kv("LEVEL", f"{level} ({num_compact(xp)} XP)", 7))
+    if active_boosts:
+        f6.append(kv("BOOST", shorten(", ".join(active_boosts[:2]), 18), 7))
+    f6.append("")
+    f6.append("◤ ASSETS")
+    if pet_str != "none":
+        f6.append(kv("PET", shorten(pet_str, 18), 7))
+    f6.append(kv("BIZ", f"{biz_count} (~{num_compact(int(biz_value))})", 7))
+    f6.append(kv("VENUE", str(venue_count), 7))
+    f6.append(kv("PROP", f"{len(user_props)} (~{num_compact(re_total)})", 7))
+    f6.append(kv("STOCK", f"{stocks_count} (~{num_compact(stocks_total)})", 7))
+    if re_legendary:
+        f6.append("★ LEGENDARY OWNER ★")
+    f6.append("")
+    f6.append("◤ CRIMINAL RECORD")
+    if specialists or lifetime_heists:
+        f6.append(kv("HEIST", f"{lifetime_heists}/{num_compact(lifetime_loot)}", 7))
+    else:
+        f6.append(kv("HEIST", "clean", 7))
+    if lifetime_sold > 0:
+        f6.append(kv("DEALER", f"{num_compact(lifetime_sold)}g sold", 7))
+        f6.append(kv("HEAT", f"{heat}%", 7))
+    else:
+        f6.append(kv("DEALER", "clean", 7))
+    if in_jail:
+        f6.append("!! IN JAIL !!")
+    f6.append("")
+    f6.append("◤ STATS")
+    f6.append(kv("W/L", f"{total_wins}/{total_losses} ({win_rate:.0f}%)", 7))
+    f6.append(kv("ACHIEV", str(len(achievements)), 7))
+    if spouse_id:
+        f6.append("💍 MARRIED")
+    f6.append("")
+    f6.append("◤ ASSESSMENT")
+    f6.append(shorten(classification, 28))
+    f6.append(f"THREAT: {threat}")
+    f6.append(f"NET WORTH: {num_compact(net_worth)}")
+    f6.append("")
+    f6.append("> [STAMP: CONFIDENTIAL]")
 
     # ── ANIMATION ───────────────────────────────────────────────────────────
     frames = [f1, f2, f3, f4, f5, f6]
