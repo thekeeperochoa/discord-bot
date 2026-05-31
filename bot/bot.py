@@ -3285,6 +3285,144 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
 COIN_EMOJI = "💰"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 💰 COLLECT EVERYTHING — one-tap revenue collection across all systems
+# Used by the "Collect All" button on /balance. No new slash command.
+# ─────────────────────────────────────────────────────────────────────────────
+def _collect_everything(user_id: int) -> dict:
+    """Collect pending income from pet, businesses, venues, and real estate.
+    Returns a dict with per-source amounts and total."""
+    results = {"pet": 0, "business": 0, "venue": 0, "realestate": 0, "total": 0, "lines": []}
+
+    # ── Pet ──
+    try:
+        pets = _load_pets()
+        pet = pets.get(str(user_id))
+        if pet:
+            level = _pet_level(pet["xp"])
+            hunger = _pet_hunger(pet)
+            hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
+            if hours_since >= 1:
+                earnings = int(level * PET_DAILY_INCOME_BASE * (hours_since / 24))
+                if hunger < 30:
+                    earnings = earnings // 2
+                if hunger == 0:
+                    earnings = 0
+                if earnings > 0:
+                    pet["last_collected"] = time.time()
+                    pet["xp"] = pet.get("xp", 0) + earnings // 10
+                    _save_pets(pets)
+                    results["pet"] = earnings
+                    info = PET_TYPES.get(pet["type"], {"emoji": "🐾"})
+                    note = " _(hungry, halved)_" if hunger < 30 else ""
+                    results["lines"].append(f"{info['emoji']} Pet: **{earnings:,}**{note}")
+    except Exception as e:
+        log.warning("collect-all pet failed: %s", e)
+
+    # ── Businesses ──
+    try:
+        bizs = _user_businesses(user_id)
+        biz_total = 0
+        for biz in bizs:
+            pending = _business_pending_income(biz)
+            if pending > 0:
+                biz["last_collected"] = time.time()
+                biz_total += pending
+        if biz_total > 0:
+            bdata = _load_businesses()
+            bdata["users"][str(user_id)] = bizs
+            _save_businesses(bdata)
+            results["business"] = biz_total
+            results["lines"].append(f"🏢 Businesses ({len(bizs)}): **{biz_total:,}**")
+    except Exception as e:
+        log.warning("collect-all business failed: %s", e)
+
+    # ── Venues ──
+    try:
+        ndata = _load_nightlife()
+        venues = ndata.get("users", {}).get(str(user_id), [])
+        venue_total = 0
+        for v in venues:
+            pending = _venue_pending_income(v)
+            if pending > 0:
+                v["last_collected"] = time.time()
+                venue_total += pending
+        if venue_total > 0:
+            ndata["users"][str(user_id)] = venues
+            _save_nightlife(ndata)
+            results["venue"] = venue_total
+            results["lines"].append(f"🌃 Venues ({len(venues)}): **{venue_total:,}**")
+    except Exception as e:
+        log.warning("collect-all venue failed: %s", e)
+
+    # ── Real Estate ──
+    try:
+        re_data = _load_re()
+        _re_update_market(re_data)
+        props = re_data.get("users", {}).get(str(user_id), [])
+        re_total = 0
+        for prop in props:
+            pending = _re_pending_rent(prop)
+            if pending > 0:
+                prop["last_rent_collected"] = time.time()
+                re_total += pending
+        if re_total > 0:
+            re_data["users"][str(user_id)] = props
+            _save_re(re_data)
+            results["realestate"] = re_total
+            results["lines"].append(f"🏘️ Real Estate ({len(props)}): **{re_total:,}**")
+    except Exception as e:
+        log.warning("collect-all realestate failed: %s", e)
+
+    total = results["pet"] + results["business"] + results["venue"] + results["realestate"]
+    results["total"] = total
+
+    if total > 0:
+        economy.add(user_id, total, "collect all")
+        try:
+            track_economy_event("earned", total)
+            track_activity("collect_all", user_id, "", f"collected {total:,} from all sources")
+        except Exception:
+            pass
+    return results
+
+
+class CollectAllView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "That's not your wallet. Run `/balance` for your own.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Collect Everything", emoji="💰", style=discord.ButtonStyle.success)
+    async def collect_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        results = _collect_everything(self.user_id)
+        if results["total"] <= 0:
+            await interaction.response.send_message(
+                "💤 Nothing ready to collect right now. _(Cooldowns active or no income sources.)_",
+                ephemeral=True,
+            )
+            return
+        button.disabled = True
+        new_bal = economy.balance(self.user_id)
+        embed = discord.Embed(
+            title="💰 Collected Everything",
+            description="\n".join(results["lines"]) + f"\n\n**Total: {results['total']:,}** coins\n💼 New balance: **{new_bal:,}**",
+            color=discord.Color.green(),
+        )
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
+        await interaction.followup.send(embed=embed)
+
+
 @tree.command(name="balance", description="Check your or someone else's coin balance.")
 @discord.app_commands.describe(user="Whose balance to check (defaults to you)")
 async def balance_command(interaction: discord.Interaction, user: discord.Member = None):
@@ -3375,7 +3513,39 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
         suggestion = suggest_next_step(target.id)
         if suggestion:
             embed.add_field(name="💡 Next Step", value=suggestion, inline=False)
-    await interaction.response.send_message(embed=embed)
+
+    # Attach "Collect Everything" button if it's your own wallet and you have
+    # any pending income across pet / businesses / venues / real estate.
+    show_collect = False
+    if target.id == interaction.user.id:
+        try:
+            # Cheap pending check (no state mutation)
+            pet = _load_pets().get(str(target.id))
+            if pet:
+                lvl = _pet_level(pet["xp"])
+                hrs = (time.time() - pet.get("last_collected", time.time())) / 3600
+                if hrs >= 1 and int(lvl * PET_DAILY_INCOME_BASE * (hrs / 24)) > 0:
+                    show_collect = True
+            if not show_collect:
+                if any(_business_pending_income(b) > 0 for b in _user_businesses(target.id)):
+                    show_collect = True
+            if not show_collect:
+                venues = _load_nightlife().get("users", {}).get(str(target.id), [])
+                if any(_venue_pending_income(v) > 0 for v in venues):
+                    show_collect = True
+            if not show_collect:
+                re_data = _load_re()
+                props = re_data.get("users", {}).get(str(target.id), [])
+                if any(_re_pending_rent(p) > 0 for p in props):
+                    show_collect = True
+        except Exception as e:
+            log.warning("balance collect-check failed: %s", e)
+
+    if show_collect:
+        view = CollectAllView(target.id)
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed)
 
 
 @tree.command(name="daily", description="Claim your daily coin reward.")
