@@ -15603,12 +15603,12 @@ def _fmt_user_age(joined: datetime) -> str:
 @tree.command(name="whois", description="🕵️ Full dossier on a user — everything the bot knows.")
 @discord.app_commands.describe(user="Who to look up (leave blank for yourself)")
 async def whois_command(interaction: discord.Interaction, user: discord.Member = None):
-    """Animated terminal-style dossier. Builds frame-by-frame for cinematic feel."""
+    """Mobile-friendly animated terminal-style dossier. ~30 char wide box."""
     await interaction.response.defer()
     target = user or interaction.user
     uid = target.id
 
-    # ─── DATA GATHERING (silent, all loaded up front) ──────────────────────
+    # ─── DATA GATHERING ─────────────────────────────────────────────────────
     created_at = target.created_at
     joined_at = getattr(target, "joined_at", None)
     roles = [r for r in target.roles if r.name != "@everyone"]
@@ -15627,18 +15627,20 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
         if info["type"] == "timed":
             until = user_record.get(info["key"], 0)
             if until > time.time():
-                active_boosts.append(f"{info['name']} ({fmt_cooldown(int(until - time.time()))})")
+                active_boosts.append(info["name"])
         elif info["type"] == "consumable":
             qty = user_record.get(info["key"], 0)
             if qty > 0:
-                active_boosts.append(f"{info['name']} x{qty}")
+                active_boosts.append(f"{info['name']}x{qty}")
 
     pets = _load_pets()
     pet = pets.get(str(uid))
-    pet_str = "NONE"
+    pet_str = "none"
     if pet:
         pet_info = PET_TYPES.get(pet.get("type"), {"name": "?"})
-        pet_str = f"{pet.get('name', '?')} (Lv{pet.get('level', 1)} {pet_info['name']})"
+        # Keep short for mobile
+        pname = pet.get("name", "?")[:12]
+        pet_str = f"{pname} Lv{pet.get('level', 1)}"
 
     bdata = _load_businesses()
     user_bizs = bdata.get("users", {}).get(str(uid), [])
@@ -15703,142 +15705,166 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
 
     net_worth = balance + int(biz_value) + re_total + stocks_total
 
-    # Calc account age in days for display
     age_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
     server_days = (datetime.now(timezone.utc) - joined_at).days if joined_at else 0
 
-    # ─── FRAME BUILDERS ────────────────────────────────────────────────────
-    def box(content_lines):
-        """Wrap lines in an ASCII box."""
-        # Find max length for width
-        max_w = max((len(line) for line in content_lines), default=40)
-        max_w = max(max_w, 44)
-        top = "╔" + "═" * (max_w + 2) + "╗"
-        bot = "╚" + "═" * (max_w + 2) + "╝"
-        body = "\n".join(f"║ {line:<{max_w}} ║" for line in content_lines)
-        return f"{top}\n{body}\n{bot}"
+    # ── FRAME BUILDER ───────────────────────────────────────────────────────
+    INNER = 30  # inner width — fits Discord mobile
 
-    target_display = (target.display_name[:30] if len(target.display_name) > 30 else target.display_name)
+    def shorten(s, n):
+        """Trim string to n chars, adding ... if needed."""
+        s = str(s)
+        return s if len(s) <= n else s[:n-1] + "…"
 
-    # Frame 1 — connecting
-    frame1 = box([
-        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
-        "",
-        "  > Establishing secure connection...",
-        "  > Authenticating credentials...",
-        "  > [ ████░░░░░░░░░░░░░░░░ ]  20%",
-    ])
+    def num_compact(n):
+        """Format big numbers compactly for narrow display."""
+        if n >= 1_000_000_000: return f"{n/1_000_000_000:.1f}B"
+        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+        if n >= 1_000: return f"{n/1_000:.1f}K"
+        return str(n)
 
-    # Frame 2 — boot complete + identity
-    frame2 = box([
-        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
-        "",
-        "  > Connection established ✓",
-        f"  > QUERY: subject_id = {uid}",
-        "  > [ ████████████░░░░░░░░ ]  60%",
-        "",
-        f"  ◤ IDENTITY",
-        f"    NAME      : {target_display}",
-        f"    USER_ID   : {uid}",
-        f"    HANDLE    : @{target.name}",
-        f"    ACCT_AGE  : {age_days} days",
-        f"    SERVER    : {server_days} days",
-        f"    TOP_ROLE  : {top_role_name}",
-        f"    ROLES     : {len(roles)}",
-    ])
+    def frame(body_lines):
+        """Wrap lines in a narrow 30-char box. Lines auto-truncated."""
+        top = "┌" + "─" * INNER + "┐"
+        bot = "└" + "─" * INNER + "┘"
+        rows = []
+        for line in body_lines:
+            line = shorten(line, INNER - 2)
+            rows.append("│ " + line.ljust(INNER - 2) + " │")
+        return top + "\n" + "\n".join(rows) + "\n" + bot
 
-    # Frame 3 — financial profile
-    frame3 = box([
-        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
-        "",
-        "  > Cross-referencing financial records...",
-        "  > [ ███████████████░░░░░ ]  75%",
-        "",
-        f"  ◤ FINANCIAL PROFILE",
-        f"    BALANCE   : {balance:>15,} coins",
-        f"    EARNED    : {lifetime_earned:>15,} (lifetime)",
-        f"    SPENT     : {lifetime_spent:>15,} (lifetime)",
-        f"    LEVEL     : {level}  (XP {xp:,})",
-        f"    BOOSTS    : {len(active_boosts) or 'none'}" + (f" — {', '.join(active_boosts)[:50]}" if active_boosts else ""),
-    ])
+    def kv(label, value, lwidth=10):
+        """Format a key/value line with padding."""
+        return f"{label[:lwidth].ljust(lwidth)}: {value}"
 
-    # Frame 4 — asset registry
-    assets_lines = [
-        "  > Scanning asset registry...",
-        "  > [ ██████████████████░░ ]  90%",
+    target_short = shorten(target.display_name, 18)
+    handle_short = shorten(target.name, 18)
+
+    # Frame 1 — boot
+    f1 = [
+        "DOSSIER SYSTEM v2.1",
         "",
-        f"  ◤ ASSET REGISTRY",
-        f"    PET        : {pet_str}",
-        f"    BUSINESSES : {biz_count} (worth ≈{int(biz_value):,})",
-        f"    VENUES     : {venue_count}",
-        f"    PROPERTIES : {len(user_props)} (worth ≈{re_total:,})",
+        "> connecting...",
+        "> [██░░░░░░░░] 20%",
+    ]
+
+    # Frame 2 — identity
+    f2 = [
+        "DOSSIER SYSTEM v2.1",
+        "> [████░░░░░░] 40%",
+        "",
+        "◤ IDENTITY",
+        kv("NAME", target_short, 7),
+        kv("HANDLE", handle_short, 7),
+        kv("ID", str(uid)[:12]+"..", 7),
+        kv("AGE", f"{age_days}d / svr {server_days}d", 7),
+        kv("ROLE", shorten(top_role_name, 12), 7),
+    ]
+
+    # Frame 3 — money
+    boosts_str = ", ".join(active_boosts[:2]) if active_boosts else "none"
+    f3 = [
+        "DOSSIER SYSTEM v2.1",
+        "> [██████░░░░] 60%",
+        "",
+        "◤ FINANCIALS",
+        kv("BAL", f"{num_compact(balance)} coins", 7),
+        kv("EARNED", num_compact(lifetime_earned), 7),
+        kv("SPENT", num_compact(lifetime_spent), 7),
+        kv("LEVEL", f"{level} ({num_compact(xp)} XP)", 7),
+        kv("BOOSTS", shorten(boosts_str, 18), 7),
+    ]
+
+    # Frame 4 — assets
+    f4_lines = [
+        "DOSSIER SYSTEM v2.1",
+        "> [████████░░] 80%",
+        "",
+        "◤ ASSETS",
+        kv("PET", shorten(pet_str, 18), 7),
+        kv("BIZ", f"{biz_count} (~{num_compact(int(biz_value))})", 7),
+        kv("VENUE", str(venue_count), 7),
+        kv("PROP", f"{len(user_props)} (~{num_compact(re_total)})", 7),
+        kv("STOCK", f"{stocks_count} (~{num_compact(stocks_total)})", 7),
     ]
     if re_legendary:
-        assets_lines.append(f"    LEGENDARY  : ★ {', '.join(re_legendary)}")
-    assets_lines.append(f"    STOCKS     : {stocks_count} tickers (worth ≈{stocks_total:,})")
-    assets_lines.append(f"    NET WORTH  : {net_worth:,}".rjust(20))
-    frame4 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + assets_lines)
+        f4_lines.append("★ LEGENDARY OWNER ★")
+    f4 = f4_lines
 
-    # Frame 5 — underworld + record
-    underworld_lines = [
-        "  > Decrypting underworld records...",
-        "  > [ ████████████████████ ] 100%",
+    # Frame 5 — record
+    f5_lines = [
+        "DOSSIER SYSTEM v2.1",
+        "> [██████████] 100%",
         "",
-        f"  ◤ CRIMINAL RECORD",
+        "◤ CRIMINAL RECORD",
     ]
     if specialists or lifetime_heists:
-        underworld_lines.append(f"    HEIST CREW : {len(specialists)} specialists")
-        underworld_lines.append(f"    HEISTS     : {lifetime_heists} pulled / {lifetime_loot:,} loot")
+        f5_lines.append(kv("HEIST", f"{lifetime_heists}/{num_compact(lifetime_loot)}", 7))
     else:
-        underworld_lines.append(f"    HEIST CREW : none on file")
+        f5_lines.append(kv("HEIST", "clean", 7))
     if lifetime_sold > 0:
-        underworld_lines.append(f"    DEALER     : {lifetime_sold:,}g sold / {lifetime_profit:,} profit")
-        underworld_lines.append(f"    HEAT       : {heat}%")
+        f5_lines.append(kv("DEALER", f"{num_compact(lifetime_sold)}g sold", 7))
+        f5_lines.append(kv("HEAT", f"{heat}%", 7))
     else:
-        underworld_lines.append(f"    DEALER     : clean")
+        f5_lines.append(kv("DEALER", "clean", 7))
     if in_jail:
-        underworld_lines.append(f"    !! STATUS  : INCARCERATED — {fmt_cooldown(int(jail_until - time.time()))} remaining")
-    underworld_lines.append("")
-    underworld_lines.append(f"  ◤ GAME RECORD")
-    underworld_lines.append(f"    W/L        : {total_wins:,} / {total_losses:,}  ({win_rate:.0f}% win rate)")
-    underworld_lines.append(f"    ACHIEV.    : {len(achievements)} unlocked")
-    underworld_lines.append(f"    LISTINGS   : {active_listings} active on market")
+        f5_lines.append("!! IN JAIL !!")
+    f5_lines.append("")
+    f5_lines.append("◤ STATS")
+    f5_lines.append(kv("W/L", f"{total_wins}/{total_losses} ({win_rate:.0f}%)", 7))
+    f5_lines.append(kv("ACHIEV", str(len(achievements)), 7))
     if spouse_id:
-        underworld_lines.append(f"    MARRIED    : yes — to user {spouse_id}")
-    frame5 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + underworld_lines)
+        f5_lines.append("💍 MARRIED")
+    f5 = f5_lines
 
-    # Frame 6 — final stamp
-    classification = "★★★★★ HIGH VALUE" if net_worth > 1_000_000 else "★★★★☆ ESTABLISHED" if net_worth > 100_000 else "★★★☆☆ DEVELOPING" if net_worth > 10_000 else "★★☆☆☆ NEW SUBJECT"
-    threat = "EXTREME" if heat > 70 or in_jail else "HIGH" if heat > 40 or lifetime_heists > 5 else "MODERATE" if lifetime_heists > 0 or lifetime_sold > 0 else "LOW"
-    final_footer_lines = [
+    # Frame 6 — final assessment
+    if net_worth > 1_000_000:
+        classification = "★★★★★ HIGH VALUE"
+    elif net_worth > 100_000:
+        classification = "★★★★ ESTABLISHED"
+    elif net_worth > 10_000:
+        classification = "★★★ DEVELOPING"
+    else:
+        classification = "★★ NEW SUBJECT"
+    if heat > 70 or in_jail:
+        threat = "EXTREME"
+    elif heat > 40 or lifetime_heists > 5:
+        threat = "HIGH"
+    elif lifetime_heists > 0 or lifetime_sold > 0:
+        threat = "MODERATE"
+    else:
+        threat = "LOW"
+
+    f6 = [
+        "DOSSIER SYSTEM v2.1",
         "",
-        f"  ◤ ASSESSMENT",
-        f"    CLASSIFICATION : {classification}",
-        f"    THREAT LEVEL   : {threat}",
-        f"    NET WORTH      : {net_worth:,} coins",
+        "◤ ASSESSMENT",
+        shorten(classification, 28),
+        f"THREAT: {threat}",
+        f"NET: {num_compact(net_worth)} coins",
         "",
-        "  > FILE CLOSED — [STAMP] CONFIDENTIAL",
-        "  > Connection terminated.",
+        "> FILE CLOSED",
+        "> [STAMP: CONFIDENTIAL]",
+        "> conn. terminated",
     ]
-    frame6 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + final_footer_lines)
 
-    # ─── ANIMATION SEQUENCE ────────────────────────────────────────────────
-    frames = [frame1, frame2, frame3, frame4, frame5, frame6]
-    msg = await interaction.followup.send(content=f"```\n{frames[0]}\n```")
-    for f in frames[1:]:
+    # ── ANIMATION ───────────────────────────────────────────────────────────
+    frames = [f1, f2, f3, f4, f5, f6]
+    msg = await interaction.followup.send(content=f"```\n{frame(frames[0])}\n```")
+    for body in frames[1:]:
         await asyncio.sleep(0.9)
         try:
-            await msg.edit(content=f"```\n{f}\n```")
+            await msg.edit(content=f"```\n{frame(body)}\n```")
         except Exception as e:
             log.warning("whois frame edit failed: %s", e)
             break
 
-    # Track
     try:
         track_activity("whois", interaction.user.id, interaction.user.display_name,
                        f"looked up {target.display_name}")
     except Exception:
         pass
+
 
 
 
