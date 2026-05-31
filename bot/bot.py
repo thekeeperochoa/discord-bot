@@ -15603,233 +15603,235 @@ def _fmt_user_age(joined: datetime) -> str:
 @tree.command(name="whois", description="🕵️ Full dossier on a user — everything the bot knows.")
 @discord.app_commands.describe(user="Who to look up (leave blank for yourself)")
 async def whois_command(interaction: discord.Interaction, user: discord.Member = None):
+    """Animated terminal-style dossier. Builds frame-by-frame for cinematic feel."""
     await interaction.response.defer()
     target = user or interaction.user
     uid = target.id
 
-    # ── 1. Discord-level identity ────────────────────────────────────────────
+    # ─── DATA GATHERING (silent, all loaded up front) ──────────────────────
     created_at = target.created_at
     joined_at = getattr(target, "joined_at", None)
     roles = [r for r in target.roles if r.name != "@everyone"]
     roles_sorted = sorted(roles, key=lambda r: r.position, reverse=True)
-    top_role = roles_sorted[0].mention if roles_sorted else "_no roles_"
+    top_role_name = roles_sorted[0].name if roles_sorted else "—"
 
-    # ── 2. Economy ───────────────────────────────────────────────────────────
     balance = economy.balance(uid)
     user_record = economy._user(uid)
     lifetime_earned = user_record.get("lifetime_earned", 0)
     lifetime_spent = user_record.get("lifetime_spent", 0)
+    level = user_record.get("level", 1)
+    xp = user_record.get("xp", 0)
 
-    # Active boosts
     active_boosts = []
     for key, info in TRANSFERABLE_ITEMS.items():
         if info["type"] == "timed":
             until = user_record.get(info["key"], 0)
             if until > time.time():
-                active_boosts.append(f"{info['emoji']} {info['name']} ({fmt_cooldown(int(until - time.time()))})")
+                active_boosts.append(f"{info['name']} ({fmt_cooldown(int(until - time.time()))})")
         elif info["type"] == "consumable":
             qty = user_record.get(info["key"], 0)
             if qty > 0:
-                active_boosts.append(f"{info['emoji']} {info['name']} ×{qty}")
+                active_boosts.append(f"{info['name']} x{qty}")
 
-    # ── 3. Pet ───────────────────────────────────────────────────────────────
     pets = _load_pets()
-    pet_str = "_none_"
     pet = pets.get(str(uid))
+    pet_str = "NONE"
     if pet:
-        pet_info = PET_TYPES.get(pet.get("type"), {"emoji": "🐾", "name": "?"})
-        pet_str = f"{pet_info['emoji']} **{pet.get('name', '?')}** — Lv. {pet.get('level', 1)} {pet_info['name']} (XP {pet.get('xp', 0)})"
+        pet_info = PET_TYPES.get(pet.get("type"), {"name": "?"})
+        pet_str = f"{pet.get('name', '?')} (Lv{pet.get('level', 1)} {pet_info['name']})"
 
-    # ── 4. Businesses ────────────────────────────────────────────────────────
     bdata = _load_businesses()
     user_bizs = bdata.get("users", {}).get(str(uid), [])
-    biz_lines = []
-    biz_total_value = 0
-    for biz in user_bizs:
-        bi = BUSINESS_TYPES.get(biz.get("type"), {"emoji": "🏢", "name": "?"})
-        lvl = biz.get("upgrade_level", 0) + 1
-        biz_lines.append(f"{bi['emoji']} {bi['name']} (Lv {lvl})")
-        biz_total_value += bi.get("cost", 0) * (1 + 0.1 * (lvl - 1))
-    biz_str = "\n".join(biz_lines) if biz_lines else "_none_"
+    biz_count = len(user_bizs)
+    biz_value = 0
+    for b in user_bizs:
+        bi = BUSINESS_TYPES.get(b.get("type"), {"cost": 0})
+        biz_value += bi.get("cost", 0) * (1 + 0.1 * b.get("upgrade_level", 0))
 
-    # ── 5. Venues ────────────────────────────────────────────────────────────
     ndata = _load_nightlife()
     user_venues = ndata.get("users", {}).get(str(uid), [])
-    venue_lines = []
-    for v in user_venues:
-        vi = VENUE_TYPES.get(v.get("type"), {"emoji": "🌃", "name": "?"})
-        staff_count = len(v.get("staff", []))
-        venue_lines.append(f"{vi['emoji']} {vi['name']} ({staff_count} staff)")
-    venue_str = "\n".join(venue_lines) if venue_lines else "_none_"
+    venue_count = len(user_venues)
 
-    # ── 6. Real Estate ───────────────────────────────────────────────────────
     re_data = _load_re()
     user_props = re_data.get("users", {}).get(str(uid), [])
-    re_lines = []
-    re_total_value = 0
+    re_total = 0
+    re_legendary = []
     for prop in user_props:
-        pi = PROPERTIES.get(prop.get("type"), {"emoji": "🏚️", "name": "?"})
-        re_lines.append(f"{pi['emoji']} {pi['name']}")
-        re_total_value += _re_current_price(prop.get("type"), re_data)
-    # Add legendary owned indicator
-    leg_owned = [k for k, owner in re_data.get("legendary_owners", {}).items() if owner == uid]
-    leg_str = ""
-    if leg_owned:
-        leg_str = "\n🏆 " + ", ".join(PROPERTIES[k]["name"] for k in leg_owned)
-    re_str = ("\n".join(re_lines) + leg_str) if re_lines else "_none_"
+        re_total += _re_current_price(prop.get("type"), re_data)
+        info = PROPERTIES.get(prop.get("type"), {})
+        if info.get("unique"):
+            re_legendary.append(info.get("name", "?"))
 
-    # ── 7. Stocks ────────────────────────────────────────────────────────────
     s_data = _load_stocks()
     holdings = s_data.get("holdings", {}).get(str(uid), {})
-    stock_lines = []
-    stocks_total = 0
-    for ticker, shares in holdings.items():
-        if shares <= 0:
-            continue
-        price = _stock_price(ticker, s_data)
-        value = int(price * shares)
-        stocks_total += value
-        si = STOCKS.get(ticker, {"emoji": "📊"})
-        stock_lines.append(f"{si['emoji']} ${ticker}: **{shares:,}** shares (≈{value:,})")
-    stocks_str = "\n".join(stock_lines) if stock_lines else "_none_"
+    stocks_total = sum(int(_stock_price(t, s_data) * sh) for t, sh in holdings.items() if sh > 0)
+    stocks_count = sum(1 for v in holdings.values() if v > 0)
 
-    # ── 8. Marriages ─────────────────────────────────────────────────────────
     marriages = _load_marriages()
-    spouse_str = "_single_"
-    for pair_key, info in marriages.get("married", {}).items():
-        a, b = info.get("user_a"), info.get("user_b")
-        if a == uid:
-            spouse_str = f"💍 Married to <@{b}>"
+    spouse_id = None
+    for info in marriages.get("married", {}).values():
+        if info.get("user_a") == uid:
+            spouse_id = info.get("user_b")
             break
-        elif b == uid:
-            spouse_str = f"💍 Married to <@{a}>"
+        if info.get("user_b") == uid:
+            spouse_id = info.get("user_a")
             break
 
-    # ── 9. Heist crew ────────────────────────────────────────────────────────
     h_data = _load_heist_crew()
     crew_info = h_data.get("users", {}).get(str(uid), {})
     specialists = crew_info.get("specialists", [])
     lifetime_heists = crew_info.get("lifetime_heists", 0)
     lifetime_loot = crew_info.get("lifetime_loot", 0)
-    crew_str = "_no crew_"
-    if specialists:
-        crew_str = f"{len(specialists)} specialist(s) • {lifetime_heists} heists pulled • {lifetime_loot:,} total loot"
     jail_until = crew_info.get("jail_until", 0)
-    if jail_until > time.time():
-        crew_str += f"\n🚓 **IN JAIL** for {fmt_cooldown(int(jail_until - time.time()))}"
+    in_jail = jail_until > time.time()
 
-    # ── 10. Dealer (drug game) ──────────────────────────────────────────────
     d_data = _load_dealer()
     dealer_info = d_data.get("users", {}).get(str(uid), {})
     lifetime_sold = dealer_info.get("lifetime_sold", 0)
     lifetime_profit = dealer_info.get("lifetime_profit", 0)
     heat = dealer_info.get("heat", 0)
-    dealer_str = "_no record_"
-    if lifetime_sold > 0:
-        dealer_str = f"📦 {lifetime_sold:,}g sold • 💰 {lifetime_profit:,} profit • 🔥 Heat: {heat}"
 
-    # ── 11. Stats / Counters ────────────────────────────────────────────────
     counters = _get_counters(uid)
     total_wins = counters.get("total_wins", 0)
     total_losses = counters.get("total_losses", 0)
     win_rate = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0
-    level = user_record.get("level", 1)
-    xp = user_record.get("xp", 0)
-
-    # ── 12. Achievements ────────────────────────────────────────────────────
     achievements = user_record.get("achievements", [])
-    ach_count = len(achievements)
 
-    # ── 13. Marketplace activity ────────────────────────────────────────────
     market_data = _load_market()
     active_listings = sum(1 for l in market_data.get("listings", {}).values()
                           if l.get("seller_id") == uid and l.get("status") == "active")
 
-    # ── 14. Quests ──────────────────────────────────────────────────────────
-    quest_data = _load_quests()
-    user_quests = quest_data.get("users", {}).get(str(uid), {}).get("active", [])
-    completed_today = sum(1 for q in user_quests if q.get("completed"))
+    net_worth = balance + int(biz_value) + re_total + stocks_total
 
-    # ── ASSEMBLE THE DOSSIER ────────────────────────────────────────────────
-    embed = discord.Embed(
-        title=f"🕵️ Dossier — {target.display_name}",
-        description=f"_Everything in the file on this person._",
-        color=target.color if target.color.value else discord.Color.dark_grey(),
-    )
-    embed.set_thumbnail(url=target.display_avatar.url)
+    # Calc account age in days for display
+    age_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
+    server_days = (datetime.now(timezone.utc) - joined_at).days if joined_at else 0
 
-    # Discord identity
-    embed.add_field(
-        name="🪪 Identity",
-        value=(
-            f"**ID:** `{target.id}`\n"
-            f"**Username:** {target.name}\n"
-            f"**Account age:** {_fmt_user_age(created_at)}\n"
-            f"**On server:** {_fmt_user_age(joined_at) if joined_at else '?'}\n"
-            f"**Top role:** {top_role}\n"
-            f"**Roles:** {len(roles)}"
-        ),
-        inline=False,
-    )
+    # ─── FRAME BUILDERS ────────────────────────────────────────────────────
+    def box(content_lines):
+        """Wrap lines in an ASCII box."""
+        # Find max length for width
+        max_w = max((len(line) for line in content_lines), default=40)
+        max_w = max(max_w, 44)
+        top = "╔" + "═" * (max_w + 2) + "╗"
+        bot = "╚" + "═" * (max_w + 2) + "╝"
+        body = "\n".join(f"║ {line:<{max_w}} ║" for line in content_lines)
+        return f"{top}\n{body}\n{bot}"
 
-    # Economy
-    economy_lines = [
-        f"💰 Balance: **{balance:,}**",
-        f"📈 Lifetime earned: **{lifetime_earned:,}**",
-        f"📉 Lifetime spent: **{lifetime_spent:,}**",
-        f"⭐ Level **{level}** (XP {xp:,})",
+    target_display = (target.display_name[:30] if len(target.display_name) > 30 else target.display_name)
+
+    # Frame 1 — connecting
+    frame1 = box([
+        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
+        "",
+        "  > Establishing secure connection...",
+        "  > Authenticating credentials...",
+        "  > [ ████░░░░░░░░░░░░░░░░ ]  20%",
+    ])
+
+    # Frame 2 — boot complete + identity
+    frame2 = box([
+        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
+        "",
+        "  > Connection established ✓",
+        f"  > QUERY: subject_id = {uid}",
+        "  > [ ████████████░░░░░░░░ ]  60%",
+        "",
+        f"  ◤ IDENTITY",
+        f"    NAME      : {target_display}",
+        f"    USER_ID   : {uid}",
+        f"    HANDLE    : @{target.name}",
+        f"    ACCT_AGE  : {age_days} days",
+        f"    SERVER    : {server_days} days",
+        f"    TOP_ROLE  : {top_role_name}",
+        f"    ROLES     : {len(roles)}",
+    ])
+
+    # Frame 3 — financial profile
+    frame3 = box([
+        "JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM",
+        "",
+        "  > Cross-referencing financial records...",
+        "  > [ ███████████████░░░░░ ]  75%",
+        "",
+        f"  ◤ FINANCIAL PROFILE",
+        f"    BALANCE   : {balance:>15,} coins",
+        f"    EARNED    : {lifetime_earned:>15,} (lifetime)",
+        f"    SPENT     : {lifetime_spent:>15,} (lifetime)",
+        f"    LEVEL     : {level}  (XP {xp:,})",
+        f"    BOOSTS    : {len(active_boosts) or 'none'}" + (f" — {', '.join(active_boosts)[:50]}" if active_boosts else ""),
+    ])
+
+    # Frame 4 — asset registry
+    assets_lines = [
+        "  > Scanning asset registry...",
+        "  > [ ██████████████████░░ ]  90%",
+        "",
+        f"  ◤ ASSET REGISTRY",
+        f"    PET        : {pet_str}",
+        f"    BUSINESSES : {biz_count} (worth ≈{int(biz_value):,})",
+        f"    VENUES     : {venue_count}",
+        f"    PROPERTIES : {len(user_props)} (worth ≈{re_total:,})",
     ]
-    if active_boosts:
-        economy_lines.append(f"🎁 Active: {' • '.join(active_boosts)}")
-    embed.add_field(name="💵 Economy", value="\n".join(economy_lines), inline=False)
+    if re_legendary:
+        assets_lines.append(f"    LEGENDARY  : ★ {', '.join(re_legendary)}")
+    assets_lines.append(f"    STOCKS     : {stocks_count} tickers (worth ≈{stocks_total:,})")
+    assets_lines.append(f"    NET WORTH  : {net_worth:,}".rjust(20))
+    frame4 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + assets_lines)
 
-    # Assets — combine into one field
-    total_net_worth = balance + int(biz_total_value) + re_total_value + stocks_total
-    assets_lines = []
-    if pet_str != "_none_":
-        assets_lines.append(f"🐶 **Pet:** {pet_str}")
-    if biz_lines:
-        assets_lines.append(f"🏢 **Businesses ({len(biz_lines)}):**\n{biz_str}")
-    if venue_lines:
-        assets_lines.append(f"🌃 **Venues ({len(venue_lines)}):**\n{venue_str}")
-    if re_lines:
-        assets_lines.append(f"🏘️ **Real Estate ({len(re_lines)}):**\n{re_str}")
-    if stock_lines:
-        assets_lines.append(f"📈 **Stocks:**\n{stocks_str}")
-    if not assets_lines:
-        assets_lines.append("_no assets_")
-    assets_text = "\n\n".join(assets_lines)
-    if len(assets_text) > 1024:
-        assets_text = assets_text[:1020] + "..."
-    embed.add_field(name=f"📦 Assets (Net worth ≈{total_net_worth:,})", value=assets_text, inline=False)
-
-    # Game record
-    game_lines = [
-        f"🎲 Wins: **{total_wins:,}** • Losses: **{total_losses:,}** • Win rate: **{win_rate:.0f}%**",
-        f"🏆 Achievements: **{ach_count}** unlocked",
+    # Frame 5 — underworld + record
+    underworld_lines = [
+        "  > Decrypting underworld records...",
+        "  > [ ████████████████████ ] 100%",
+        "",
+        f"  ◤ CRIMINAL RECORD",
     ]
-    if user_quests:
-        game_lines.append(f"📋 Active quests: {len(user_quests)} ({completed_today} done)")
-    embed.add_field(name="🎮 Game Record", value="\n".join(game_lines), inline=False)
+    if specialists or lifetime_heists:
+        underworld_lines.append(f"    HEIST CREW : {len(specialists)} specialists")
+        underworld_lines.append(f"    HEISTS     : {lifetime_heists} pulled / {lifetime_loot:,} loot")
+    else:
+        underworld_lines.append(f"    HEIST CREW : none on file")
+    if lifetime_sold > 0:
+        underworld_lines.append(f"    DEALER     : {lifetime_sold:,}g sold / {lifetime_profit:,} profit")
+        underworld_lines.append(f"    HEAT       : {heat}%")
+    else:
+        underworld_lines.append(f"    DEALER     : clean")
+    if in_jail:
+        underworld_lines.append(f"    !! STATUS  : INCARCERATED — {fmt_cooldown(int(jail_until - time.time()))} remaining")
+    underworld_lines.append("")
+    underworld_lines.append(f"  ◤ GAME RECORD")
+    underworld_lines.append(f"    W/L        : {total_wins:,} / {total_losses:,}  ({win_rate:.0f}% win rate)")
+    underworld_lines.append(f"    ACHIEV.    : {len(achievements)} unlocked")
+    underworld_lines.append(f"    LISTINGS   : {active_listings} active on market")
+    if spouse_id:
+        underworld_lines.append(f"    MARRIED    : yes — to user {spouse_id}")
+    frame5 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + underworld_lines)
 
-    # Criminal Underworld (heist + dealer)
-    underworld_lines = []
-    if crew_str != "_no crew_":
-        underworld_lines.append(f"🦹 **Heist crew:** {crew_str}")
-    if dealer_str != "_no record_":
-        underworld_lines.append(f"💊 **Dealer:** {dealer_str}")
-    if underworld_lines:
-        embed.add_field(name="🔫 The Streets", value="\n".join(underworld_lines), inline=False)
+    # Frame 6 — final stamp
+    classification = "★★★★★ HIGH VALUE" if net_worth > 1_000_000 else "★★★★☆ ESTABLISHED" if net_worth > 100_000 else "★★★☆☆ DEVELOPING" if net_worth > 10_000 else "★★☆☆☆ NEW SUBJECT"
+    threat = "EXTREME" if heat > 70 or in_jail else "HIGH" if heat > 40 or lifetime_heists > 5 else "MODERATE" if lifetime_heists > 0 or lifetime_sold > 0 else "LOW"
+    final_footer_lines = [
+        "",
+        f"  ◤ ASSESSMENT",
+        f"    CLASSIFICATION : {classification}",
+        f"    THREAT LEVEL   : {threat}",
+        f"    NET WORTH      : {net_worth:,} coins",
+        "",
+        "  > FILE CLOSED — [STAMP] CONFIDENTIAL",
+        "  > Connection terminated.",
+    ]
+    frame6 = box(["JORDAN BELFORT // CLASSIFIED DOSSIER SYSTEM", ""] + final_footer_lines)
 
-    # Social
-    social_lines = [spouse_str]
-    if active_listings > 0:
-        social_lines.append(f"🛒 **{active_listings}** active marketplace listing(s)")
-    embed.add_field(name="❤️ Social / Trade", value="\n".join(social_lines), inline=False)
-
-    embed.set_footer(text=f"Run /whois user:@someone to look up another user")
-
-    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    # ─── ANIMATION SEQUENCE ────────────────────────────────────────────────
+    frames = [frame1, frame2, frame3, frame4, frame5, frame6]
+    msg = await interaction.followup.send(content=f"```\n{frames[0]}\n```")
+    for f in frames[1:]:
+        await asyncio.sleep(0.9)
+        try:
+            await msg.edit(content=f"```\n{f}\n```")
+        except Exception as e:
+            log.warning("whois frame edit failed: %s", e)
+            break
 
     # Track
     try:
@@ -15837,6 +15839,7 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
                        f"looked up {target.display_name}")
     except Exception:
         pass
+
 
 
 @tree.command(name="commands", description="See all bot commands organized by category.")
