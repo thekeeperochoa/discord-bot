@@ -431,6 +431,30 @@ def supporter_badge(user_id: int) -> str:
     return SUPPORTER_TIER_INFO.get(tier, {}).get("emoji", "")
 
 
+# Rotating footer nudges shown to NON-supporters only. Kept short + low-key.
+PATREON_PAGE = "https://www.patreon.com/cw/degens18"
+_PATREON_NUDGES = [
+    "💖 Enjoying the bot? Support it — type _perks",
+    "💖 Unlock cosmetic perks — type _perks",
+    "💖 Keep Jordan running — type _perks to support",
+    "☕ Like the bot? _perks to support development",
+]
+
+
+def patreon_footer(user_id: int, base_footer: str = "") -> str:
+    """Append a subtle Patreon nudge to a footer — ONLY for non-supporters.
+    Rotates the message so it doesn't get stale. Supporters never see it."""
+    try:
+        if is_supporter(user_id):
+            return base_footer
+        nudge = random.choice(_PATREON_NUDGES)
+        if base_footer:
+            return f"{base_footer}  •  {nudge}"
+        return nudge
+    except Exception:
+        return base_footer
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 📊 STATS TRACKING (for web dashboard)
 # Logs command uses, economy events, game outcomes, feature usage, activity feed.
@@ -3654,7 +3678,11 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
         if suggestion:
             embed.add_field(name="💡 NEXT STEP", value=suggestion, inline=False)
 
-    embed.set_footer(text="Buy low · Sell high · Stack coins")
+    base_foot = "Buy low · Sell high · Stack coins"
+    if target.id == interaction.user.id:
+        embed.set_footer(text=patreon_footer(target.id, base_foot))
+    else:
+        embed.set_footer(text=base_foot)
 
     # ── Collect button (own wallet + pending income) ──
     show_collect = (target.id == interaction.user.id and total_pending > 0)
@@ -4068,13 +4096,17 @@ async def leaderboard_command(interaction: discord.Interaction):
         prefix = medals[i] if i < 3 else f"`#{i+1}`"
         badges = get_user_badges(int(uid))
         badge_str = f" {badges}" if badges else ""
-        lines.append(f"{prefix} **{name}**{badge_str} — {COIN_EMOJI} {data.get('balance', 0):,}")
+        # Supporter badge as a small flex/perk
+        sbadge = supporter_badge(int(uid))
+        sbadge_str = f" {sbadge}" if sbadge else ""
+        lines.append(f"{prefix} **{name}**{badge_str}{sbadge_str} — {COIN_EMOJI} {data.get('balance', 0):,}")
 
     embed = discord.Embed(
         title="🏆 Richest Users",
         description="\n".join(lines),
         color=discord.Color.gold(),
     )
+    embed.set_footer(text=patreon_footer(interaction.user.id))
     await interaction.edit_original_response(embed=embed)
 
 
@@ -12796,6 +12828,8 @@ You just got dropped into the deep end. Here's the 60-second tour:
 > • Check `/quests` for daily challenges that pay out bonus coins
 > • Watch chat for random **💰 coin drops** — first to react grabs them
 
+💖 _Love the bot? Type `_perks` to unlock cosmetic perks and support development._
+
 Welcome to the city. **What are you working tonight?** 🌃
 """
 
@@ -16342,6 +16376,11 @@ def _build_commands_home_embed() -> discord.Embed:
     embed.add_field(
         name="\U0001F4D6 BROWSE ALL COMMANDS",
         value="_Use the buttons below to explore every category._",
+        inline=False,
+    )
+    embed.add_field(
+        name="\U0001F496 SUPPORT THE BOT",
+        value="Type `_perks` to unlock cosmetic perks & keep Jordan running.",
         inline=False,
     )
     embed.set_footer(text="Click a button \u2192 see commands in that category")
