@@ -356,6 +356,82 @@ economy = Economy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 💖 SUPPORTER PERK SYSTEM (Patreon/Ko-fi cosmetic perks)
+# Patreon's Discord integration assigns roles to pledgers. The bot reads those
+# roles and unlocks COSMETIC-ONLY perks. Never pay-to-win — keeps the economy fair.
+#
+# SETUP: Create 3 Discord roles, link them to Patreon tiers, paste the IDs below.
+# (Patreon → Discord integration auto-assigns these roles to pledgers.)
+# ─────────────────────────────────────────────────────────────────────────────
+SUPPORTER_ROLE_IDS = {
+    # tier_name: role_id
+    "supporter": 1510771525060657243,   # ☕ $5/mo tier
+    "vip":       1510771805135179960,   # 💎 $10/mo tier
+    "kingpin":   1510771894234910843,   # 👑 $15/mo tier
+}
+
+# Tier ranking (higher = more perks). Used to resolve the user's BEST tier.
+SUPPORTER_TIER_RANK = {"supporter": 1, "vip": 2, "kingpin": 3}
+
+SUPPORTER_TIER_INFO = {
+    "supporter": {"emoji": "☕", "name": "Supporter", "color": 0x57F287},
+    "vip":       {"emoji": "💎", "name": "VIP",       "color": 0x5865F2},
+    "kingpin":   {"emoji": "👑", "name": "Kingpin",   "color": 0xF1C40F},
+}
+
+
+def _find_member_anywhere(user_id: int):
+    """Find a Member object for this user across the bot's guilds."""
+    try:
+        for guild in client.guilds:
+            m = guild.get_member(int(user_id))
+            if m:
+                return m
+    except Exception:
+        pass
+    return None
+
+
+def supporter_tier(user_id: int) -> str | None:
+    """Return the user's HIGHEST supporter tier name, or None if not a supporter."""
+    member = _find_member_anywhere(user_id)
+    if not member:
+        return None
+    best = None
+    best_rank = 0
+    for tier, role_id in SUPPORTER_ROLE_IDS.items():
+        if not role_id:
+            continue
+        if any(r.id == role_id for r in member.roles):
+            rank = SUPPORTER_TIER_RANK.get(tier, 0)
+            if rank > best_rank:
+                best_rank = rank
+                best = tier
+    return best
+
+
+def is_supporter(user_id: int) -> bool:
+    """True if the user has ANY supporter tier."""
+    return supporter_tier(user_id) is not None
+
+
+def supporter_has_tier(user_id: int, min_tier: str) -> bool:
+    """True if the user's tier is at least `min_tier` (by rank)."""
+    tier = supporter_tier(user_id)
+    if not tier:
+        return False
+    return SUPPORTER_TIER_RANK.get(tier, 0) >= SUPPORTER_TIER_RANK.get(min_tier, 99)
+
+
+def supporter_badge(user_id: int) -> str:
+    """Return the emoji badge for a supporter's tier (or empty string)."""
+    tier = supporter_tier(user_id)
+    if not tier:
+        return ""
+    return SUPPORTER_TIER_INFO.get(tier, {}).get("emoji", "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 📊 STATS TRACKING (for web dashboard)
 # Logs command uses, economy events, game outcomes, feature usage, activity feed.
 # All persisted to MEMORY_DIR/stats.json.
@@ -3516,6 +3592,16 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
     embed = discord.Embed(description=header, color=0xF1C40F)
     if badges:
         embed.set_author(name=badges[:240])
+
+    # Supporter cosmetic: tinted embed color + badge
+    s_tier = supporter_tier(target.id)
+    if s_tier:
+        tinfo = SUPPORTER_TIER_INFO.get(s_tier, {})
+        embed.color = tinfo.get("color", 0xF1C40F)
+        author_txt = f"{tinfo.get('emoji','')} {tinfo.get('name','Supporter')}"
+        if badges:
+            author_txt = f"{tinfo.get('emoji','')} {badges[:230]}"
+        embed.set_author(name=author_txt[:240])
 
     # Stats block
     stats_block = (
@@ -16142,6 +16228,11 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     f6.append(shorten(classification, 28))
     f6.append(f"THREAT: {threat}")
     f6.append(f"NET WORTH: {num_compact(net_worth)}")
+    # Supporter cosmetic stamp
+    _s_tier = supporter_tier(uid)
+    if _s_tier:
+        _tinfo = SUPPORTER_TIER_INFO.get(_s_tier, {})
+        f6.append(f"{_tinfo.get('emoji','')} {_tinfo.get('name','').upper()} MEMBER")
     f6.append("")
     f6.append("> [STAMP: CONFIDENTIAL]")
 
@@ -16685,12 +16776,79 @@ PREFIX_COMMANDS = {
 }
 
 
+async def _send_perks_embed(message: discord.Message):
+    """Show supporter tiers + perks. Doubles as advertising. Prefix-only: _perks"""
+    # Patreon page
+    PATREON_URL = "https://www.patreon.com/cw/degens18"
+
+    viewer_tier = supporter_tier(message.author.id)
+
+    embed = discord.Embed(
+        title="💖 Support Jordan Belfort",
+        description=(
+            "_Keep the bot running and unlock cosmetic perks._\n"
+            "All perks are **cosmetic only** — no pay-to-win, the economy stays fair.\n"
+            f"\n**[→ Become a supporter]({PATREON_URL})**"
+        ),
+        color=0xF1C40F,
+    )
+
+    embed.add_field(
+        name="☕ Supporter · $5/mo",
+        value=(
+            "• Custom title next to your name\n"
+            "• ☕ Supporter badge on `/balance` & `/whois`\n"
+            "• Colored wallet embed"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💎 VIP · $10/mo",
+        value=(
+            "• Everything in Supporter\n"
+            "• 💎 VIP badge + blue themed wallet\n"
+            "• Exclusive `/run` hustle flavor skins\n"
+            "• VIP dossier theme on `/whois`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="👑 Kingpin · $15/mo",
+        value=(
+            "• Everything in VIP\n"
+            "• 👑 Kingpin badge + gold themed wallet\n"
+            "• Your name in `/credits`\n"
+            "• Early access to new commands & features\n"
+            "• Priority in events & tournaments"
+        ),
+        inline=False,
+    )
+
+    if viewer_tier:
+        tinfo = SUPPORTER_TIER_INFO.get(viewer_tier, {})
+        embed.add_field(
+            name="✅ Your Status",
+            value=f"You're a **{tinfo.get('emoji','')} {tinfo.get('name','Supporter')}** — thank you!",
+            inline=False,
+        )
+        embed.color = tinfo.get("color", 0xF1C40F)
+    else:
+        embed.set_footer(text="Cosmetic perks only • Cancel anytime • Supports development")
+
+    await message.channel.send(embed=embed)
+
+
 async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     """Parse and dispatch a `_command args` style command. Returns True if handled."""
     # Split into command name + rest
     parts = body.split(maxsplit=1)
     cmd_name = parts[0].lower()
     rest = parts[1] if len(parts) > 1 else ""
+
+    # ── Prefix-only commands (no slash slot used) ──
+    if cmd_name in ("perks", "supporter", "donate", "vip"):
+        await _send_perks_embed(message)
+        return True
 
     spec = PREFIX_COMMANDS.get(cmd_name)
     if not spec:
