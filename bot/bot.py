@@ -3432,114 +3432,146 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
     badges = get_user_badges(target.id)
     earned_count = len(_get_achievements(target.id))
 
-    # Custom title
     custom_title = get_custom_title(target.id)
-    title_suffix = f" [{custom_title}]" if custom_title else ""
-
-    title = f"{COIN_EMOJI} {target.display_name}{title_suffix}'s Wallet"
-    if badges:
-        title = f"{badges} {target.display_name}{title_suffix}"
-
-    embed = discord.Embed(title=title, color=discord.Color.gold())
-    embed.add_field(name="💰 Balance", value=f"**{bal:,}** coins", inline=False)
-    embed.add_field(name="Wins", value=str(stats.get("games_won", 0)), inline=True)
-    embed.add_field(name="Losses", value=str(stats.get("games_lost", 0)), inline=True)
-    embed.add_field(name="Total Earned", value=f"{stats.get('total_earned',0):,}", inline=True)
-
-    # Pet earnings pending
-    pets = _load_pets()
-    pet = pets.get(str(target.id))
-    if pet:
-        info = PET_TYPES.get(pet["type"], {"emoji":"🐾","name":"?"})
-        level = _pet_level(pet["xp"])
-        hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
-        pending = int(level * PET_DAILY_INCOME_BASE * (hours_since / 24))
-        if _pet_hunger(pet) < 30:
-            pending = pending // 2
-        embed.add_field(
-            name=f"{info['emoji']} Pet",
-            value=f"**{pet['name']}** lvl {level} • Pending: {pending:,}",
-            inline=True,
-        )
-
-    # Business pending
-    user_bizs = _user_businesses(target.id)
-    if user_bizs:
-        total_hourly = sum(_business_income_per_hour(b) for b in user_bizs)
-        total_pending = sum(_business_pending_income(b) for b in user_bizs)
-        embed.add_field(
-            name="🏢 Businesses",
-            value=f"{len(user_bizs)} owned • {total_hourly:,}/hr • Pending: **{total_pending:,}**",
-            inline=True,
-        )
-
-    # XP/Level
     xp = _get_xp(target.id)
     level = level_for_xp(xp)
-    embed.add_field(
-        name="📊 Level",
-        value=f"**Lvl {level}** ({xp:,} XP) — _{get_user_title(target.id)}_",
-        inline=True,
-    )
+    user_title = get_user_title(target.id)
 
-    # Active boosts
+    wins = stats.get("games_won", 0)
+    losses = stats.get("games_lost", 0)
+    total_earned = stats.get("total_earned", 0)
+    wl_total = wins + losses
+    win_rate = (wins / wl_total * 100) if wl_total > 0 else 0
+
+    # ── Pending income across systems ──
+    pet_pending = 0
+    pets = _load_pets()
+    pet = pets.get(str(target.id))
+    pet_line = None
+    if pet:
+        info = PET_TYPES.get(pet["type"], {"emoji": "🐾", "name": "?"})
+        plevel = _pet_level(pet["xp"])
+        hours_since = (time.time() - pet.get("last_collected", time.time())) / 3600
+        pet_pending = int(plevel * PET_DAILY_INCOME_BASE * (hours_since / 24))
+        if _pet_hunger(pet) < 30:
+            pet_pending = pet_pending // 2
+        pet_line = f"{info['emoji']} {pet['name'][:12]} (Lv{plevel})"
+
+    user_bizs = _user_businesses(target.id)
+    biz_pending = sum(_business_pending_income(b) for b in user_bizs)
+    biz_hourly = sum(_business_income_per_hour(b) for b in user_bizs)
+
+    venues = _load_nightlife().get("users", {}).get(str(target.id), [])
+    venue_pending = sum(_venue_pending_income(v) for v in venues)
+
+    re_data = _load_re()
+    props = re_data.get("users", {}).get(str(target.id), [])
+    re_pending = sum(_re_pending_rent(p) for p in props)
+
+    total_pending = pet_pending + biz_pending + venue_pending + re_pending
+
+    # ── Active boosts ──
     active_boosts = []
     if is_vip(target.id):
-        active_boosts.append(f"💎 VIP ({fmt_cooldown(_user_active_remaining(target.id, 'vip_until'))})")
+        active_boosts.append(f"💎 VIP · {fmt_cooldown(_user_active_remaining(target.id, 'vip_until'))}")
     if _user_is_active(target.id, "xp_boost_until"):
-        active_boosts.append(f"⚡ 2x XP ({fmt_cooldown(_user_active_remaining(target.id, 'xp_boost_until'))})")
+        active_boosts.append(f"⚡ 2x XP · {fmt_cooldown(_user_active_remaining(target.id, 'xp_boost_until'))}")
     if has_insurance(target.id):
-        active_boosts.append(f"🛡️ Insurance ({fmt_cooldown(_user_active_remaining(target.id, 'insurance_until'))})")
+        active_boosts.append(f"🛡️ Insurance · {fmt_cooldown(_user_active_remaining(target.id, 'insurance_until'))}")
     if has_heist_tools(target.id):
-        active_boosts.append(f"🦝 Heist Tools ({fmt_cooldown(_user_active_remaining(target.id, 'heist_tools_until'))})")
+        active_boosts.append(f"🦝 Heist Tools · {fmt_cooldown(_user_active_remaining(target.id, 'heist_tools_until'))}")
     if is_protected(target.id):
         prot_data = _load_protections()
         remaining = max(0, int(prot_data.get(str(target.id), 0) - time.time()))
-        active_boosts.append(f"🛡️ Rob Immunity ({fmt_cooldown(remaining)})")
+        active_boosts.append(f"🚫 Rob Immunity · {fmt_cooldown(remaining)}")
+
+    # ── XP progress bar to next level ──
+    try:
+        xp_curr_floor = xp_for_level(level)
+        xp_next = xp_for_level(level + 1)
+        span = max(1, xp_next - xp_curr_floor)
+        progress = max(0.0, min(1.0, (xp - xp_curr_floor) / span))
+    except Exception:
+        progress = 0.0
+    bar_len = 12
+    filled = int(progress * bar_len)
+    xp_bar = "█" * filled + "░" * (bar_len - filled)
+
+    # ── Build the sleek neon wallet card ──
+    name_display = target.display_name.upper()[:22]
+    title_tag = f" · {custom_title}" if custom_title else ""
+
+    header = (
+        "```ansi\n"
+        "\u001b[1;33m▓▒░ WALLET ░▒▓\u001b[0m\n"
+        f"\u001b[1;37m{name_display}\u001b[0m\u001b[0;33m{title_tag}\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        f"\u001b[1;33m{bal:,}\u001b[0m \u001b[0;33mcoins\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        f"\u001b[0;36mLVL {level}\u001b[0m \u001b[1;35m{xp_bar}\u001b[0m \u001b[0;37m{xp:,} XP\u001b[0m\n"
+        f"\u001b[0;36m{user_title[:28]}\u001b[0m\n"
+        "```"
+    )
+
+    embed = discord.Embed(description=header, color=0xF1C40F)
+    if badges:
+        embed.set_author(name=badges[:240])
+
+    # Stats block
+    stats_block = (
+        "```ansi\n"
+        f"\u001b[1;32mWINS\u001b[0m {wins:<6} \u001b[1;31mLOSSES\u001b[0m {losses:<6}\n"
+        f"\u001b[0;36mWIN RATE\u001b[0m {win_rate:.0f}%\n"
+        f"\u001b[0;33mLIFETIME EARNED\u001b[0m {total_earned:,}\n"
+        "```"
+    )
+    embed.add_field(name="📊 STATS", value=stats_block, inline=False)
+
+    # Income / pending block — only if they own income sources
+    if user_bizs or venues or props or pet:
+        income_rows = []
+        if pet_line:
+            income_rows.append(f"\u001b[0;35m{pet_line[:18]:<18}\u001b[0m \u001b[1;32m+{pet_pending:,}\u001b[0m")
+        if user_bizs:
+            income_rows.append(f"\u001b[0;35m🏢 {len(user_bizs)} biz ({biz_hourly:,}/hr)\u001b[0m \u001b[1;32m+{biz_pending:,}\u001b[0m")
+        if venues:
+            income_rows.append(f"\u001b[0;35m🌃 {len(venues)} venue(s)\u001b[0m \u001b[1;32m+{venue_pending:,}\u001b[0m")
+        if props:
+            income_rows.append(f"\u001b[0;35m🏘️ {len(props)} propert(ies)\u001b[0m \u001b[1;32m+{re_pending:,}\u001b[0m")
+        income_block = (
+            "```ansi\n"
+            + "\n".join(income_rows) +
+            "\n\u001b[0;30m──────────────────────────────\u001b[0m\n"
+            f"\u001b[1mPENDING TOTAL\u001b[0m \u001b[1;32m{total_pending:,}\u001b[0m\n"
+            "```"
+        )
+        embed.add_field(name="💼 PASSIVE INCOME", value=income_block, inline=False)
+
+    # Active boosts
     if active_boosts:
         embed.add_field(
-            name="✨ Active Boosts",
+            name="✨ ACTIVE BOOSTS",
             value="\n".join(active_boosts),
             inline=False,
         )
 
+    # Achievements
     embed.add_field(
-        name=f"🏆 Achievements ({earned_count}/{len(ACHIEVEMENTS)})",
+        name=f"🏆 ACHIEVEMENTS · {earned_count}/{len(ACHIEVEMENTS)}",
         value=(badges or "_none yet — try /achievements_"),
         inline=False,
     )
-    # Show next-step suggestion only if checking your own balance
+
+    # Next-step suggestion (own wallet only)
     if target.id == interaction.user.id:
         suggestion = suggest_next_step(target.id)
         if suggestion:
-            embed.add_field(name="💡 Next Step", value=suggestion, inline=False)
+            embed.add_field(name="💡 NEXT STEP", value=suggestion, inline=False)
 
-    # Attach "Collect Everything" button if it's your own wallet and you have
-    # any pending income across pet / businesses / venues / real estate.
-    show_collect = False
-    if target.id == interaction.user.id:
-        try:
-            # Cheap pending check (no state mutation)
-            pet = _load_pets().get(str(target.id))
-            if pet:
-                lvl = _pet_level(pet["xp"])
-                hrs = (time.time() - pet.get("last_collected", time.time())) / 3600
-                if hrs >= 1 and int(lvl * PET_DAILY_INCOME_BASE * (hrs / 24)) > 0:
-                    show_collect = True
-            if not show_collect:
-                if any(_business_pending_income(b) > 0 for b in _user_businesses(target.id)):
-                    show_collect = True
-            if not show_collect:
-                venues = _load_nightlife().get("users", {}).get(str(target.id), [])
-                if any(_venue_pending_income(v) > 0 for v in venues):
-                    show_collect = True
-            if not show_collect:
-                re_data = _load_re()
-                props = re_data.get("users", {}).get(str(target.id), [])
-                if any(_re_pending_rent(p) > 0 for p in props):
-                    show_collect = True
-        except Exception as e:
-            log.warning("balance collect-check failed: %s", e)
+    embed.set_footer(text="Buy low · Sell high · Stack coins")
+
+    # ── Collect button (own wallet + pending income) ──
+    show_collect = (target.id == interaction.user.id and total_pending > 0)
 
     if show_collect:
         view = CollectAllView(target.id)
