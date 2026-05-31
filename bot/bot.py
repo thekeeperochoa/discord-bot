@@ -17026,6 +17026,151 @@ async def _handle_setclass(message: discord.Message, rest: str):
     await message.channel.send(f"👑 `/whois` classification set to: **★ {line}**")
 
 
+async def _handle_setname(message: discord.Message, rest: str):
+    """Kingpin-only custom bot greeting name. Prefix-only: _setname <name>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 Custom bot nicknames are a **Kingpin** perk. Type `_perks` to unlock.",
+        )
+        return
+    name = rest.strip()
+    if not name:
+        await message.channel.send(
+            "Usage: `_setname <name>` — the bot will address you by this name.\n"
+            "_e.g. `_setname Boss` · max 20 chars · `_setname reset` to clear._",
+        )
+        return
+    if name.lower() == "reset":
+        data = _load_supporter_data()
+        if str(uid) in data and "bot_nickname" in data[str(uid)]:
+            del data[str(uid)]["bot_nickname"]
+            _save_supporter_data(data)
+        await message.channel.send("Bot nickname reset.")
+        return
+    name = name[:20]
+    _supporter_set(uid, "bot_nickname", name)
+    await message.channel.send(
+        f"👑 Done. The bot will now address you as **{name}** when you chat with it."
+    )
+
+
+async def _handle_dropemoji(message: discord.Message, rest: str):
+    """Kingpin-only: set the server-wide coin drop emoji. Prefix-only: _dropemoji <emoji>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 Setting the server coin-drop emoji is a **Kingpin** perk. Type `_perks` to unlock.",
+        )
+        return
+    emoji = rest.strip()
+    if not emoji:
+        cur = _load_coindrop_cfg().get("custom_emoji", "💰")
+        await message.channel.send(
+            f"Current coin-drop emoji: {cur}\n"
+            "Usage: `_dropemoji <emoji>` — sets the server-wide normal coin-drop emoji.\n"
+            "_`_dropemoji reset` to restore 💰_",
+        )
+        return
+    cfg_drop = _load_coindrop_cfg()
+    if emoji.lower() == "reset":
+        cfg_drop["custom_emoji"] = "💰"
+        _save_coindrop_cfg(cfg_drop)
+        await message.channel.send("Coin-drop emoji reset to 💰.")
+        return
+    # Take the first token only; validate it's a single emoji-ish token
+    emoji = emoji.split()[0]
+    if len(emoji) > 40:  # custom emoji format <:name:id> can be long; cap sanely
+        await message.channel.send("❌ That doesn't look like a valid emoji.")
+        return
+    cfg_drop["custom_emoji"] = emoji
+    _save_coindrop_cfg(cfg_drop)
+    await message.channel.send(
+        f"👑 Server coin-drop emoji set to {emoji} — your call, Kingpin. "
+        f"_(Rare drops still use 💎.)_"
+    )
+
+
+# ── Feature voting (Kingpin submits, anyone can view the roadmap) ──
+FEATURE_VOTES_FILE = MEMORY_DIR / "feature_votes.json"
+
+
+def _load_feature_votes() -> dict:
+    if FEATURE_VOTES_FILE.exists():
+        try:
+            with open(FEATURE_VOTES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"suggestions": {}, "next_id": 1}
+
+
+def _save_feature_votes(data: dict):
+    try:
+        with open(FEATURE_VOTES_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save feature votes failed: %s", e)
+
+
+async def _handle_feature_suggest(message: discord.Message, rest: str):
+    """Kingpin-only: submit a feature suggestion. Prefix-only: _suggest <text>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 Submitting feature suggestions is a **Kingpin** perk — your votes shape the roadmap. "
+            "Type `_perks` to unlock. _(Anyone can view the roadmap with `_roadmap`.)_",
+        )
+        return
+    text = rest.strip()
+    if not text:
+        await message.channel.send("Usage: `_suggest <your feature idea>` — max 150 chars.")
+        return
+    text = text[:150]
+    data = _load_feature_votes()
+    sid = str(data.get("next_id", 1))
+    data["next_id"] = data.get("next_id", 1) + 1
+    data["suggestions"][sid] = {
+        "text": text,
+        "author_id": uid,
+        "author_name": message.author.display_name,
+        "votes": 1,
+        "voters": [str(uid)],
+        "ts": int(time.time()),
+    }
+    _save_feature_votes(data)
+    await message.channel.send(
+        f"👑 Suggestion **#{sid}** logged:\n> {text}\n"
+        f"_Other Kingpins can back it. View the board with `_roadmap`._"
+    )
+
+
+async def _handle_roadmap(message: discord.Message):
+    """View the feature suggestion board (anyone can view)."""
+    data = _load_feature_votes()
+    suggestions = data.get("suggestions", {})
+    if not suggestions:
+        await message.channel.send(
+            "🗺️ No feature suggestions yet. Kingpins can add one with `_suggest <idea>`."
+        )
+        return
+    ranked = sorted(suggestions.items(), key=lambda kv: kv[1].get("votes", 0), reverse=True)
+    lines = []
+    for sid, s in ranked[:12]:
+        lines.append(f"`#{sid}` **{s['votes']}** 🔼 — {s['text'][:80]} _(by {s['author_name']})_")
+    embed = discord.Embed(
+        title="🗺️ Feature Roadmap — Kingpin Suggestions",
+        description="\n".join(lines),
+        color=0xF1C40F,
+    )
+    is_kp = supporter_has_tier(message.author.id, "kingpin")
+    if is_kp:
+        embed.set_footer(text="Kingpins: _suggest <idea> to add · the dev builds top-voted features")
+    else:
+        embed.set_footer(text="Kingpins shape this list · type _perks to join them")
+    await message.channel.send(embed=embed)
+
+
 async def _handle_setcolor(message: discord.Message, rest: str):
     """Made Man+ custom wallet color picker. Prefix-only: _setcolor <hex>"""
     uid = message.author.id
@@ -17116,6 +17261,9 @@ async def _send_perks_embed(message: discord.Message):
             "• **`_flex`** — exclusive show-off card\n"
             "• **`_flexline`** — custom tagline\n"
             "• **`_setclass`** — custom `/whois` title\n"
+            "• **`_setname`** — bot greets you by name\n"
+            "• **`_dropemoji`** — set the server coin-drop emoji\n"
+            "• **`_suggest`** — shape the roadmap (vote on features)\n"
             "• Early access to new features\n"
             "• Priority in events & tournaments\n"
             "• Vote on the next feature"
@@ -17159,6 +17307,18 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("setclass", "classification"):
         await _handle_setclass(message, rest)
+        return True
+    if cmd_name in ("setname", "botname"):
+        await _handle_setname(message, rest)
+        return True
+    if cmd_name in ("dropemoji", "setdropemoji"):
+        await _handle_dropemoji(message, rest)
+        return True
+    if cmd_name in ("suggest", "feature", "featurevote"):
+        await _handle_feature_suggest(message, rest)
+        return True
+    if cmd_name in ("roadmap", "votes", "suggestions"):
+        await _handle_roadmap(message)
         return True
     if cmd_name in ("setcolor", "walletcolor"):
         await _handle_setcolor(message, rest)
@@ -17424,14 +17584,16 @@ async def handle_coin_drop(message: discord.Message):
     _coindrop_last_fired[channel_id] = time.time()
 
     is_rare = random.random() < COINDROP_RARE_CHANCE
+    cfg_drop = _load_coindrop_cfg()
+    normal_emoji = cfg_drop.get("custom_emoji", "💰")
     if is_rare:
         amount = random.randint(COINDROP_MIN * 10, COINDROP_MAX * 5)
         emoji = "💎"
         title = "💎 RARE COIN DROP!"
     else:
         amount = random.randint(COINDROP_MIN, COINDROP_MAX)
-        emoji = "💰"
-        title = "💰 Coins dropped!"
+        emoji = normal_emoji
+        title = f"{normal_emoji} Coins dropped!"
 
     embed = discord.Embed(
         title=title,
@@ -17707,6 +17869,18 @@ async def on_message(message: discord.Message):
         history = memory.get_messages(channel_id)
         # If there are images, enrich the system prompt slightly so Jordan knows to roast them
         sys_prompt = cfg["system_prompt"] + "\n\n" + get_time_context()
+        # Kingpin perk: bot addresses them by a custom name
+        try:
+            if supporter_has_tier(message.author.id, "kingpin"):
+                custom_name = _supporter_get(message.author.id, "bot_nickname")
+                if custom_name:
+                    sys_prompt += (
+                        f"\n\nThe person you're talking to is a respected Kingpin. "
+                        f"Address them as '{custom_name}' and show a bit of deference — "
+                        f"they're high status, treat them accordingly (but stay in character)."
+                    )
+        except Exception:
+            pass
         if images:
             sys_prompt += (
                 "\n\nThe user just posted one or more images. Look at them and react in character. "
