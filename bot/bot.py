@@ -15891,13 +15891,34 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     # ── ANIMATION ───────────────────────────────────────────────────────────
     frames = [f1, f2, f3, f4, f5, f6]
     msg = await interaction.followup.send(content=f"```\n{frame(frames[0])}\n```")
-    for body in frames[1:]:
+    last_idx = len(frames) - 1
+    for i, body in enumerate(frames[1:], start=1):
         await asyncio.sleep(0.9)
         try:
-            await msg.edit(content=f"```\n{frame(body)}\n```")
+            if i == last_idx:
+                # Final frame: show the mention in the message body so it renders inline
+                content = f"📁 Dossier on {target.mention}\n```\n{frame(body)}\n```"
+                # Note: edit() won't actually fire a push notification — that requires
+                # the mention to be in the original send. So we follow up with a ping.
+                await msg.edit(
+                    content=content,
+                    allowed_mentions=discord.AllowedMentions(users=[target]),
+                )
+            else:
+                await msg.edit(content=f"```\n{frame(body)}\n```")
         except Exception as e:
             log.warning("whois frame edit failed: %s", e)
             break
+
+    # Send a follow-up ping so the target actually gets notified.
+    # (Edits don't trigger push notifications even if they add mentions.)
+    try:
+        await interaction.followup.send(
+            f"🔔 {target.mention} — your file just got pulled by {interaction.user.mention}.",
+            allowed_mentions=discord.AllowedMentions(users=[target]),
+        )
+    except Exception as e:
+        log.warning("whois ping followup failed: %s", e)
 
     try:
         track_activity("whois", interaction.user.id, interaction.user.display_name,
