@@ -374,8 +374,8 @@ SUPPORTER_ROLE_IDS = {
 SUPPORTER_TIER_RANK = {"supporter": 1, "vip": 2, "kingpin": 3}
 
 SUPPORTER_TIER_INFO = {
-    "supporter": {"emoji": "☕", "name": "Supporter", "color": 0x57F287},
-    "vip":       {"emoji": "💎", "name": "VIP",       "color": 0x5865F2},
+    "supporter": {"emoji": "☕", "name": "Associate", "color": 0x57F287},
+    "vip":       {"emoji": "💎", "name": "Made Man",  "color": 0x5865F2},
     "kingpin":   {"emoji": "👑", "name": "Kingpin",   "color": 0xF1C40F},
 }
 
@@ -453,6 +453,52 @@ def patreon_footer(user_id: int, base_footer: str = "") -> str:
         return nudge
     except Exception:
         return base_footer
+
+
+# ── Supporter custom data (colors, custom whois titles, bot nicknames, etc.) ──
+SUPPORTER_DATA_FILE = MEMORY_DIR / "supporter_data.json"
+
+
+def _load_supporter_data() -> dict:
+    if SUPPORTER_DATA_FILE.exists():
+        try:
+            with open(SUPPORTER_DATA_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_supporter_data(data: dict):
+    try:
+        with open(SUPPORTER_DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save supporter data failed: %s", e)
+
+
+def _supporter_get(user_id: int, key: str, default=None):
+    data = _load_supporter_data()
+    return data.get(str(user_id), {}).get(key, default)
+
+
+def _supporter_set(user_id: int, key: str, value):
+    data = _load_supporter_data()
+    data.setdefault(str(user_id), {})[key] = value
+    _save_supporter_data(data)
+
+
+def supporter_wallet_color(user_id: int) -> int | None:
+    """Return the user's chosen custom color (Made Man+) or their tier's default."""
+    tier = supporter_tier(user_id)
+    if not tier:
+        return None
+    # Made Man+ can pick a custom color
+    if supporter_has_tier(user_id, "vip"):
+        custom = _supporter_get(user_id, "wallet_color")
+        if custom is not None:
+            return custom
+    return SUPPORTER_TIER_INFO.get(tier, {}).get("color")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3621,7 +3667,7 @@ async def balance_command(interaction: discord.Interaction, user: discord.Member
     s_tier = supporter_tier(target.id)
     if s_tier:
         tinfo = SUPPORTER_TIER_INFO.get(s_tier, {})
-        embed.color = tinfo.get("color", 0xF1C40F)
+        embed.color = supporter_wallet_color(target.id) or tinfo.get("color", 0xF1C40F)
         author_txt = f"{tinfo.get('emoji','')} {tinfo.get('name','Supporter')}"
         if badges:
             author_txt = f"{tinfo.get('emoji','')} {badges[:230]}"
@@ -12684,9 +12730,12 @@ async def signature_command(interaction: discord.Interaction, emojis: str = None
             ephemeral=True,
         )
         return
-    if len(parsed) > 3:
+    # Made Man+ supporters get a higher signature cap
+    sig_cap = 5 if supporter_has_tier(member.id, "vip") else 3
+    if len(parsed) > sig_cap:
+        extra = " _(Made Man supporters get 5 — type `_perks`)_" if sig_cap == 3 else ""
         await interaction.response.send_message(
-            "\u274C Max **3** signature emojis per booster.", ephemeral=True
+            f"\u274C Max **{sig_cap}** signature emojis.{extra}", ephemeral=True
         )
         return
 
@@ -13869,6 +13918,41 @@ HUSTLES = {
     },
 }
 
+# ── Made Man+ exclusive cosmetic run skins (same gameplay, premium flavor) ──
+# Keyed by hustle. Purely cosmetic: fancier emoji + intro line. No mechanical change.
+SUPPORTER_RUN_SKINS = {
+    "monte": {
+        "emoji": "🎴",
+        "name": "Three-Card Monte · Gold Edition",
+        "intro": "Velvet table. Custom deck. The marks don't stand a chance against a made man.",
+    },
+    "watches": {
+        "emoji": "⌚",
+        "name": "Knockoff Watches · Designer Run",
+        "intro": "Briefcase of 'Pateks' this time. You move them out the back of a black Benz.",
+    },
+    "tips": {
+        "emoji": "📈",
+        "name": "Hot Tips Hotline · Insider Line",
+        "intro": "Encrypted burner, a 'guy on the inside,' and a room full of desperate marks.",
+    },
+}
+
+
+def _run_hustle_display(hustle_key: str, user_id: int) -> dict:
+    """Return the hustle display (emoji/name/intro), applying a supporter skin
+    for Made Man+ supporters. Gameplay values always come from the base hustle."""
+    base = HUSTLES.get(hustle_key, HUSTLES["monte"])
+    try:
+        if supporter_has_tier(user_id, "vip"):
+            skin = SUPPORTER_RUN_SKINS.get(hustle_key)
+            if skin:
+                return {**base, **skin}
+    except Exception:
+        pass
+    return base
+
+
 # ── Stage 2 encounters (random, branch heavily) ──────────────────────────────
 STAGE2_ENCOUNTERS = [
     {
@@ -14050,14 +14134,15 @@ class RunView(discord.ui.View):
         return cb
 
     async def _handle_stage1(self, interaction, hustle_key):
-        hustle = _run_get_hustle(hustle_key)
+        hustle = _run_get_hustle(hustle_key)  # gameplay values
+        display = _run_hustle_display(hustle_key, self.user_id)  # cosmetic (skin for Made Man+)
         # Roll the initial pot based on hustle
         pot = int(hustle["base_pot"] * random.uniform(1 - hustle["variance"]/2, 1 + hustle["variance"]/2))
         self.state.update({
             "hustle": hustle_key,
             "pot": pot,
             "heat": 0,
-            "log": [f"{hustle['emoji']} **{hustle['name']}** — _{hustle['intro']}_", f"💰 Pot starts at **{pot:,}** coins."],
+            "log": [f"{display['emoji']} **{display['name']}** — _{display['intro']}_", f"💰 Pot starts at **{pot:,}** coins."],
         })
         encounter = random.choice(STAGE2_ENCOUNTERS)
         self.state["encounter"] = encounter
@@ -14138,6 +14223,7 @@ class RunView(discord.ui.View):
 
         # Build final embed
         hustle = _run_get_hustle(self.state["hustle"])
+        display = _run_hustle_display(self.state["hustle"], self.user_id)
         log_str = "\n".join(self.state["log"]) + "\n\n" + result_text
 
         color = discord.Color.green() if net > 0 else (discord.Color.red() if net < 0 else discord.Color.greyple())
@@ -14145,7 +14231,7 @@ class RunView(discord.ui.View):
             color = discord.Color.gold()
 
         emoji_prefix = "💎" if self.state.get("jackpot") else ("✅" if net > 0 else "❌")
-        title = f"{emoji_prefix} {hustle['name']} Run — {'+' if net >= 0 else ''}{net:,} coins"
+        title = f"{emoji_prefix} {display['name']} Run — {'+' if net >= 0 else ''}{net:,} coins"
 
         embed = discord.Embed(title=title, description=log_str, color=color)
         embed.add_field(name="💰 Final Payout", value=f"{final_payout:,} coins", inline=True)
@@ -16259,7 +16345,14 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
         f6.append("💍 MARRIED")
     f6.append("")
     f6.append("◤ ASSESSMENT")
-    f6.append(shorten(classification, 28))
+    # Kingpins can set a custom classification title
+    _custom_class = None
+    if supporter_has_tier(uid, "kingpin"):
+        _custom_class = _supporter_get(uid, "whois_class")
+    if _custom_class:
+        f6.append(shorten(f"★ {_custom_class}", 28))
+    else:
+        f6.append(shorten(classification, 28))
     f6.append(f"THREAT: {threat}")
     f6.append(f"NET WORTH: {num_compact(net_worth)}")
     # Supporter cosmetic stamp
@@ -16815,6 +16908,163 @@ PREFIX_COMMANDS = {
 }
 
 
+async def _send_credits_embed(message: discord.Message):
+    """List all current supporters by tier. Prefix-only: _credits"""
+    # Gather supporters from the guild by checking roles
+    guild = message.guild
+    if not guild:
+        await message.channel.send("Run this in the server.")
+        return
+
+    tiers = {"kingpin": [], "vip": [], "supporter": []}
+    for member in guild.members:
+        if member.bot:
+            continue
+        tier = supporter_tier(member.id)
+        if tier in tiers:
+            tiers[tier].append(member.display_name)
+
+    embed = discord.Embed(
+        title="💖 Hall of Supporters",
+        description="_The people keeping Jordan Belfort alive. Thank you._",
+        color=0xF1C40F,
+    )
+    any_supporters = False
+    for tier_key in ("kingpin", "vip", "supporter"):
+        names = tiers[tier_key]
+        if names:
+            any_supporters = True
+            tinfo = SUPPORTER_TIER_INFO.get(tier_key, {})
+            embed.add_field(
+                name=f"{tinfo.get('emoji','')} {tinfo.get('name','')} ({len(names)})",
+                value=", ".join(sorted(names)[:50])[:1024],
+                inline=False,
+            )
+    if not any_supporters:
+        embed.add_field(
+            name="Be the first 👑",
+            value="No supporters yet — type `_perks` to claim a spot here.",
+            inline=False,
+        )
+    embed.set_footer(text="Type _perks to join · patreon.com/cw/degens18")
+    await message.channel.send(embed=embed)
+
+
+async def _send_flex_card(message: discord.Message):
+    """Kingpin-only cosmetic show-off card. Prefix-only: _flex"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 `_flex` is a **Kingpin** perk. Type `_perks` to see how to unlock it.",
+        )
+        return
+
+    bal = economy.balance(uid)
+    xp = _get_xp(uid)
+    level = level_for_xp(xp)
+    custom_line = _supporter_get(uid, "flex_line", "Runs the whole city.")
+
+    card = (
+        "```ansi\n"
+        "\u001b[1;33m╔══════════════════════════════╗\u001b[0m\n"
+        "\u001b[1;33m║\u001b[0m   \u001b[1;35m👑 KINGPIN FLEX 👑\u001b[0m         \u001b[1;33m║\u001b[0m\n"
+        "\u001b[1;33m╠══════════════════════════════╣\u001b[0m\n"
+        f"\u001b[1;37m {message.author.display_name.upper()[:24]}\u001b[0m\n"
+        f"\u001b[0;33m {custom_line[:28]}\u001b[0m\n"
+        "\u001b[0;30m ──────────────────────────\u001b[0m\n"
+        f"\u001b[0;36m BALANCE\u001b[0m \u001b[1;33m{bal:,}\u001b[0m\n"
+        f"\u001b[0;36m LEVEL  \u001b[0m \u001b[1;37m{level}\u001b[0m\n"
+        "\u001b[1;33m╚══════════════════════════════╝\u001b[0m\n"
+        "```"
+    )
+    embed = discord.Embed(description=card, color=supporter_wallet_color(uid) or 0xF1C40F)
+    embed.set_footer(text="Customize your tagline: _flexline <your text>")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_flexline(message: discord.Message, rest: str):
+    """Kingpin-only custom flex tagline. Prefix-only: _flexline <text>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 Custom flex taglines are a **Kingpin** perk. Type `_perks` to unlock.",
+        )
+        return
+    line = rest.strip()
+    if not line:
+        await message.channel.send("Usage: `_flexline <your tagline>` — max 28 chars.")
+        return
+    line = line[:28]
+    _supporter_set(uid, "flex_line", line)
+    await message.channel.send(f"👑 Flex tagline set to: _{line}_\nShow it off with `_flex`.")
+
+
+async def _handle_setclass(message: discord.Message, rest: str):
+    """Kingpin-only custom /whois classification title. Prefix-only: _setclass <text>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "kingpin"):
+        await message.channel.send(
+            "👑 Custom `/whois` classifications are a **Kingpin** perk. Type `_perks` to unlock.",
+        )
+        return
+    line = rest.strip()
+    if not line:
+        await message.channel.send(
+            "Usage: `_setclass <title>` — sets your `/whois` classification.\n"
+            "_e.g. `_setclass UNTOUCHABLE` · max 24 chars · `_setclass reset` to clear._",
+        )
+        return
+    if line.lower() == "reset":
+        data = _load_supporter_data()
+        if str(uid) in data and "whois_class" in data[str(uid)]:
+            del data[str(uid)]["whois_class"]
+            _save_supporter_data(data)
+        await message.channel.send("Classification reset to default.")
+        return
+    line = line[:24]
+    _supporter_set(uid, "whois_class", line)
+    await message.channel.send(f"👑 `/whois` classification set to: **★ {line}**")
+
+
+async def _handle_setcolor(message: discord.Message, rest: str):
+    """Made Man+ custom wallet color picker. Prefix-only: _setcolor <hex>"""
+    uid = message.author.id
+    if not supporter_has_tier(uid, "vip"):
+        await message.channel.send(
+            "💎 Custom wallet colors are a **Made Man** perk (and up). Type `_perks` to unlock.",
+        )
+        return
+    hexcode = rest.strip().lstrip("#").strip()
+    if not hexcode:
+        await message.channel.send(
+            "🎨 Usage: `_setcolor <hex>` — e.g. `_setcolor FF00AA`\n"
+            "_Pick any hex color. Reset to your tier default with `_setcolor reset`._",
+        )
+        return
+    if hexcode.lower() == "reset":
+        data = _load_supporter_data()
+        if str(uid) in data and "wallet_color" in data[str(uid)]:
+            del data[str(uid)]["wallet_color"]
+            _save_supporter_data(data)
+        await message.channel.send("🎨 Wallet color reset to your tier default.")
+        return
+    # Validate hex
+    try:
+        if len(hexcode) != 6:
+            raise ValueError
+        color_int = int(hexcode, 16)
+    except ValueError:
+        await message.channel.send("❌ Invalid hex. Use 6 characters, e.g. `_setcolor 5865F2`.")
+        return
+    _supporter_set(uid, "wallet_color", color_int)
+    embed = discord.Embed(
+        title="🎨 Wallet color set!",
+        description=f"Your `/balance` will now use **#{hexcode.upper()}**.",
+        color=color_int,
+    )
+    await message.channel.send(embed=embed)
+
+
 async def _send_perks_embed(message: discord.Message):
     """Show supporter tiers + perks. Doubles as advertising. Prefix-only: _perks"""
     # Patreon page
@@ -16833,32 +17083,42 @@ async def _send_perks_embed(message: discord.Message):
     )
 
     embed.add_field(
-        name="☕ Supporter · $5/mo",
+        name="☕ Associate · $5/mo",
         value=(
+            "_You're on the come-up._\n"
             "• Custom title next to your name\n"
-            "• ☕ Supporter badge on `/balance` & `/whois`\n"
-            "• Colored wallet embed"
+            "• ☕ badge on `/balance`, `/whois` & leaderboard\n"
+            "• Green-themed wallet\n"
+            "• Access to the supporter-only channel"
         ),
         inline=False,
     )
     embed.add_field(
-        name="💎 VIP · $10/mo",
+        name="💎 Made Man · $10/mo",
         value=(
-            "• Everything in Supporter\n"
-            "• 💎 VIP badge + blue themed wallet\n"
-            "• Exclusive `/run` hustle flavor skins\n"
-            "• VIP dossier theme on `/whois`"
+            "_You've earned your stripes._\n"
+            "• Everything in Associate\n"
+            "• 💎 badge + blue-themed wallet\n"
+            "• **Custom wallet color** — `_setcolor`\n"
+            "• Exclusive `/run` hustle skins\n"
+            "• VIP dossier theme on `/whois`\n"
+            "• Longer custom signature"
         ),
         inline=False,
     )
     embed.add_field(
         name="👑 Kingpin · $15/mo",
         value=(
-            "• Everything in VIP\n"
-            "• 👑 Kingpin badge + gold themed wallet\n"
-            "• Your name in `/credits`\n"
-            "• Early access to new commands & features\n"
-            "• Priority in events & tournaments"
+            "_You run the city._\n"
+            "• Everything in Made Man\n"
+            "• 👑 badge + gold-themed wallet\n"
+            "• Your name in `_credits`\n"
+            "• **`_flex`** — exclusive show-off card\n"
+            "• **`_flexline`** — custom tagline\n"
+            "• **`_setclass`** — custom `/whois` title\n"
+            "• Early access to new features\n"
+            "• Priority in events & tournaments\n"
+            "• Vote on the next feature"
         ),
         inline=False,
     )
@@ -16887,6 +17147,21 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     # ── Prefix-only commands (no slash slot used) ──
     if cmd_name in ("perks", "supporter", "donate", "vip"):
         await _send_perks_embed(message)
+        return True
+    if cmd_name in ("credits", "supporters"):
+        await _send_credits_embed(message)
+        return True
+    if cmd_name == "flex":
+        await _send_flex_card(message)
+        return True
+    if cmd_name == "flexline":
+        await _handle_flexline(message, rest)
+        return True
+    if cmd_name in ("setclass", "classification"):
+        await _handle_setclass(message, rest)
+        return True
+    if cmd_name in ("setcolor", "walletcolor"):
+        await _handle_setcolor(message, rest)
         return True
 
     spec = PREFIX_COMMANDS.get(cmd_name)
