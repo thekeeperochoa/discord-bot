@@ -10887,89 +10887,139 @@ async def dealers_command(interaction: discord.Interaction):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_dealer_overview_embed(user_id: int, display_name: str) -> discord.Embed:
-    """Personal overview tab — stash, heat, lifetime stats."""
+    """Personal overview tab — neon cyberpunk dealer terminal."""
     data = _load_dealer()
     record = data["users"].get(str(user_id))
     prices = _get_market_prices()
 
-    embed = discord.Embed(
-        title=f"💊 {display_name}'s Dealer Dashboard — Overview",
-        color=discord.Color.dark_purple(),
-    )
-
     if not record:
-        embed.description = (
-            "_You haven't started dealing yet._\n\n"
-            "Hit **Buy Supply** below or `/buysupply` to start.\n"
-            "Check **Market** to see today's prices."
+        embed = discord.Embed(
+            description=(
+                "```ansi\n"
+                "\u001b[1;36m╔═══════════════════════════════╗\u001b[0m\n"
+                "\u001b[1;36m║\u001b[0m  \u001b[1;35m▓▒░ DEALER TERMINAL ░▒▓\u001b[0m     \u001b[1;36m║\u001b[0m\n"
+                "\u001b[1;36m╚═══════════════════════════════╝\u001b[0m\n"
+                f"\u001b[1;37m {display_name.upper()[:24]}\u001b[0m\n"
+                "\u001b[1;31m STATUS: UNREGISTERED\u001b[0m\n"
+                "```\n"
+                "You're not in the game yet.\n\n"
+                "› Tap **Buy Supply** below (or `/buysupply`) to cop your first product\n"
+                "› Tap **Market** to scope today's street prices\n\n"
+                "_Buy low. Sell high. Don't get caught._"
+            ),
+            color=0xFF00AA,
         )
         return embed
 
     _decay_heat(record)
     _save_dealer(data)
 
-    # Stash
+    heat = record.get("heat", 0)
+    # Heat → neon color theme
+    if heat < 30:
+        accent = 0x00FFAA      # neon green
+        heat_ansi, heat_status = "\u001b[1;32m", "CLEAR"
+        heat_dot = "\u001b[1;32m●\u001b[0m"
+    elif heat < 60:
+        accent = 0xFFE600      # neon yellow
+        heat_ansi, heat_status = "\u001b[1;33m", "WATCHED"
+        heat_dot = "\u001b[1;33m●\u001b[0m"
+    elif heat < 90:
+        accent = 0xFF6B00      # neon orange (rendered via yellow+intensity)
+        heat_ansi, heat_status = "\u001b[1;33m", "HEAT RISING"
+        heat_dot = "\u001b[1;33m◉\u001b[0m"
+    else:
+        accent = 0xFF003C      # neon red
+        heat_ansi, heat_status = "\u001b[1;31m", "BUST IMMINENT"
+        heat_dot = "\u001b[1;31m◉\u001b[0m"
+
+    # ── Stash valuation ──
+    total_value = 0
+    total_grams = 0
+    stash_rows = []
     if record.get("stash"):
-        stash_lines = []
-        total_value = 0
-        total_grams = 0
         for sub_key, grams in record["stash"].items():
-            info = SUBSTANCES.get(sub_key, {"emoji":"❓","name":"?","stash_max":0})
+            if grams <= 0:
+                continue
+            info = SUBSTANCES.get(sub_key, {"emoji": "❓", "name": "?", "stash_max": 0})
             value = prices.get(sub_key, {}).get("sell", 0) * grams
             total_value += value
             total_grams += grams
-            stash_lines.append(
-                f"{info['emoji']} **{info['name']}** — {grams}g / {info['stash_max']}g "
-                f"(~{value:,})"
+            cap = info.get("stash_max", 0)
+            pct = (grams / cap) if cap else 0
+            filln = max(0, min(8, int(pct * 8)))
+            minibar = "█" * filln + "░" * (8 - filln)
+            stash_rows.append(
+                f"\u001b[1;36m{info['name'][:9]:<9}\u001b[0m \u001b[1;35m{minibar}\u001b[0m "
+                f"\u001b[1;37m{grams:>3}g\u001b[0m \u001b[1;32m~{value:,}\u001b[0m"
             )
-        embed.add_field(name="📦 Stash", value="\n".join(stash_lines), inline=False)
-        embed.add_field(name="💰 Stash Value", value=f"~{total_value:,} coins", inline=True)
-        embed.add_field(name="⚖️ Total Weight", value=f"{total_grams}g", inline=True)
-    else:
-        embed.add_field(name="📦 Stash", value="_Empty — buy supply to start._", inline=False)
 
-    # Heat status
-    heat = record.get("heat", 0)
-    if heat < 30:
-        heat_emoji, heat_status = "🟢", "Safe"
-    elif heat < 60:
-        heat_emoji, heat_status = "🟡", "Watch yourself"
-    elif heat < 90:
-        heat_emoji, heat_status = "🟠", "Cops are sniffing"
-    else:
-        heat_emoji, heat_status = "🔴", "BUSTED on next sale"
-    bar_len = 10
+    # ── Heat bar (neon gradient blocks) ──
+    bar_len = 14
     filled = int(heat / 100 * bar_len)
     heat_bar = "█" * filled + "░" * (bar_len - filled)
-    embed.add_field(
-        name=f"{heat_emoji} Heat",
-        value=f"`{heat_bar}` **{heat}/100**\n_{heat_status}_",
-        inline=False,
-    )
 
-    # Cooldowns
+    # ── Cooldowns ──
     supply_cd = SUPPLY_COOLDOWN_MIN * 60 - (time.time() - record.get("last_supply", 0))
     sell_cd = SELL_COOLDOWN_MIN * 60 - (time.time() - record.get("last_sell", 0))
-    cd_text = []
-    cd_text.append("✅ Supply ready" if supply_cd <= 0 else f"⏰ Supply in {fmt_cooldown(int(supply_cd))}")
-    cd_text.append("✅ Sell ready" if sell_cd <= 0 else f"⏰ Sell in {fmt_cooldown(int(sell_cd))}")
-    embed.add_field(name="⏰ Cooldowns", value="\n".join(cd_text), inline=False)
+    supply_str = "READY ✓" if supply_cd <= 0 else fmt_cooldown(int(supply_cd))
+    sell_str = "READY ✓" if sell_cd <= 0 else fmt_cooldown(int(sell_cd))
 
-    # Lifetime stats
-    embed.add_field(name="📈 Lifetime Profit", value=f"{record.get('lifetime_profit', 0):,}", inline=True)
-    embed.add_field(name="📊 Lifetime Sold", value=f"{record.get('lifetime_sold', 0):,}g", inline=True)
-    embed.add_field(name="💀 Times Busted", value=str(record.get("times_busted", 0)), inline=True)
+    # ── Lifetime ──
+    profit = record.get("lifetime_profit", 0)
+    sold = record.get("lifetime_sold", 0)
+    busts = record.get("times_busted", 0)
 
-    embed.set_footer(text="Use the buttons below for quick actions.")
+    # ── Neon terminal header ──
+    header = (
+        "```ansi\n"
+        "\u001b[1;35m▓▒░\u001b[0m \u001b[1;36mDEALER TERMINAL\u001b[0m \u001b[1;35m░▒▓\u001b[0m\n"
+        f"\u001b[1;37m{display_name.upper()[:24]}\u001b[0m \u001b[0;36m// STREET OPS\u001b[0m\n"
+        "\u001b[0;30m─────────────────────────────\u001b[0m\n"
+        f"{heat_dot} \u001b[1mHEAT\u001b[0m {heat_ansi}{heat:>3}/100\u001b[0m "
+        f"{heat_ansi}{heat_bar}\u001b[0m\n"
+        f"  {heat_ansi}{heat_status}\u001b[0m\n"
+        "```"
+    )
+
+    embed = discord.Embed(description=header, color=accent)
+
+    # Stash field — neon table
+    if stash_rows:
+        stash_block = "```ansi\n" + "\n".join(stash_rows) + "\n```"
+        embed.add_field(
+            name=f"📦 STASH · {total_grams}g · ~{total_value:,}",
+            value=stash_block,
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="📦 STASH · empty",
+            value="_Tap **Buy Supply** to load up._",
+            inline=False,
+        )
+
+    # Status + lifetime as one neon block
+    ops_block = (
+        "```ansi\n"
+        f"\u001b[1;36mSUPPLY\u001b[0m  {supply_str:<10} \u001b[1;36mSELL\u001b[0m  {sell_str}\n"
+        "\u001b[0;30m─────────────────────────────\u001b[0m\n"
+        f"\u001b[1;32mPROFIT\u001b[0m  {profit:<12,} \u001b[1;35mMOVED\u001b[0m {sold:,}g\n"
+        f"\u001b[1;31mBUSTS\u001b[0m   {busts}\n"
+        "```"
+    )
+    embed.add_field(name="⚡ OPERATIONS", value=ops_block, inline=False)
+
+    embed.set_footer(text="Buy low · Sell high · Watch the heat")
     return embed
 
 
 def _build_dealer_market_embed() -> discord.Embed:
-    """Market tab — today's buy/sell prices with trend indicators."""
+    """Market tab — neon street prices with trend indicators."""
     prices = _get_market_prices()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    lines = []
+    rows = []
     for sub_key, info in SUBSTANCES.items():
         p = prices.get(sub_key, {})
         buy = p.get("buy", info["base_buy"])
@@ -10978,38 +11028,44 @@ def _build_dealer_market_embed() -> discord.Embed:
         margin_pct = int((margin / buy) * 100) if buy > 0 else 0
         base_margin_pct = int(((info["base_sell"] - info["base_buy"]) / info["base_buy"]) * 100)
         if margin_pct > base_margin_pct + 15:
-            indicator = "📈 HOT"
+            trend = "\u001b[1;32m▲ HOT \u001b[0m"   # green up
         elif margin_pct < base_margin_pct - 15:
-            indicator = "📉 COLD"
+            trend = "\u001b[1;31m▼ COLD\u001b[0m"   # red down
         else:
-            indicator = "➖ avg"
-        lines.append(
-            f"{info['emoji']} **{info['name']}** {indicator}\n"
-            f"   Buy: **{buy}/g** • Sell: **{sell}/g** • Margin: **+{margin_pct}%** • Heat: {info['heat']}"
+            trend = "\u001b[0;36m= MID \u001b[0m"   # cyan neutral
+        rows.append(
+            f"\u001b[1;35m{info['name'][:10]:<10}\u001b[0m {trend} "
+            f"\u001b[0;37mB\u001b[0m\u001b[1;37m{buy:<4}\u001b[0m "
+            f"\u001b[0;37mS\u001b[0m\u001b[1;32m{sell:<5}\u001b[0m "
+            f"\u001b[1;33m+{margin_pct}%\u001b[0m"
         )
 
-    embed = discord.Embed(
-        title="📰 Market — Today's Street Prices",
-        description="\n\n".join(lines),
-        color=discord.Color.dark_gold(),
+    body = (
+        "```ansi\n"
+        "\u001b[1;36m▓▒░ STREET MARKET ░▒▓\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────────\u001b[0m\n"
+        + "\n".join(rows) +
+        "\n\u001b[0;30m──────────────────────────────────\u001b[0m\n"
+        "\u001b[1;32m▲HOT\u001b[0m \u001b[1;31m▼COLD\u001b[0m \u001b[0;36m=MID\u001b[0m  "
+        "\u001b[0;37mB=buy/g S=sell/g\u001b[0m\n"
+        "```"
     )
-    embed.set_footer(text=f"Updates daily at recap hour • {today} UTC")
+
+    embed = discord.Embed(description=body, color=0xFFE600)
+    embed.set_footer(text=f"Prices reset daily · {today} UTC")
     return embed
 
 
 def _build_dealer_leaderboard_embed(guild) -> discord.Embed:
-    """Leaderboard tab — top dealers by profit."""
+    """Leaderboard tab — neon top dealers by profit."""
     data = _load_dealer()
     users = data.get("users", {})
 
-    embed = discord.Embed(
-        title="🏆 Top Dealers — Lifetime Profit",
-        color=discord.Color.gold(),
-    )
-
     if not users:
-        embed.description = "_No dealers in the game yet._"
-        return embed
+        return discord.Embed(
+            description="```ansi\n\u001b[1;36m▓▒░ TOP DEALERS ░▒▓\u001b[0m\n\n\u001b[0;37mNo dealers in the game yet.\u001b[0m\n```",
+            color=0xFF00AA,
+        )
 
     ranked = sorted(
         users.items(),
@@ -11017,10 +11073,10 @@ def _build_dealer_leaderboard_embed(guild) -> discord.Embed:
         reverse=True,
     )
 
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
+    medals = ["\u001b[1;33m①\u001b[0m", "\u001b[0;37m②\u001b[0m", "\u001b[1;31m③\u001b[0m"]
+    rows = []
     for i, (uid, record) in enumerate(ranked[:10]):
-        prefix = medals[i] if i < 3 else f"`#{i+1}`"
+        prefix = medals[i] if i < 3 else f"\u001b[0;30m{i+1:>2}\u001b[0m"
         try:
             member = guild.get_member(int(uid)) if guild else None
             name = member.display_name if member else f"User {uid}"
@@ -11028,45 +11084,46 @@ def _build_dealer_leaderboard_embed(guild) -> discord.Embed:
             name = f"User {uid}"
         profit = record.get("lifetime_profit", 0)
         sold = record.get("lifetime_sold", 0)
-        busts = record.get("times_busted", 0)
-        lines.append(
-            f"{prefix} **{name}** — **{profit:,}** profit\n"
-            f"   {sold:,}g sold • {busts} busts"
+        rows.append(
+            f"{prefix} \u001b[1;35m{name[:12]:<12}\u001b[0m "
+            f"\u001b[1;32m{profit:>10,}\u001b[0m \u001b[0;36m{sold:,}g\u001b[0m"
         )
-    embed.description = "\n\n".join(lines)
+
+    body = (
+        "```ansi\n"
+        "\u001b[1;36m▓▒░ TOP DEALERS ░▒▓\u001b[0m \u001b[0;37m· lifetime profit\u001b[0m\n"
+        "\u001b[0;30m────────────────────────────────────\u001b[0m\n"
+        + "\n".join(rows) +
+        "\n```"
+    )
+    embed = discord.Embed(description=body, color=0xFFE600)
     return embed
 
 
 def _build_dealer_server_stats_embed() -> discord.Embed:
-    """Server-wide dealer stats."""
+    """Server-wide dealer stats — neon dashboard."""
     data = _load_dealer()
     users = data.get("users", {})
 
-    embed = discord.Embed(
-        title="📊 Server Dealer Stats",
-        color=discord.Color.dark_teal(),
-    )
-
     if not users:
-        embed.description = "_No dealers in the game yet._"
-        return embed
+        return discord.Embed(
+            description="```ansi\n\u001b[1;36m▓▒░ SERVER STATS ░▒▓\u001b[0m\n\n\u001b[0;37mNo dealers in the game yet.\u001b[0m\n```",
+            color=0xFF00AA,
+        )
 
     total_dealers = len(users)
     active_dealers = sum(1 for r in users.values() if r.get("stash") or r.get("lifetime_sold", 0) > 0)
     total_profit = sum(r.get("lifetime_profit", 0) for r in users.values())
     total_grams = sum(r.get("lifetime_sold", 0) for r in users.values())
     total_busts = sum(r.get("times_busted", 0) for r in users.values())
-    bust_rate = (total_busts / max(1, total_grams)) * 1000  # busts per 1000g sold
+    bust_rate = (total_busts / max(1, total_grams)) * 1000
 
-    # Calculate which substance is most popular by lifetime sold
     substance_sold = {}
     for r in users.values():
         for sub_key, grams in r.get("stash", {}).items():
             substance_sold[sub_key] = substance_sold.get(sub_key, 0) + grams
-    # That's just current stash; better to track lifetime — for now show stash
     most_in_stash = max(substance_sold.items(), key=lambda x: x[1], default=(None, 0))
 
-    # Currently hot product (best market margin today)
     prices = _get_market_prices()
     best_margin = None
     best_margin_pct = -1
@@ -11078,28 +11135,26 @@ def _build_dealer_server_stats_embed() -> discord.Embed:
             best_margin_pct = pct
             best_margin = (sub_key, info, pct)
 
-    embed.add_field(name="👥 Total Dealers", value=str(total_dealers), inline=True)
-    embed.add_field(name="🎯 Active", value=str(active_dealers), inline=True)
-    embed.add_field(name="💀 Total Busts", value=str(total_busts), inline=True)
-    embed.add_field(name="📈 Server Lifetime Profit", value=f"{total_profit:,} coins", inline=False)
-    embed.add_field(name="⚖️ Server Lifetime Weight", value=f"{total_grams:,}g", inline=True)
-    embed.add_field(name="🚨 Bust Rate", value=f"{bust_rate:.1f} per 1000g", inline=True)
-
+    hot_str = "—"
     if best_margin:
-        sub_key, info, pct = best_margin
-        embed.add_field(
-            name="🔥 Today's Best Margin",
-            value=f"{info.get('emoji','💊')} **{info.get('name', sub_key)}** (+{pct}%)",
-            inline=False,
-        )
-    if most_in_stash[0]:
-        info = SUBSTANCES.get(most_in_stash[0], {})
-        embed.add_field(
-            name="📦 Most In Stash (Server)",
-            value=f"{info.get('emoji','💊')} **{info.get('name', most_in_stash[0])}** — {most_in_stash[1]:,}g",
-            inline=False,
-        )
+        _, info, pct = best_margin
+        hot_str = f"{info.get('name', '?')[:12]} +{pct}%"
 
+    body = (
+        "```ansi\n"
+        "\u001b[1;36m▓▒░ SERVER STATS ░▒▓\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        f"\u001b[1;35mDEALERS\u001b[0m   \u001b[1;37m{total_dealers}\u001b[0m   "
+        f"\u001b[1;35mACTIVE\u001b[0m \u001b[1;32m{active_dealers}\u001b[0m\n"
+        f"\u001b[1;35mBUSTS\u001b[0m     \u001b[1;31m{total_busts}\u001b[0m   "
+        f"\u001b[1;35mRATE\u001b[0m   \u001b[1;33m{bust_rate:.1f}/1k\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        f"\u001b[0;36mTOTAL PROFIT\u001b[0m \u001b[1;32m{total_profit:,}\u001b[0m\n"
+        f"\u001b[0;36mTOTAL WEIGHT\u001b[0m \u001b[1;37m{total_grams:,}g\u001b[0m\n"
+        f"\u001b[0;36mHOT TODAY\u001b[0m    \u001b[1;33m{hot_str}\u001b[0m\n"
+        "```"
+    )
+    embed = discord.Embed(description=body, color=0x00FFAA)
     return embed
 
 
