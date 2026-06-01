@@ -4126,33 +4126,87 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
 @tree.command(name="leaderboard", description="See the richest users in the server.")
 async def leaderboard_command(interaction: discord.Interaction):
     await interaction.response.defer()
-    top = economy.leaderboard(10)
-    if not top:
+
+    # Full ranking so we can find the viewer's position
+    economy._load()
+    all_ranked = sorted(
+        economy._data["users"].items(),
+        key=lambda x: x[1].get("balance", 0),
+        reverse=True,
+    )
+    if not all_ranked:
         await interaction.edit_original_response(content="No one has any coins yet.")
         return
 
-    lines = []
-    medals = ["🥇","🥈","🥉"]
-    for i, (uid, data) in enumerate(top):
+    top = all_ranked[:10]
+
+    def _name_for(uid):
         try:
             member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-            name = member.display_name if member else f"User {uid}"
+            return member.display_name if member else f"User {uid}"
         except Exception:
-            name = f"User {uid}"
-        prefix = medals[i] if i < 3 else f"`#{i+1}`"
-        badges = get_user_badges(int(uid))
-        badge_str = f" {badges}" if badges else ""
-        # Supporter badge as a small flex/perk
-        sbadge = supporter_badge(int(uid))
-        sbadge_str = f" {sbadge}" if sbadge else ""
-        lines.append(f"{prefix} **{name}**{badge_str}{sbadge_str} — {COIN_EMOJI} {data.get('balance', 0):,}")
+            return f"User {uid}"
 
-    embed = discord.Embed(
-        title="🏆 Richest Users",
-        description="\n".join(lines),
-        color=discord.Color.gold(),
+    def _compact(n):
+        if n >= 1_000_000_000: return f"{n/1_000_000_000:.1f}B"
+        if n >= 1_000_000: return f"{n/1_000_000:.2f}M"
+        if n >= 1_000: return f"{n/1_000:.1f}K"
+        return str(n)
+
+    # ── Top 3 podium (ANSI, color-coded) ──
+    rank_styles = [
+        ("\u001b[1;33m", "①"),  # gold
+        ("\u001b[0;37m", "②"),  # silver
+        ("\u001b[1;31m", "③"),  # bronze-ish red
+    ]
+    podium_lines = []
+    for i in range(min(3, len(top))):
+        uid, data = top[i]
+        color, num = rank_styles[i]
+        name = _name_for(uid)[:16]
+        bal = data.get("balance", 0)
+        sbadge = supporter_badge(int(uid))
+        sb = f" {sbadge}" if sbadge else ""
+        podium_lines.append(
+            f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(bal):>8}\u001b[0m{sb}"
+        )
+
+    # ── Ranks 4-10 (dimmer, aligned) ──
+    rest_lines = []
+    for i in range(3, len(top)):
+        uid, data = top[i]
+        name = _name_for(uid)[:16]
+        bal = data.get("balance", 0)
+        sbadge = supporter_badge(int(uid))
+        sb = f" {sbadge}" if sbadge else ""
+        rest_lines.append(
+            f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(bal):>8}\u001b[0m{sb}"
+        )
+
+    body = (
+        "```ansi\n"
+        "\u001b[1;33m▓▒░ RICHEST IN THE CITY ░▒▓\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        + "\n".join(podium_lines)
     )
-    embed.set_footer(text=patreon_footer(interaction.user.id))
+    if rest_lines:
+        body += "\n\u001b[0;30m──────────────────────────────\u001b[0m\n" + "\n".join(rest_lines)
+    body += "\n```"
+
+    embed = discord.Embed(description=body, color=0xF1C40F)
+
+    # ── Viewer's own rank (if not in top 10) ──
+    viewer_id = str(interaction.user.id)
+    viewer_rank = next((idx for idx, (uid, _) in enumerate(all_ranked) if uid == viewer_id), None)
+    if viewer_rank is not None and viewer_rank >= 10:
+        vbal = all_ranked[viewer_rank][1].get("balance", 0)
+        embed.add_field(
+            name="📍 Your Rank",
+            value=f"**#{viewer_rank + 1}** of {len(all_ranked)} · {COIN_EMOJI} {vbal:,}",
+            inline=False,
+        )
+
+    embed.set_footer(text=patreon_footer(interaction.user.id, f"{len(all_ranked)} players ranked"))
     await interaction.edit_original_response(embed=embed)
 
 
