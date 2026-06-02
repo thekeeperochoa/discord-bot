@@ -26,7 +26,7 @@
 "daily_recap_channel": "1422952400649719858",
 "daily_recap_max_tokens": 500,
 "welcome_enabled": true,
-  "welcome_channel": "YOUR_CHANNEL_ID_HERE",
+  "welcome_channel": "1338746744284119110",
   "welcome_dm": true,
   "welcome_starter_coins": 500
 }
