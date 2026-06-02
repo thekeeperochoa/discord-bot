@@ -1932,6 +1932,12 @@ async def call_cerebras(system_prompt, messages, model, temperature, api_key, ma
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    # gpt-oss-120b is a reasoning model. For fast chat replies we don't want it
+    # burning tokens on reasoning. Keep effort low AND hide reasoning so the
+    # answer reliably lands in the `content` field (default puts it in `reasoning`).
+    if "gpt-oss" in (model or ""):
+        payload["reasoning_effort"] = "low"
+        payload["reasoning_format"] = "hidden"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -1947,7 +1953,15 @@ async def call_cerebras(system_prompt, messages, model, temperature, api_key, ma
                 text = await resp.text()
                 raise ProviderError(f"cerebras {resp.status}: {text[:200]}")
             data = await resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            # gpt-oss-120b is a reasoning model: the usable text may live in
+            # `content`, or fall back to `reasoning` if content is empty/missing.
+            msg = data.get("choices", [{}])[0].get("message", {})
+            content = msg.get("content")
+            if not content:
+                content = msg.get("reasoning") or msg.get("reasoning_content")
+            if not content:
+                raise ProviderError("cerebras returned empty content")
+            return content.strip()
 
 
 async def call_gemini(system_prompt, messages, model, temperature, api_key, max_tokens=200, images=None):
@@ -2040,7 +2054,10 @@ async def ask_ai(system_prompt, messages, cfg, images=None) -> str:
             if provider == "groq":
                 reply = await call_groq(system_prompt, messages, cfg["groq_model"], temperature, api_key, max_tokens)
             elif provider == "cerebras":
-                reply = await call_cerebras(system_prompt, messages, cfg["cerebras_model"], temperature, api_key, max_tokens)
+                # gpt-oss reasons (even at low effort) and those tokens count
+                # against max_tokens. Give it headroom so the answer isn't truncated.
+                cere_tokens = max_tokens + 400 if "gpt-oss" in cfg.get("cerebras_model", "") else max_tokens
+                reply = await call_cerebras(system_prompt, messages, cfg["cerebras_model"], temperature, api_key, cere_tokens)
             elif provider == "gemini":
                 reply = await call_gemini(system_prompt, messages, cfg["gemini_model"], temperature, api_key, max_tokens)
             else:
