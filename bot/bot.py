@@ -1247,6 +1247,50 @@ async def check_streak_bonus(user_id: int, channel=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🎁 FIRST-TIME BONUSES
+# One-time reward the first time a user tries each major system. Encourages
+# new players to SAMPLE everything instead of getting stuck on one command.
+# ─────────────────────────────────────────────────────────────────────────────
+FIRST_TIME_BONUSES = {
+    "first_run":        ("First Hustle",        500,  "🏃"),
+    "first_game":       ("First Bet",           300,  "🎲"),
+    "first_business":   ("First Business",      1_000, "🏢"),
+    "first_stock":      ("First Trade",         750,  "📈"),
+    "first_property":   ("First Property",      1_000, "🏘️"),
+    "first_dealer":     ("First Deal",          500,  "💊"),
+    "first_heist":      ("First Score",         1_000, "🦹"),
+    "first_pet":        ("First Companion",     500,  "🐾"),
+    "first_venue":      ("First Venue",         750,  "🌃"),
+    "first_rob":        ("First Robbery",       300,  "🔫"),
+    "first_marketplace":("First Listing",       400,  "🛒"),
+}
+
+
+async def grant_first_time(user_id: int, key: str, channel=None) -> int:
+    """Grant a one-time first-use bonus if not already claimed. Returns amount (0 if already had it)."""
+    if key not in FIRST_TIME_BONUSES:
+        return 0
+    counters = _get_counters(user_id)
+    claimed = counters.setdefault("first_time_claimed", [])
+    if key in claimed:
+        return 0
+    claimed.append(key)
+    name, bonus, emoji = FIRST_TIME_BONUSES[key]
+    economy.add(user_id, bonus, f"first-time {key}")
+    economy._save()
+    if channel:
+        try:
+            await channel.send(
+                f"{emoji} **First-timer bonus!** <@{user_id}> earned **+{bonus:,}** coins "
+                f"for trying this for the first time. _{name} unlocked._",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+    return bonus
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🏆 WEEKLY TOURNAMENTS
 # Separate weekly leaderboard. Resets every Monday at recap hour.
 # Top 3 win prize coins.
@@ -3799,18 +3843,27 @@ async def daily_command(interaction: discord.Interaction):
     # Apply daily_bonus_pct perk + passive_income perk
     bonus_pct = get_perk(user.id, "daily_bonus_pct")
     passive = get_perk(user.id, "passive_income")
-    final_reward = int(reward * (1 + bonus_pct / 100)) + passive
+    # Escalating streak bonus — every consecutive day adds a little more, capped.
+    # Makes EVERY day feel rewarding, not just the 7/14/30/100 milestones.
+    counters = _get_counters(user.id)
+    cur_streak = counters.get("daily_streak", 0)
+    next_streak = cur_streak + 1 if counters.get("last_daily_date", "") == (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d") else 1
+    streak_bonus = min(next_streak * 50, 1500)  # +50/day, caps at 1500
+    final_reward = int(reward * (1 + bonus_pct / 100)) + passive + streak_bonus
     new_bal = economy.add(user.id, final_reward, "daily")
     track_economy_event("earned", final_reward)
     track_activity("daily", user.id, user.display_name, f"claimed daily {final_reward:,}")
     bonus_text = ""
     if bonus_pct or passive:
         bonus_text = f"\n_(+{bonus_pct}% bonus, +{passive} passive)_"
+    # Streak line with fire emoji scaling
+    fire = "🔥" * min(5, max(1, next_streak // 7 + 1))
+    streak_line = f"\n{fire} **{next_streak}-day streak** · +{streak_bonus:,} streak bonus"
     suggestion = suggest_next_step(user.id)
     tip = f"\n\n{suggestion}" if suggestion else ""
     await edit(
         f"🎁 **DAILY REWARD!**\n\n"
-        f"You found {COIN_EMOJI} **{final_reward:,}** coins!{bonus_text}\n"
+        f"You found {COIN_EMOJI} **{final_reward:,}** coins!{bonus_text}{streak_line}\n"
         f"Balance: **{new_bal:,}**{tip}"
     )
     # Achievements
@@ -8902,6 +8955,10 @@ async def adopt_command(
         f"📊 Check on them with `/pet`\n"
         f"💎 Use `/collect` to claim earned coins"
     )
+    try:
+        await grant_first_time(user.id, "first_pet", channel=interaction.channel)
+    except Exception:
+        pass
 
 
 @tree.command(name="pet", description="Check on your pet's stats.")
@@ -9522,6 +9579,10 @@ async def buybusiness_command(
         f"📋 _{info['desc']}_\n\n"
         f"Use `/businesses` to manage, `/collectbusiness` to claim earnings."
     )
+    try:
+        await grant_first_time(user.id, "first_business", channel=interaction.channel)
+    except Exception:
+        pass
 
 
 # ── /businesses ──────────────────────────────────────────────────────────────
@@ -13004,6 +13065,92 @@ Welcome to the city. **What are you working tonight?** 🌃
 """
 
 
+class OnboardingView(discord.ui.View):
+    """Interactive buttons for new members — one tap to start playing.
+    Each button fires the relevant action so they never face a blank prompt."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=86400)  # 24h
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This onboarding is for the new member — run `/commands` for your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Claim Daily", emoji="💰", style=discord.ButtonStyle.success)
+    async def claim_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        remaining = economy.get_cooldown_remaining(uid, "daily")
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"⏰ Already claimed — resets in {fmt_cooldown(remaining)}.", ephemeral=True
+            )
+            return
+        reward = random.randint(DAILY_MIN, DAILY_MAX)
+        economy.set_cooldown(uid, "daily")
+        new_bal = economy.add(uid, reward, "daily")
+        try:
+            await trigger_daily_claim(uid, channel=interaction.channel)
+        except Exception:
+            pass
+        await interaction.response.send_message(
+            f"🎁 Claimed **{reward:,}** coins! Balance: **{new_bal:,}**. "
+            f"Come back tomorrow to build a streak 🔥", ephemeral=True
+        )
+
+    @discord.ui.button(label="How to Play", emoji="📖", style=discord.ButtonStyle.secondary)
+    async def how_to_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📖 Quick Start",
+            description=(
+                "**Earn coins:** `/daily` `/work` `/crime` `/run`\n"
+                "**Grow them:** `/buybusiness` `/stocks` `/realestate`\n"
+                "**Gamble them:** `/casino` `/slots` `/blackjack`\n"
+                "**Show off:** `/balance` `/leaderboard` `/whois`\n\n"
+                "💡 Tip: type `_` instead of `/` as a shortcut.\n"
+                "🌐 Full guide: https://jbelfort.netlify.app/"
+            ),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="See Commands", emoji="🎮", style=discord.ButtonStyle.secondary)
+    async def see_commands(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = _build_commands_home_embed()
+        view = CommandsNavView(interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+def build_dm_onboarding_view(guild=None, cfg=None) -> discord.ui.View:
+    """Link-only buttons for the welcome DM. Link buttons need no running bot,
+    so they NEVER break on restart (unlike action buttons). They funnel the
+    new member to the docs and back into the server where action buttons live."""
+    view = discord.ui.View(timeout=None)
+    # Always-valid docs link
+    view.add_item(discord.ui.Button(
+        label="Open Guide", emoji="🌐",
+        style=discord.ButtonStyle.link,
+        url="https://jbelfort.netlify.app/",
+    ))
+    # Jump-to-server link, built from guild + welcome channel if available
+    try:
+        cfg = cfg or load_config()
+        ch_id = cfg.get("welcome_channel", "").strip()
+        if guild and ch_id:
+            view.add_item(discord.ui.Button(
+                label="Go to Server", emoji="💬",
+                style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{guild.id}/{ch_id}",
+            ))
+    except Exception:
+        pass
+    return view
+
+
 async def handle_member_join(member: discord.Member):
     """Welcome a new member: public message + DM + starter coins."""
     if member.bot:
@@ -13046,7 +13193,7 @@ async def handle_member_join(member: discord.Member):
                 )
                 embed.set_thumbnail(url=member.display_avatar.url)
                 embed.set_footer(text=f"Member #{member.guild.member_count}")
-                await ch.send(embed=embed)
+                await ch.send(embed=embed, view=OnboardingView(member.id))
         except Exception as e:
             log.warning("welcome public message failed: %s", e)
 
@@ -13058,7 +13205,7 @@ async def handle_member_join(member: discord.Member):
                 guild=member.guild.name,
                 starter=starter,
             )
-            await member.send(msg)
+            await member.send(msg, view=build_dm_onboarding_view(member.guild, cfg))
         except discord.Forbidden:
             # User has DMs closed — silent, no big deal
             pass
@@ -14370,6 +14517,10 @@ class RunView(discord.ui.View):
                 add_tournament_score(self.user_id, coins_earned=final_payout, games_won=1)
             track_economy_event("earned" if net > 0 else "spent", abs(net))
             track_feature_use("run")
+            try:
+                await grant_first_time(self.user_id, "first_run", channel=interaction.channel)
+            except Exception:
+                pass
             display_name = interaction.user.display_name
             if self.state.get("jackpot"):
                 track_activity("run_jackpot", self.user_id, display_name, f"JACKPOT — +{final_payout:,} coins on {hustle['name']}")
