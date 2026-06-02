@@ -13176,10 +13176,18 @@ async def handle_member_join(member: discord.Member):
         pass
 
     # Public welcome message
-    welcome_channel_id = cfg.get("welcome_channel", "").strip()
+    # Falls back to the configured welcome channel if set, else the default below.
+    welcome_channel_id = cfg.get("welcome_channel", "").strip() or "1338746744284119110"
     if welcome_channel_id:
         try:
             ch = client.get_channel(int(welcome_channel_id))
+            if ch is None:
+                # Not in cache — try fetching it directly
+                try:
+                    ch = await client.fetch_channel(int(welcome_channel_id))
+                except Exception as e:
+                    log.warning("welcome channel fetch failed (%s): %s", welcome_channel_id, e)
+                    ch = None
             if ch:
                 embed = discord.Embed(
                     title=f"👋 Welcome, {member.display_name}!",
@@ -13187,13 +13195,21 @@ async def handle_member_join(member: discord.Member):
                         f"{member.mention} just dropped into the city.\n"
                         f"💰 Starter bonus: **{starter:,} coins** in your wallet.\n\n"
                         f"_Check your DMs for the full onboarding guide, "
-                        f"or run `/commands` to see everything._"
+                        f"or tap a button below to jump in._"
                     ),
                     color=discord.Color.blurple(),
                 )
                 embed.set_thumbnail(url=member.display_avatar.url)
                 embed.set_footer(text=f"Member #{member.guild.member_count}")
-                await ch.send(embed=embed, view=OnboardingView(member.id))
+                # Ping must be in message CONTENT (embed mentions don't notify)
+                await ch.send(
+                    content=f"🎉 {member.mention} welcome to the city!",
+                    embed=embed,
+                    view=OnboardingView(member.id),
+                    allowed_mentions=discord.AllowedMentions(users=[member]),
+                )
+            else:
+                log.warning("welcome channel %s not found", welcome_channel_id)
         except Exception as e:
             log.warning("welcome public message failed: %s", e)
 
