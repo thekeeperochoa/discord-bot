@@ -16744,6 +16744,11 @@ def _build_commands_home_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="\U0001F310 FULL DOCS",
+        value="Read the complete guide → **https://jbelfort.netlify.app/**",
+        inline=False,
+    )
+    embed.add_field(
         name="\U0001F496 SUPPORT THE BOT",
         value="Type `_perks` to unlock cosmetic perks & keep Jordan running.",
         inline=False,
@@ -17567,6 +17572,16 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     # ── Prefix-only commands (no slash slot used) ──
     if cmd_name in ("perks", "supporter", "donate", "vip"):
         await _send_perks_embed(message)
+        return True
+    if cmd_name in ("help", "commands", "cmds"):
+        embed = _build_commands_home_embed()
+        view = CommandsNavView(message.author.id)
+        await message.channel.send(embed=embed, view=view)
+        return True
+    if cmd_name in ("docs", "guide", "manual"):
+        await message.channel.send(
+            "📖 **Full Jordan Belfort guide:** https://jbelfort.netlify.app/"
+        )
         return True
     if cmd_name in ("credits", "supporters"):
         await _send_credits_embed(message)
