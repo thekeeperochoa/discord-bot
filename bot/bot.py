@@ -4151,6 +4151,44 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
     )
 
 
+def _sanitize_name(name: str) -> str:
+    """Normalize fancy Unicode display names to monospace-safe characters so
+    leaderboard columns line up. Maps styled-font letters back to ASCII, strips
+    combining marks and zero-width junk, drops anything still non-ASCII."""
+    import unicodedata
+    if not name:
+        return "?"
+    out = []
+    for ch in name:
+        cp = ord(ch)
+        # Mathematical alphanumeric symbols & styled letters → normalize via NFKC
+        # (covers 𝓍, 𝕏, ⓒ, １２３, fullwidth, circled, etc.)
+        norm = unicodedata.normalize("NFKC", ch)
+        for nch in norm:
+            cat = unicodedata.category(nch)
+            # Skip combining marks (Mn/Mc/Me) — these are the zalgo/decorator chars
+            if cat.startswith("M"):
+                continue
+            # Skip zero-width / formatting chars
+            if cat in ("Cf", "Cc"):
+                continue
+            ncp = ord(nch)
+            # Keep printable ASCII; replace other exotic glyphs with nothing
+            if 32 <= ncp < 127:
+                out.append(nch)
+            elif nch.isalnum():
+                # Try to fold accented letters to base ASCII
+                decomp = unicodedata.normalize("NFKD", nch)
+                base = "".join(c for c in decomp if not unicodedata.combining(c) and ord(c) < 127)
+                if base:
+                    out.append(base)
+                # else drop it
+    cleaned = "".join(out).strip()
+    # Collapse runs of spaces
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if cleaned else "?"
+
+
 @tree.command(name="leaderboard", description="See the richest users in the server.")
 async def leaderboard_command(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -4171,9 +4209,10 @@ async def leaderboard_command(interaction: discord.Interaction):
     def _name_for(uid):
         try:
             member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-            return member.display_name if member else f"User {uid}"
+            raw = member.display_name if member else f"User {uid}"
         except Exception:
-            return f"User {uid}"
+            raw = f"User {uid}"
+        return _sanitize_name(raw)
 
     def _compact(n):
         if n >= 1_000_000_000: return f"{n/1_000_000_000:.1f}B"
