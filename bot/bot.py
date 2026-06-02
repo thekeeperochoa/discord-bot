@@ -16160,6 +16160,120 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     roles_sorted = sorted(roles, key=lambda r: r.position, reverse=True)
     top_role_name = roles_sorted[0].name if roles_sorted else "—"
 
+    # ── Extended Discord account intel ──
+    # Join position (Nth member to join)
+    join_position = None
+    try:
+        if joined_at and target.guild:
+            members_with_join = [m for m in target.guild.members if m.joined_at]
+            members_with_join.sort(key=lambda m: m.joined_at)
+            join_position = next(
+                (i + 1 for i, m in enumerate(members_with_join) if m.id == target.id), None
+            )
+    except Exception:
+        pass
+
+    # Presence / status
+    status_map = {
+        "online": "🟢 Online", "idle": "🌙 Idle",
+        "dnd": "⛔ Do Not Disturb", "offline": "⚫ Offline",
+    }
+    presence_status = status_map.get(str(getattr(target, "status", "offline")), "⚫ Offline")
+
+    # Current activity (playing/listening/streaming/watching/custom)
+    activity_str = None
+    try:
+        for act in getattr(target, "activities", []) or []:
+            atype = getattr(act, "type", None)
+            aname = getattr(act, "name", None)
+            if isinstance(act, discord.CustomActivity):
+                if act.name:
+                    activity_str = f"💬 {act.name}"
+                    break
+            elif isinstance(act, discord.Spotify):
+                activity_str = f"🎵 {act.title} — {act.artist}"[:60]
+                break
+            elif aname:
+                verb = {
+                    discord.ActivityType.playing: "🎮 Playing",
+                    discord.ActivityType.listening: "🎧 Listening to",
+                    discord.ActivityType.watching: "📺 Watching",
+                    discord.ActivityType.streaming: "🔴 Streaming",
+                    discord.ActivityType.competing: "🏆 Competing in",
+                }.get(atype, "▶️")
+                activity_str = f"{verb} {aname}"[:60]
+                break
+    except Exception:
+        pass
+
+    # Voice state
+    voice_str = None
+    try:
+        vs = getattr(target, "voice", None)
+        if vs and vs.channel:
+            flags = []
+            if vs.self_mute or vs.mute: flags.append("muted")
+            if vs.self_deaf or vs.deaf: flags.append("deafened")
+            if vs.self_stream: flags.append("streaming")
+            if vs.self_video: flags.append("camera on")
+            extra = f" ({', '.join(flags)})" if flags else ""
+            voice_str = f"🔊 {vs.channel.name}{extra}"[:60]
+    except Exception:
+        pass
+
+    # Account flags / badges (public_flags)
+    flag_labels = []
+    try:
+        pf = target.public_flags
+        flag_emoji = {
+            "staff": "🛡️ Discord Staff",
+            "partner": "🤝 Partner",
+            "hypesquad": "🎉 HypeSquad Events",
+            "bug_hunter": "🐛 Bug Hunter",
+            "bug_hunter_level_2": "🐛 Bug Hunter Gold",
+            "hypesquad_bravery": "🦁 Bravery",
+            "hypesquad_brilliance": "💎 Brilliance",
+            "hypesquad_balance": "⚖️ Balance",
+            "early_supporter": "⭐ Early Supporter",
+            "verified_bot_developer": "🔧 Verified Bot Dev",
+            "active_developer": "💻 Active Developer",
+            "discord_certified_moderator": "🛡️ Certified Mod",
+        }
+        for attr, label in flag_emoji.items():
+            if getattr(pf, attr, False):
+                flag_labels.append(label)
+    except Exception:
+        pass
+
+    # Nitro hints (animated avatar or banner = almost certainly Nitro)
+    nitro_hint = bool(getattr(target, "display_avatar", None) and target.display_avatar.is_animated())
+
+    # Booster status
+    boosting_since = getattr(target, "premium_since", None)
+
+    # Timeout status
+    timed_out_until = getattr(target, "timed_out_until", None)
+    is_timed_out = bool(timed_out_until and timed_out_until > datetime.now(timezone.utc))
+
+    # Pending membership screening
+    is_pending = bool(getattr(target, "pending", False))
+
+    # Key permissions
+    key_perms = []
+    try:
+        gp = target.guild_permissions
+        if gp.administrator:
+            key_perms.append("Administrator")
+        else:
+            if gp.manage_guild: key_perms.append("Manage Server")
+            if gp.manage_channels: key_perms.append("Manage Channels")
+            if gp.ban_members: key_perms.append("Ban")
+            if gp.kick_members: key_perms.append("Kick")
+            if gp.manage_messages: key_perms.append("Manage Messages")
+            if gp.mention_everyone: key_perms.append("Mention Everyone")
+    except Exception:
+        pass
+
     balance = economy.balance(uid)
     user_record = economy._user(uid)
     lifetime_earned = user_record.get("lifetime_earned", 0)
@@ -16293,7 +16407,7 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
         "> [██░░░░░░░░] 20%",
     ]
 
-    # Frame 2 — identity
+    # Frame 2 — identity & intel
     f2 = [
         "DOSSIER SYSTEM v2.1",
         "> [████░░░░░░] 40%",
@@ -16305,6 +16419,13 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
         kv("AGE", f"{age_days}d / svr {server_days}d", 7),
         kv("ROLE", shorten(top_role_name, 12), 7),
     ]
+    if join_position:
+        f2.append(kv("JOIN #", f"{join_position}", 7))
+    f2.append(kv("STATUS", presence_status.split(" ", 1)[-1][:14], 7))
+    if activity_str:
+        f2.append(shorten(activity_str, 28))
+    if voice_str:
+        f2.append(shorten(voice_str, 28))
 
     # Frame 3 — money
     boosts_str = ", ".join(active_boosts[:2]) if active_boosts else "none"
@@ -16388,6 +16509,36 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     f6.append(kv("HANDLE", handle_short, 7))
     f6.append(kv("AGE", f"{age_days}d / svr {server_days}d", 7))
     f6.append(kv("ROLE", shorten(top_role_name, 12), 7))
+    if join_position:
+        f6.append(kv("JOIN #", str(join_position), 7))
+    f6.append(kv("STATUS", presence_status.split(" ", 1)[-1][:14], 7))
+    if activity_str:
+        f6.append(shorten(activity_str, 28))
+    if voice_str:
+        f6.append(shorten(voice_str, 28))
+    # Account intel sub-section (only if there's anything notable)
+    intel_bits = []
+    if flag_labels:
+        intel_bits.append(f"BADGES: {len(flag_labels)}")
+    if nitro_hint:
+        intel_bits.append("NITRO likely")
+    if boosting_since:
+        intel_bits.append("BOOSTING ⚡")
+    if key_perms:
+        intel_bits.append("STAFF/MOD" if ("Administrator" in key_perms or "Ban" in key_perms or "Kick" in key_perms) else "")
+    if is_timed_out:
+        intel_bits.append("⏳ TIMED OUT")
+    if is_pending:
+        intel_bits.append("⏸ UNVERIFIED")
+    intel_bits = [b for b in intel_bits if b]
+    if intel_bits:
+        f6.append("◤ INTEL")
+        # show flags individually if present (more impressive)
+        for fl in flag_labels[:4]:
+            f6.append(shorten(fl, 28))
+        leftover = [b for b in intel_bits if not b.startswith("BADGES")]
+        if leftover:
+            f6.append(shorten(" · ".join(leftover), 28))
     f6.append("")
     f6.append("◤ FINANCIALS")
     f6.append(kv("BAL", f"{num_compact(balance)} coins", 7))
