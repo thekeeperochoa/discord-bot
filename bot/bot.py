@@ -69,7 +69,7 @@ DEFAULT_PERSONALITY = {
     "status_rotation_minutes": 10,
     "max_tokens": 200,
     "groq_model":     "llama-3.3-70b-versatile",
-    "cerebras_model": "llama3.1-8b",
+    "cerebras_model": "gpt-oss-120b",
     "gemini_model":   "gemini-2.5-flash-lite",
     "provider_order": ["groq", "cerebras", "gemini"],
     # Image understanding
@@ -93,8 +93,19 @@ DEFAULT_PERSONALITY = {
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
-            return {**DEFAULT_PERSONALITY, **json.load(f)}
-    return DEFAULT_PERSONALITY.copy()
+            cfg = {**DEFAULT_PERSONALITY, **json.load(f)}
+    else:
+        cfg = DEFAULT_PERSONALITY.copy()
+    # Auto-migrate deprecated provider models so a stale personality.json
+    # doesn't keep pointing at a 404'd model.
+    _DEPRECATED_CEREBRAS = {
+        "llama3.1-8b", "llama-3.1-8b", "llama3.1-70b", "llama-3.3-70b",
+        "qwen-3-32b", "qwen-3-235b-a22b-instruct-2507", "llama-4-scout-17b-16e-instruct",
+        "llama-4-maverick-17b-128e-instruct",
+    }
+    if cfg.get("cerebras_model") in _DEPRECATED_CEREBRAS:
+        cfg["cerebras_model"] = "gpt-oss-120b"
+    return cfg
 
 
 def get_notification_channel_id(cfg: dict = None) -> str:
