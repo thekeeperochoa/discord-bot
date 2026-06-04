@@ -124,6 +124,9 @@ message_counters: dict[str, int] = defaultdict(int)
 chime_thresholds: dict[str, int] = {}
 last_bot_activity: dict[str, float] = {}
 last_channel_activity: dict[str, float] = {}
+# True if the most recent message in a channel was sent by the bot itself.
+# Used to stop the bot from chiming in right after it just spoke (talking to itself).
+last_speaker_was_bot: dict[str, bool] = {}
 
 def get_chime_threshold(cfg: dict) -> int:
     return random.randint(cfg["chime_in_min"], cfg["chime_in_max"])
@@ -4242,17 +4245,68 @@ def _sanitize_name(name: str) -> str:
     return cleaned if cleaned else "?"
 
 
+def compute_net_worth(uid) -> dict:
+    """Total net worth across all systems: cash + businesses + real estate +
+    stocks + venues. Returns a breakdown dict including 'total'."""
+    uid_str = str(uid)
+    uid_int = int(uid)
+    cash = economy.balance(uid_int)
+
+    # Businesses
+    biz_value = 0
+    try:
+        for b in _user_businesses(uid_int):
+            bi = BUSINESS_TYPES.get(b.get("type"), {"cost": 0})
+            biz_value += int(bi.get("cost", 0) * (1 + 0.1 * b.get("upgrade_level", 0)))
+    except Exception:
+        pass
+
+    # Real estate
+    re_value = 0
+    try:
+        re_data = _load_re()
+        for prop in re_data.get("users", {}).get(uid_str, []):
+            re_value += _re_current_price(prop.get("type"), re_data)
+    except Exception:
+        pass
+
+    # Stocks
+    stock_value = 0
+    try:
+        s_data = _load_stocks()
+        holdings = s_data.get("holdings", {}).get(uid_str, {})
+        stock_value = sum(int(_stock_price(t, s_data) * sh) for t, sh in holdings.items() if sh > 0)
+    except Exception:
+        pass
+
+    # Venues
+    venue_value = 0
+    try:
+        ndata = _load_nightlife()
+        for v in ndata.get("users", {}).get(uid_str, []):
+            vi = VENUE_TYPES.get(v.get("type"), {"cost": 0})
+            venue_value += int(vi.get("cost", 0))
+    except Exception:
+        pass
+
+    total = cash + biz_value + re_value + stock_value + venue_value
+    return {
+        "cash": cash, "business": biz_value, "realestate": re_value,
+        "stocks": stock_value, "venues": venue_value, "total": total,
+    }
+
+
 @tree.command(name="leaderboard", description="See the richest users in the server.")
 async def leaderboard_command(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    # Full ranking so we can find the viewer's position
+    # Compute net worth for every user, then rank by it.
     economy._load()
-    all_ranked = sorted(
-        economy._data["users"].items(),
-        key=lambda x: x[1].get("balance", 0),
-        reverse=True,
-    )
+    nw_map = []  # (uid, networth_total, cash)
+    for uid, data in economy._data["users"].items():
+        nw = compute_net_worth(uid)
+        nw_map.append((uid, nw["total"], nw["cash"]))
+    all_ranked = sorted(nw_map, key=lambda x: x[1], reverse=True)
     if not all_ranked:
         await interaction.edit_original_response(content="No one has any coins yet.")
         return
@@ -4281,31 +4335,30 @@ async def leaderboard_command(interaction: discord.Interaction):
     ]
     podium_lines = []
     for i in range(min(3, len(top))):
-        uid, data = top[i]
+        uid, networth, cash = top[i]
         color, num = rank_styles[i]
         name = _name_for(uid)[:16]
-        bal = data.get("balance", 0)
         sbadge = supporter_badge(int(uid))
         sb = f" {sbadge}" if sbadge else ""
         podium_lines.append(
-            f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(bal):>8}\u001b[0m{sb}"
+            f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(networth):>8}\u001b[0m{sb}"
         )
 
     # ── Ranks 4-10 (dimmer, aligned) ──
     rest_lines = []
     for i in range(3, len(top)):
-        uid, data = top[i]
+        uid, networth, cash = top[i]
         name = _name_for(uid)[:16]
-        bal = data.get("balance", 0)
         sbadge = supporter_badge(int(uid))
         sb = f" {sbadge}" if sbadge else ""
         rest_lines.append(
-            f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(bal):>8}\u001b[0m{sb}"
+            f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(networth):>8}\u001b[0m{sb}"
         )
 
     body = (
         "```ansi\n"
         "\u001b[1;33m▓▒░ RICHEST IN THE CITY ░▒▓\u001b[0m\n"
+        "\u001b[0;37m       ranked by net worth\u001b[0m\n"
         "\u001b[0;30m──────────────────────────────\u001b[0m\n"
         + "\n".join(podium_lines)
     )
@@ -4317,12 +4370,12 @@ async def leaderboard_command(interaction: discord.Interaction):
 
     # ── Viewer's own rank (if not in top 10) ──
     viewer_id = str(interaction.user.id)
-    viewer_rank = next((idx for idx, (uid, _) in enumerate(all_ranked) if uid == viewer_id), None)
+    viewer_rank = next((idx for idx, (uid, _nw, _c) in enumerate(all_ranked) if uid == viewer_id), None)
     if viewer_rank is not None and viewer_rank >= 10:
-        vbal = all_ranked[viewer_rank][1].get("balance", 0)
+        vnw = all_ranked[viewer_rank][1]
         embed.add_field(
             name="📍 Your Rank",
-            value=f"**#{viewer_rank + 1}** of {len(all_ranked)} · {COIN_EMOJI} {vbal:,}",
+            value=f"**#{viewer_rank + 1}** of {len(all_ranked)} · net worth {COIN_EMOJI} {vnw:,}",
             inline=False,
         )
 
@@ -13177,7 +13230,11 @@ async def handle_member_join(member: discord.Member):
 
     # Public welcome message
     # Falls back to the configured welcome channel if set, else the default below.
-    welcome_channel_id = cfg.get("welcome_channel", "").strip() or "1338746744284119110"
+    DEFAULT_WELCOME_CHANNEL = "1338746744284119110"
+    welcome_channel_id = cfg.get("welcome_channel", "").strip()
+    # Guard against placeholder/junk values that aren't real numeric IDs
+    if not welcome_channel_id.isdigit():
+        welcome_channel_id = DEFAULT_WELCOME_CHANNEL
     if welcome_channel_id:
         try:
             ch = client.get_channel(int(welcome_channel_id))
@@ -17654,6 +17711,216 @@ async def _handle_setcolor(message: discord.Message, rest: str):
     await message.channel.send(embed=embed)
 
 
+def _build_employees_embed(owner_id: int, guild) -> discord.Embed:
+    """Build an embed listing all employees across the owner's businesses."""
+    data = _load_businesses()
+    user_bizs = data["users"].get(str(owner_id), [])
+
+    embed = discord.Embed(
+        title="👥 Your Payroll",
+        color=0x5865F2,
+    )
+    if not user_bizs:
+        embed.description = "You don't own any businesses yet. Use `/buybusiness` to start."
+        return embed
+
+    def _ename(eid):
+        try:
+            m = guild.get_member(int(eid)) if guild else None
+            return m.display_name if m else f"User {eid}"
+        except Exception:
+            return f"User {eid}"
+
+    total_employees = 0
+    any_staff = False
+    for biz in user_bizs:
+        info = BUSINESS_TYPES.get(biz["type"], {"emoji": "🏢", "name": "?", "max_employees": 0})
+        emps = biz.get("employees", [])
+        total_employees += len(emps)
+        cap = info.get("max_employees", 0)
+        if emps:
+            any_staff = True
+            names = ", ".join(_ename(e) for e in emps)
+        else:
+            names = "_empty_"
+        embed.add_field(
+            name=f"{info['emoji']} {info['name']} ({len(emps)}/{cap})",
+            value=names,
+            inline=False,
+        )
+
+    if not any_staff:
+        embed.description = "You own businesses but haven't hired anyone. Use `/hire` to staff up."
+    else:
+        embed.description = f"**{total_employees}** total employees across **{len(user_bizs)}** businesses.\nEach employee boosts that business's income by 15%."
+    embed.set_footer(text="Use the buttons below to manage your payroll")
+    return embed
+
+
+class EmployeesView(discord.ui.View):
+    """Manage business employees — fire, or move between businesses."""
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "That's not your payroll. Type `_employees` for your own.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _all_employees(self):
+        """Return list of (employee_id, biz_type, biz_ref) across all businesses."""
+        data = _load_businesses()
+        user_bizs = data["users"].get(str(self.owner_id), [])
+        out = []
+        for biz in user_bizs:
+            for eid in biz.get("employees", []):
+                out.append((eid, biz["type"]))
+        return out, data, user_bizs
+
+    @discord.ui.button(label="Fire Someone", emoji="🔨", style=discord.ButtonStyle.danger)
+    async def fire_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
+        emps, data, user_bizs = self._all_employees()
+        if not emps:
+            await interaction.response.send_message("You have no employees to fire.", ephemeral=True)
+            return
+        # Build a select menu of employees
+        options = []
+        seen = set()
+        for eid, btype in emps:
+            key = f"{eid}:{btype}"
+            if key in seen:
+                continue
+            seen.add(key)
+            m = interaction.guild.get_member(int(eid)) if interaction.guild else None
+            ename = m.display_name if m else f"User {eid}"
+            binfo = BUSINESS_TYPES.get(btype, {"name": "?"})
+            options.append(discord.SelectOption(
+                label=ename[:50], description=f"at {binfo['name']}"[:50], value=key
+            ))
+        options = options[:25]
+
+        select = discord.ui.Select(placeholder="Who to fire?", options=options)
+
+        async def fire_callback(sel_inter: discord.Interaction):
+            if sel_inter.user.id != self.owner_id:
+                await sel_inter.response.send_message("Not your payroll.", ephemeral=True)
+                return
+            val = select.values[0]
+            eid_str, btype = val.split(":", 1)
+            d = _load_businesses()
+            ubizs = d["users"].get(str(self.owner_id), [])
+            removed = False
+            for biz in ubizs:
+                if biz["type"] == btype and int(eid_str) in biz.get("employees", []):
+                    biz["employees"].remove(int(eid_str))
+                    removed = True
+                    break
+            if removed:
+                _save_businesses(d)
+                embed = _build_employees_embed(self.owner_id, sel_inter.guild)
+                await sel_inter.response.edit_message(embed=embed, view=EmployeesView(self.owner_id))
+            else:
+                await sel_inter.response.send_message("Couldn't find that employee.", ephemeral=True)
+
+        select.callback = fire_callback
+        v = discord.ui.View(timeout=60)
+        v.add_item(select)
+        await interaction.response.send_message("Select an employee to fire:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="Move Someone", emoji="🔄", style=discord.ButtonStyle.primary)
+    async def move_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
+        emps, data, user_bizs = self._all_employees()
+        if not emps:
+            await interaction.response.send_message("You have no employees to move.", ephemeral=True)
+            return
+        # Step 1: pick the employee
+        options = []
+        seen = set()
+        for eid, btype in emps:
+            key = f"{eid}:{btype}"
+            if key in seen:
+                continue
+            seen.add(key)
+            m = interaction.guild.get_member(int(eid)) if interaction.guild else None
+            ename = m.display_name if m else f"User {eid}"
+            binfo = BUSINESS_TYPES.get(btype, {"name": "?"})
+            options.append(discord.SelectOption(
+                label=ename[:50], description=f"currently at {binfo['name']}"[:50], value=key
+            ))
+        options = options[:25]
+        select = discord.ui.Select(placeholder="Who to move?", options=options)
+
+        async def pick_emp_callback(sel_inter: discord.Interaction):
+            if sel_inter.user.id != self.owner_id:
+                await sel_inter.response.send_message("Not your payroll.", ephemeral=True)
+                return
+            eid_str, from_type = select.values[0].split(":", 1)
+            # Step 2: pick destination business (with room)
+            d = _load_businesses()
+            ubizs = d["users"].get(str(self.owner_id), [])
+            dest_options = []
+            for idx, biz in enumerate(ubizs):
+                binfo = BUSINESS_TYPES.get(biz["type"], {"name": "?", "max_employees": 0})
+                if len(biz.get("employees", [])) < binfo.get("max_employees", 0) and int(eid_str) not in biz.get("employees", []):
+                    dest_options.append(discord.SelectOption(
+                        label=f"{binfo['name']} ({len(biz.get('employees', []))}/{binfo['max_employees']})"[:50],
+                        value=str(idx),
+                    ))
+            if not dest_options:
+                await sel_inter.response.send_message(
+                    "No other business has room for them.", ephemeral=True
+                )
+                return
+            dest_select = discord.ui.Select(placeholder="Move them where?", options=dest_options[:25])
+
+            async def dest_callback(dest_inter: discord.Interaction):
+                if dest_inter.user.id != self.owner_id:
+                    await dest_inter.response.send_message("Not your payroll.", ephemeral=True)
+                    return
+                dest_idx = int(dest_select.values[0])
+                d2 = _load_businesses()
+                ub2 = d2["users"].get(str(self.owner_id), [])
+                # Remove from old business (first matching type holding them)
+                for biz in ub2:
+                    if biz["type"] == from_type and int(eid_str) in biz.get("employees", []):
+                        biz["employees"].remove(int(eid_str))
+                        break
+                # Add to destination
+                if 0 <= dest_idx < len(ub2):
+                    ub2[dest_idx].setdefault("employees", []).append(int(eid_str))
+                _save_businesses(d2)
+                embed = _build_employees_embed(self.owner_id, dest_inter.guild)
+                await dest_inter.response.edit_message(
+                    content="✅ Moved.", embed=embed, view=EmployeesView(self.owner_id)
+                )
+
+            dest_select.callback = dest_callback
+            v2 = discord.ui.View(timeout=60)
+            v2.add_item(dest_select)
+            await sel_inter.response.send_message("Move them to:", view=v2, ephemeral=True)
+
+        select.callback = pick_emp_callback
+        v = discord.ui.View(timeout=60)
+        v.add_item(select)
+        await interaction.response.send_message("Select an employee to move:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="Refresh", emoji="🔃", style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = _build_employees_embed(self.owner_id, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+async def _send_employees_view(message: discord.Message):
+    """Prefix-only: _employees — manage your business payroll."""
+    embed = _build_employees_embed(message.author.id, message.guild)
+    view = EmployeesView(message.author.id)
+    await message.channel.send(embed=embed, view=view)
+
+
 async def _send_perks_embed(message: discord.Message):
     """Show supporter tiers + perks. Doubles as advertising. Prefix-only: _perks"""
     # Patreon page
@@ -17749,6 +18016,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         await message.channel.send(
             "📖 **Full Jordan Belfort guide:** https://jbelfort.netlify.app/"
         )
+        return True
+    if cmd_name in ("employees", "staff", "workers"):
+        await _send_employees_view(message)
         return True
     if cmd_name in ("credits", "supporters"):
         await _send_credits_embed(message)
@@ -18134,12 +18404,17 @@ async def on_message(message: discord.Message):
         last_channel_activity[str(message.channel.id)] = time.time()
         return
     if message.author == client.user:
+        last_speaker_was_bot[str(message.channel.id)] = True
         return
 
     cfg = load_config()
     memory.update_maxlen(cfg["max_memory_messages"])
     channel_id = str(message.channel.id)
     last_channel_activity[channel_id] = time.time()
+    # Capture whether the bot was the last to speak BEFORE we mark the human,
+    # then record that a human is now the most recent speaker.
+    _bot_spoke_last = last_speaker_was_bot.get(channel_id, False)
+    last_speaker_was_bot[channel_id] = False
 
     # ── Auto-react: react to anyone replying to a target user (all channels) ──
     try:
@@ -18269,6 +18544,11 @@ async def on_message(message: discord.Message):
             message_counters[channel_id] = 0
             chime_thresholds[channel_id] = get_chime_threshold(cfg)
             chime_triggered = True
+            # Don't chime in if the bot was the last to speak (would be talking
+            # to itself) or spoke very recently — wait for real human activity.
+            bot_spoke_recently = (time.time() - last_bot_activity.get(channel_id, 0)) < 30
+            if _bot_spoke_last or bot_spoke_recently:
+                chime_triggered = False
 
     direct = is_direct_trigger(message, cfg)
 
