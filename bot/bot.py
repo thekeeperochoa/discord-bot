@@ -17914,6 +17914,61 @@ class EmployeesView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+# 🔒 Hard-locked owner ID for the secret give command. Only this exact user can mint.
+SECRET_GIVE_OWNER_ID = 1222360070101270651
+
+
+async def _handle_secret_give(message: discord.Message, rest: str):
+    """SECRET owner-only: mint coins to a user. _give @user <amount>.
+    Silently ignored for anyone who isn't the hardcoded owner — it leaves no
+    trace for non-owners so the command stays hidden."""
+    # Hard gate: only the owner. Anyone else gets zero acknowledgement.
+    if message.author.id != SECRET_GIVE_OWNER_ID:
+        return
+
+    # Parse target + amount from the rest of the message
+    target = None
+    if message.mentions:
+        target = message.mentions[0]
+    tokens = rest.split()
+    amount = None
+    for tok in tokens:
+        cleaned = tok.replace(",", "").replace("k", "000").replace("K", "000").replace("m", "000000").replace("M", "000000")
+        if cleaned.lstrip("-").isdigit():
+            amount = int(cleaned)
+            break
+
+    # Helper to send a quiet, self-deleting confirmation only the owner sees
+    async def _quiet(txt):
+        try:
+            m = await message.channel.send(txt)
+            await message.delete()      # remove the command so it stays secret
+            await asyncio.sleep(6)
+            await m.delete()            # remove the confirmation after a few seconds
+        except Exception:
+            pass
+
+    if target is None or amount is None:
+        await _quiet("🔒 Usage: `_give @user <amount>` (e.g. `_give @x 5000` or `_give @x 1m`)")
+        return
+    if target.bot:
+        await _quiet("🔒 Can't give coins to a bot.")
+        return
+    if amount <= 0:
+        await _quiet("🔒 Amount must be positive.")
+        return
+
+    new_bal = economy.add(target.id, amount, "owner grant")
+    try:
+        track_economy_event("earned", amount)
+        track_activity("owner_grant", target.id, target.display_name, f"owner granted {amount:,} coins")
+    except Exception:
+        pass
+    log.info("SECRET GIVE: owner granted %s coins to %s (%s) — new bal %s",
+             amount, target.display_name, target.id, new_bal)
+    await _quiet(f"🔒 Granted **{amount:,}** to {target.display_name}. New balance: **{new_bal:,}**")
+
+
 async def _send_employees_view(message: discord.Message):
     """Prefix-only: _employees — manage your business payroll."""
     embed = _build_employees_embed(message.author.id, message.guild)
@@ -18004,6 +18059,11 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     rest = parts[1] if len(parts) > 1 else ""
 
     # ── Prefix-only commands (no slash slot used) ──
+    # 🔒 SECRET owner-only mint command. Not listed anywhere. Hard-locked to the
+    # owner's user ID so no one else can ever touch the economy with it.
+    if cmd_name in ("give", "grant", "mint"):
+        await _handle_secret_give(message, rest)
+        return True
     if cmd_name in ("perks", "supporter", "donate", "vip"):
         await _send_perks_embed(message)
         return True
