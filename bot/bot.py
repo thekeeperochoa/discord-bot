@@ -87,6 +87,13 @@ DEFAULT_PERSONALITY = {
     "welcome_channel": "",       # if blank, no public message — just DM
     "welcome_dm": True,          # send onboarding DM to new members
     "welcome_starter_coins": 500, # free coins for joining
+    # ── Anti-spam / scam protection ──
+    "antispam_enabled": True,
+    "antispam_mod_channel": "1242222689352155206",  # alerts go here
+    "antispam_min_account_age_days": 7,  # invites from accounts younger than this don't count
+    "antispam_scam_action": True,        # auto-delete + timeout on scam-link from new members
+    "antispam_raid_threshold": 5,        # N joins...
+    "antispam_raid_window_sec": 60,      # ...within M seconds = raid alert
 }
 
 
@@ -576,8 +583,9 @@ async def rebuild_invite_cache(guild):
         log.warning("Invite cache rebuild failed: %s", e)
 
 
-async def attribute_join(member) -> None:
-    """Diff invite use-counts to find who invited this member. Updates the log."""
+async def attribute_join(member) -> str | None:
+    """Diff invite use-counts to find who invited this member. Updates the log.
+    Returns the invite code used (or None if unattributed)."""
     global _invite_cache, _invite_vanity_uses
     guild = member.guild
     data = _load_invites()
@@ -588,7 +596,7 @@ async def attribute_join(member) -> None:
         data["unattributed"] = data.get("unattributed", 0) + 1
         _save_invites(data)
         await rebuild_invite_cache(guild)
-        return
+        return None
 
     try:
         current = await guild.invites()
@@ -596,7 +604,7 @@ async def attribute_join(member) -> None:
         log.warning("attribute_join: couldn't fetch invites: %s", e)
         data["unattributed"] = data.get("unattributed", 0) + 1
         _save_invites(data)
-        return
+        return None
 
     # Find which invite(s) incremented vs the cache
     incremented = []
@@ -629,18 +637,32 @@ async def attribute_join(member) -> None:
     # Always refresh the cache to current truth
     _invite_cache = {inv.code: (inv.uses or 0) for inv in current}
 
+    used_code = incremented[0].code if incremented else ("vanity" if not inviter_id else "?")
+
     if not inviter_id:
         data["unattributed"] = data.get("unattributed", 0) + 1
         _save_invites(data)
-        return
+        return used_code
+
+    # T3: invites from very young accounts don't count toward the contest —
+    # kills the incentive to farm throwaway alts. Still logged separately.
+    cfg = load_config()
+    if account_too_young_for_invite(member, cfg):
+        rec = data.setdefault("inviters", {}).setdefault(inviter_id, {"members": {}})
+        rec.setdefault("skipped_young", 0)
+        rec["skipped_young"] += 1
+        _save_invites(data)
+        log.info("Invite from young account NOT counted: %s invited by %s", member.id, inviter_id)
+        return used_code
 
     # Record — UNIQUE members only (rejoin via different invite won't double-count)
     inviters = data.setdefault("inviters", {})
     rec = inviters.setdefault(inviter_id, {"members": {}})
     members = rec.setdefault("members", {})
     if str(member.id) not in members:
-        members[str(member.id)] = {"ts": int(time.time()), "code": incremented[0].code if incremented else "vanity"}
+        members[str(member.id)] = {"ts": int(time.time()), "code": used_code}
     _save_invites(data)
+    return used_code
 
 
 def _invite_counts(inviter_id: str, data: dict):
@@ -706,6 +728,230 @@ async def _send_invites_leaderboard(message):
         foot += f" · {unattributed} unattributed"
     embed.set_footer(text=foot)
     await message.channel.send(embed=embed)
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🛡️ ANTI-SPAM / SCAM PROTECTION
+# Tiered defense. Designed to MINIMIZE false positives — flags & alerts rather
+# than auto-banning, with auto-action reserved for near-certain scam signals.
+#  T1: risk-score new joins → quiet mod alert
+#  T2: scam-link from a new member → delete + timeout + alert
+#  T3: invites from young accounts don't count toward the contest
+#  T4: mass-join in a short window → raid alert
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Known scam phrasing / domains. Conservative list — high-confidence only.
+SCAM_PATTERNS = [
+    "free nitro", "free discord nitro", "nitro giveaway", "steamcommunity.com/gift",
+    "discord-nitro", "discordnitro", "nitro-free", "free-nitro", "click here to claim",
+    "claim your free", "@everyone free", "@here free", "airdrop", "free robux",
+    "telegram.me/", "t.me/", "crypto giveaway", "double your", "steam gift",
+]
+# Suspicious link shorteners / lookalike domains often used in scams
+SCAM_DOMAINS = [
+    "dlscord", "discrod", "dlscrod", "steamcommunlty", "steancommunity",
+    "discord-gift", "discordgift", "discordapp.gift",
+]
+
+# Raid tracking: recent join timestamps per guild
+_recent_joins: dict[int, list] = defaultdict(list)
+
+
+def _antispam_mod_channel_id(cfg) -> str:
+    ch = cfg.get("antispam_mod_channel", "").strip()
+    return ch or get_notification_channel_id(cfg)
+
+
+def compute_join_risk(member) -> tuple[int, list]:
+    """Score a joining member 0-100 on spam/alt risk. Returns (score, reasons)."""
+    score = 0
+    reasons = []
+    now = datetime.now(timezone.utc)
+
+    # Account age — the strongest signal
+    try:
+        age_days = (now - member.created_at).days
+        if age_days < 1:
+            score += 45; reasons.append("account <1 day old")
+        elif age_days < 7:
+            score += 30; reasons.append(f"account {age_days}d old")
+        elif age_days < 30:
+            score += 12; reasons.append(f"account {age_days}d old")
+    except Exception:
+        pass
+
+    # Default avatar (no custom pfp)
+    try:
+        if member.avatar is None:
+            score += 20; reasons.append("no avatar")
+    except Exception:
+        pass
+
+    # Username pattern: lots of digits / random-looking
+    try:
+        name = member.name or ""
+        digits = sum(c.isdigit() for c in name)
+        if len(name) >= 4 and digits / max(1, len(name)) > 0.4:
+            score += 15; reasons.append("digit-heavy username")
+    except Exception:
+        pass
+
+    # No flags/badges at all + young = slightly more suspicious
+    try:
+        if member.public_flags.value == 0 and (now - member.created_at).days < 30:
+            score += 8; reasons.append("no badges")
+    except Exception:
+        pass
+
+    return min(100, score), reasons
+
+
+def account_too_young_for_invite(member, cfg) -> bool:
+    """T3: True if account is younger than the contest minimum (invite won't count)."""
+    try:
+        min_days = cfg.get("antispam_min_account_age_days", 7)
+        age_days = (datetime.now(timezone.utc) - member.created_at).days
+        return age_days < min_days
+    except Exception:
+        return False
+
+
+async def antispam_on_join(member, cfg=None, invite_code=None):
+    """T1 + T4: risk-score the join, alert mods if risky; detect raids."""
+    cfg = cfg or load_config()
+    if not cfg.get("antispam_enabled", True):
+        return
+    guild = member.guild
+
+    # ── T4: raid detection ──
+    now_ts = time.time()
+    window = cfg.get("antispam_raid_window_sec", 60)
+    threshold = cfg.get("antispam_raid_threshold", 5)
+    joins = _recent_joins[guild.id]
+    joins.append(now_ts)
+    # prune old
+    _recent_joins[guild.id] = [t for t in joins if now_ts - t <= window]
+    raid = len(_recent_joins[guild.id]) >= threshold
+
+    # ── T1: risk score ──
+    score, reasons = compute_join_risk(member)
+
+    # Only alert if risky or a raid is happening
+    if score < 40 and not raid:
+        return
+
+    ch_id = _antispam_mod_channel_id(cfg)
+    if not ch_id:
+        return
+    try:
+        ch = client.get_channel(int(ch_id)) or await client.fetch_channel(int(ch_id))
+    except Exception:
+        return
+    if not ch:
+        return
+
+    try:
+        if raid:
+            embed = discord.Embed(
+                title="🚨 POSSIBLE RAID",
+                description=(
+                    f"**{len(_recent_joins[guild.id])} accounts** joined in the last "
+                    f"{window}s (threshold {threshold}).\nMost recent: {member.mention} "
+                    f"(`{member.name}`)\n\nConsider locking down or enabling verification."
+                ),
+                color=0xff3b5c,
+            )
+            await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        if score >= 40:
+            age_days = (datetime.now(timezone.utc) - member.created_at).days
+            color = 0xff3b5c if score >= 70 else 0xffcf2b
+            embed = discord.Embed(
+                title=f"⚠️ Suspicious join · risk {score}/100",
+                description=(
+                    f"{member.mention} (`{member.name}`, ID `{member.id}`)\n"
+                    f"📅 Account age: **{age_days} days**\n"
+                    f"🚩 Flags: {', '.join(reasons) if reasons else 'none'}\n"
+                    + (f"📨 Invite: `{invite_code}`\n" if invite_code else "")
+                    + "\n_No action taken — review and decide. Real new users can look like this too._"
+                ),
+                color=color,
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as e:
+        log.warning("antispam alert failed: %s", e)
+
+
+async def antispam_check_message(message, cfg=None) -> bool:
+    """T2: scam-link auto-defense. Returns True if action was taken (message handled).
+    Only acts on RECENT members to avoid punishing established users."""
+    cfg = cfg or load_config()
+    if not cfg.get("antispam_enabled", True) or not cfg.get("antispam_scam_action", True):
+        return False
+    member = message.author
+    if not isinstance(member, discord.Member):
+        return False
+    # Only scrutinize newer members (established users get a pass)
+    try:
+        joined = member.joined_at
+        if joined and (datetime.now(timezone.utc) - joined).days > 7:
+            return False
+    except Exception:
+        pass
+    # Don't touch admins/mods
+    try:
+        if member.guild_permissions.manage_messages or member.guild_permissions.administrator:
+            return False
+    except Exception:
+        pass
+
+    content = (message.content or "").lower()
+    if not content:
+        return False
+    hit = None
+    for pat in SCAM_PATTERNS:
+        if pat in content:
+            hit = pat; break
+    if not hit:
+        for dom in SCAM_DOMAINS:
+            if dom in content:
+                hit = dom; break
+    # Extra signal: @everyone/@here + a link from a brand-new member
+    has_link = "http://" in content or "https://" in content or "discord.gg/" in content
+    mass_ping = "@everyone" in content or "@here" in content
+    if not hit and not (mass_ping and has_link):
+        return False
+
+    # High confidence → act: delete, timeout, alert
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    try:
+        await member.timeout(timedelta(hours=1), reason=f"Anti-spam: scam pattern '{hit or 'mass-ping+link'}'")
+    except Exception:
+        pass
+    ch_id = _antispam_mod_channel_id(cfg)
+    if ch_id:
+        try:
+            ch = client.get_channel(int(ch_id)) or await client.fetch_channel(int(ch_id))
+            if ch:
+                embed = discord.Embed(
+                    title="🛡️ Scam message auto-removed",
+                    description=(
+                        f"{member.mention} (`{member.name}`) in {message.channel.mention}\n"
+                        f"🚩 Trigger: `{hit or 'mass-ping + link'}`\n"
+                        f"⏳ Timed out 1h · message deleted\n\n"
+                        f"_Review and ban if confirmed._"
+                    ),
+                    color=0xff3b5c,
+                )
+                await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+    return True
 
 
 
@@ -13485,10 +13731,16 @@ async def handle_member_join(member: discord.Member):
 async def on_member_join(member: discord.Member):
     """Triggered when a new member joins the server."""
     # Attribute the invite FIRST (before the welcome flow, which could error)
+    invite_code = None
     try:
-        await attribute_join(member)
+        invite_code = await attribute_join(member)
     except Exception as e:
         log.warning("invite attribution failed: %s", e)
+    # Anti-spam: risk-score + raid detection (T1 + T4) — alerts only, no auto-ban
+    try:
+        await antispam_on_join(member, invite_code=invite_code)
+    except Exception as e:
+        log.warning("antispam_on_join failed: %s", e)
     try:
         await handle_member_join(member)
     except Exception as e:
@@ -18699,6 +18951,13 @@ async def on_message(message: discord.Message):
     # then record that a human is now the most recent speaker.
     _bot_spoke_last = last_speaker_was_bot.get(channel_id, False)
     last_speaker_was_bot[channel_id] = False
+
+    # ── Anti-spam T2: scam-link auto-defense (new members only) ──
+    try:
+        if message.guild and await antispam_check_message(message, cfg):
+            return  # message was a scam — deleted + user timed out, stop processing
+    except Exception as e:
+        log.warning("antispam_check_message failed: %s", e)
 
     # ── Auto-react: react to anyone replying to a target user (all channels) ──
     try:
