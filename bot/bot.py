@@ -516,6 +516,201 @@ def supporter_wallet_color(user_id: int) -> int | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 📨 INVITE TRACKING
+# Discord gives no direct "joined via invite X" event, so we use use-count
+# diffing: cache every invite's use count, and when someone joins, re-fetch
+# and see which invite incremented. Safeguards for every known failure mode:
+#  • cache rebuilt on_ready (survives restarts; attribution log persisted to disk)
+#  • ambiguous joins (2+ invites up) attributed to "unknown" not guessed
+#  • vanity URL checked separately
+#  • missing-permission / pre-ready joins handled gracefully
+#  • unique members counted (rejoin via different invite doesn't double-count)
+# ─────────────────────────────────────────────────────────────────────────────
+INVITES_FILE = MEMORY_DIR / "invites.json"
+
+# Live in-memory snapshot {code: uses}. Rebuilt from Discord on startup.
+_invite_cache: dict[str, int] = {}
+_invite_cache_ready = False
+_invite_vanity_uses = 0
+
+
+def _load_invites() -> dict:
+    if INVITES_FILE.exists():
+        try:
+            with open(INVITES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # inviters: { inviter_id: { "members": {joined_user_id: {"ts":..,"code":..}} } }
+    return {"inviters": {}, "unattributed": 0}
+
+
+def _save_invites(data: dict):
+    try:
+        with open(INVITES_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save invites failed: %s", e)
+
+
+async def rebuild_invite_cache(guild):
+    """Snapshot current invite use-counts. Called on_ready and after each join."""
+    global _invite_cache, _invite_cache_ready, _invite_vanity_uses
+    try:
+        invites = await guild.invites()
+        _invite_cache = {inv.code: (inv.uses or 0) for inv in invites}
+        # Vanity URL (if the guild has one)
+        try:
+            vanity = await guild.vanity_invite()
+            if vanity:
+                _invite_vanity_uses = vanity.uses or 0
+        except Exception:
+            _invite_vanity_uses = 0
+        _invite_cache_ready = True
+        log.info("Invite cache built: %d invites tracked", len(_invite_cache))
+    except discord.Forbidden:
+        _invite_cache_ready = False
+        log.warning("Invite tracking DISABLED — bot lacks 'Manage Server' permission to read invites.")
+    except Exception as e:
+        _invite_cache_ready = False
+        log.warning("Invite cache rebuild failed: %s", e)
+
+
+async def attribute_join(member) -> None:
+    """Diff invite use-counts to find who invited this member. Updates the log."""
+    global _invite_cache, _invite_vanity_uses
+    guild = member.guild
+    data = _load_invites()
+
+    # If cache wasn't ready (e.g. join right after restart, or missing perms),
+    # we can't attribute reliably — count as unattributed and resync.
+    if not _invite_cache_ready:
+        data["unattributed"] = data.get("unattributed", 0) + 1
+        _save_invites(data)
+        await rebuild_invite_cache(guild)
+        return
+
+    try:
+        current = await guild.invites()
+    except Exception as e:
+        log.warning("attribute_join: couldn't fetch invites: %s", e)
+        data["unattributed"] = data.get("unattributed", 0) + 1
+        _save_invites(data)
+        return
+
+    # Find which invite(s) incremented vs the cache
+    incremented = []
+    for inv in current:
+        old = _invite_cache.get(inv.code)
+        if old is not None and (inv.uses or 0) > old:
+            incremented.append(inv)
+        elif old is None and (inv.uses or 0) > 0:
+            # Brand-new invite already used (created + used between snapshots)
+            incremented.append(inv)
+
+    # Check vanity as a fallback signal
+    vanity_jumped = False
+    try:
+        vanity = await guild.vanity_invite()
+        if vanity and (vanity.uses or 0) > _invite_vanity_uses:
+            vanity_jumped = True
+            _invite_vanity_uses = vanity.uses or 0
+    except Exception:
+        pass
+
+    inviter_id = None
+    if len(incremented) == 1:
+        inv = incremented[0]
+        inviter_id = str(inv.inviter.id) if inv.inviter else None
+    elif len(incremented) == 0 and vanity_jumped:
+        inviter_id = None  # joined via vanity URL — no single inviter
+    # else: 0 increments (deleted/expired invite) OR 2+ (ambiguous) → unknown
+
+    # Always refresh the cache to current truth
+    _invite_cache = {inv.code: (inv.uses or 0) for inv in current}
+
+    if not inviter_id:
+        data["unattributed"] = data.get("unattributed", 0) + 1
+        _save_invites(data)
+        return
+
+    # Record — UNIQUE members only (rejoin via different invite won't double-count)
+    inviters = data.setdefault("inviters", {})
+    rec = inviters.setdefault(inviter_id, {"members": {}})
+    members = rec.setdefault("members", {})
+    if str(member.id) not in members:
+        members[str(member.id)] = {"ts": int(time.time()), "code": incremented[0].code if incremented else "vanity"}
+    _save_invites(data)
+
+
+def _invite_counts(inviter_id: str, data: dict):
+    """Return (total_unique, last_7_day) counts for an inviter."""
+    rec = data.get("inviters", {}).get(inviter_id, {})
+    members = rec.get("members", {})
+    total = len(members)
+    cutoff = time.time() - 7 * 86400
+    last7 = sum(1 for m in members.values() if m.get("ts", 0) >= cutoff)
+    return total, last7
+
+
+async def _send_invites_leaderboard(message):
+    """Prefix-only: _invites — invite leaderboard (7-day + total)."""
+    data = _load_invites()
+    inviters = data.get("inviters", {})
+    if not inviters:
+        await message.channel.send(
+            "📨 No invites tracked yet. Tracking only counts joins **after** the bot came online — "
+            "it can't see how existing members joined."
+        )
+        return
+
+    guild = message.guild
+    rows = []
+    for inviter_id in inviters:
+        total, last7 = _invite_counts(inviter_id, data)
+        if total <= 0:
+            continue
+        rows.append((inviter_id, total, last7))
+    # Sort by 7-day, then total
+    rows.sort(key=lambda r: (r[2], r[1]), reverse=True)
+    rows = rows[:15]
+
+    def _name(uid):
+        try:
+            m = guild.get_member(int(uid)) if guild else None
+            raw = m.display_name if m else f"User {uid}"
+        except Exception:
+            raw = f"User {uid}"
+        return _sanitize_name(raw)
+
+    rank_marks = ["\u001b[1;33m①\u001b[0m", "\u001b[0;37m②\u001b[0m", "\u001b[1;31m③\u001b[0m"]
+    lines = []
+    for i, (uid, total, last7) in enumerate(rows):
+        mark = rank_marks[i] if i < 3 else f"\u001b[0;30m{i+1:>2}\u001b[0m"
+        name = _name(uid)[:14]
+        lines.append(
+            f"{mark} \u001b[1;36m{name:<14}\u001b[0m \u001b[1;32m{last7:>3}\u001b[0m \u001b[0;37m7d\u001b[0m  \u001b[1;37m{total:>4}\u001b[0m \u001b[0;37mtot\u001b[0m"
+        )
+
+    body = (
+        "```ansi\n"
+        "\u001b[1;35m▓▒░ TOP INVITERS ░▒▓\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        + "\n".join(lines) +
+        "\n```"
+    )
+    embed = discord.Embed(description=body, color=0xFF2BD6)
+    unattributed = data.get("unattributed", 0)
+    foot = "Unique members invited · 7d = last 7 days · tot = all-time"
+    if unattributed:
+        foot += f" · {unattributed} unattributed"
+    embed.set_footer(text=foot)
+    await message.channel.send(embed=embed)
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 📊 STATS TRACKING (for web dashboard)
 # Logs command uses, economy events, game outcomes, feature usage, activity feed.
 # All persisted to MEMORY_DIR/stats.json.
@@ -13289,10 +13484,33 @@ async def handle_member_join(member: discord.Member):
 @client.event
 async def on_member_join(member: discord.Member):
     """Triggered when a new member joins the server."""
+    # Attribute the invite FIRST (before the welcome flow, which could error)
+    try:
+        await attribute_join(member)
+    except Exception as e:
+        log.warning("invite attribution failed: %s", e)
     try:
         await handle_member_join(member)
     except Exception as e:
         log.warning("on_member_join failed: %s", e)
+
+
+@client.event
+async def on_invite_create(invite: discord.Invite):
+    """Keep the invite cache in sync when a new invite is created."""
+    try:
+        _invite_cache[invite.code] = invite.uses or 0
+    except Exception:
+        pass
+
+
+@client.event
+async def on_invite_delete(invite: discord.Invite):
+    """Keep the invite cache in sync when an invite is deleted."""
+    try:
+        _invite_cache.pop(invite.code, None)
+    except Exception:
+        pass
 
 
 @client.event
@@ -17157,6 +17375,9 @@ async def on_ready():
     client.loop.create_task(nightlife_events_scheduler())
     client.loop.create_task(market_expire_scheduler())
     client.loop.create_task(stocks_scheduler())
+    # Build invite cache for every guild so join attribution works
+    for guild in client.guilds:
+        await rebuild_invite_cache(guild)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18079,6 +18300,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("employees", "staff", "workers"):
         await _send_employees_view(message)
+        return True
+    if cmd_name in ("invites", "invitelb", "topinviters"):
+        await _send_invites_leaderboard(message)
         return True
     if cmd_name in ("credits", "supporters"):
         await _send_credits_embed(message)
