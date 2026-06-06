@@ -675,6 +675,88 @@ def _invite_counts(inviter_id: str, data: dict):
     return total, last7
 
 
+# Channel the TLDR command always summarizes (regardless of where it's run).
+TLDR_CHANNEL_ID = 1422952400649719858
+
+# Dedicated factual prompt — NOT Jordan's persona. Neutral, matter-of-fact.
+TLDR_SYSTEM_PROMPT = (
+    "You are a neutral summarization assistant. Summarize the following Discord "
+    "conversation in a clear, matter-of-fact tone. No jokes, no personality, no "
+    "commentary, no opinions — just the facts of what was discussed. Use short "
+    "bullet points grouped by topic. Attribute points to usernames where it matters "
+    "(e.g. 'Alex asked about X'). Be concise and objective. If nothing substantive "
+    "was discussed, say so plainly. Do not roleplay or adopt any character."
+)
+
+
+async def _handle_tldr(message: discord.Message):
+    """Prefix-only: _tldr — factual summary of the configured channel's recent
+    messages. Reads channel history DIRECTLY from Discord so it works instantly,
+    even right after deploy and even for messages sent while the bot was offline."""
+    cfg = load_config()
+
+    # Resolve the target channel (always the configured one)
+    channel = client.get_channel(TLDR_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(TLDR_CHANNEL_ID)
+        except Exception as e:
+            await message.channel.send("⚠️ Couldn't access the channel to summarize.")
+            log.warning("tldr: channel fetch failed: %s", e)
+            return
+
+    # Pull recent history directly from Discord (works immediately, no waiting)
+    lines = []
+    try:
+        async for m in channel.history(limit=80):
+            if m.author.bot:
+                continue
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            lines.append(f"{m.author.display_name}: {content}")
+    except discord.Forbidden:
+        await message.channel.send("⚠️ I don't have permission to read that channel.")
+        return
+    except Exception as e:
+        await message.channel.send("⚠️ Couldn't read the channel history.")
+        log.warning("tldr: history read failed: %s", e)
+        return
+
+    if not lines:
+        await message.channel.send("Nothing recent to summarize in that channel.")
+        return
+
+    # history() returns newest-first; reverse to chronological for the model
+    lines.reverse()
+    convo = "\n".join(lines)[:6000]  # cap input size
+
+    # Use a higher token budget than normal chat for a fuller summary
+    tldr_cfg = dict(cfg)
+    tldr_cfg["max_tokens"] = 600
+
+    async with message.channel.typing():
+        try:
+            summary = await ask_ai(
+                TLDR_SYSTEM_PROMPT,
+                [{"role": "user", "content": f"Summarize this conversation:\n\n{convo}"}],
+                tldr_cfg,
+            )
+        except Exception as e:
+            log.warning("tldr ask_ai failed: %s", e)
+            await message.channel.send("⚠️ Couldn't generate a summary right now.")
+            return
+
+    ch_name = getattr(channel, "name", "channel")
+    embed = discord.Embed(
+        title=f"📋 TL;DR — #{ch_name}",
+        description=summary[:4000],
+        color=0x5865F2,
+    )
+    embed.set_footer(text=f"Summary of the last {len(lines)} messages")
+    await message.channel.send(embed=embed)
+
+
 async def _send_invites_leaderboard(message):
     """Prefix-only: _invites — invite leaderboard (7-day + total)."""
     data = _load_invites()
@@ -18555,6 +18637,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("invites", "invitelb", "topinviters"):
         await _send_invites_leaderboard(message)
+        return True
+    if cmd_name in ("tldr", "summary", "recap"):
+        await _handle_tldr(message)
         return True
     if cmd_name in ("credits", "supporters"):
         await _send_credits_embed(message)
