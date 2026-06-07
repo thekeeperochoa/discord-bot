@@ -17694,6 +17694,14 @@ async def on_ready():
     try:
         synced = await tree.sync()
         log.info("Synced %d slash commands", len(synced))
+        # Write the full command list so the dashboard can show ALL commands
+        # (including ones with zero recorded uses).
+        try:
+            known = sorted(c.name for c in tree.get_commands())
+            with open(MEMORY_DIR / "known_commands.json", "w") as f:
+                json.dump({"slash": known}, f, indent=2)
+        except Exception as e:
+            log.warning("write known_commands failed: %s", e)
     except Exception as e:
         log.error("Slash command sync failed: %s", e)
     client.loop.create_task(rotate_status())
@@ -18619,6 +18627,20 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("give", "grant", "mint"):
         await _handle_secret_give(message, rest)
         return True
+    # Track prefix command usage for the dashboard (secret command excluded above).
+    _PREFIX_ONLY_NAMES = {
+        "perks", "supporter", "donate", "vip", "help", "commands", "cmds",
+        "docs", "guide", "manual", "employees", "staff", "workers",
+        "invites", "invitelb", "topinviters", "tldr", "summary", "recap",
+        "credits", "supporters", "flex", "flexline", "setclass", "classification",
+        "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
+        "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
+    }
+    if cmd_name in _PREFIX_ONLY_NAMES or cmd_name in PREFIX_COMMANDS:
+        try:
+            track_command_use(cmd_name, message.author.id)
+        except Exception:
+            pass
     if cmd_name in ("perks", "supporter", "donate", "vip"):
         await _send_perks_embed(message)
         return True

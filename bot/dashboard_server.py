@@ -156,8 +156,13 @@ def api_stats():
     stats = _load_json(STATS_FILE, {})
     economy = _load_json(ECONOMY_FILE, {})
 
-    cmd_uses = stats.get("command_uses", {})
-    top_commands = sorted(cmd_uses.items(), key=lambda x: x[1], reverse=True)[:15]
+    cmd_uses = dict(stats.get("command_uses", {}))
+    # Merge in ALL known commands so even never-used ones appear (count 0).
+    known = _load_json(MEMORY_DIR / "known_commands.json", {})
+    for name in known.get("slash", []):
+        cmd_uses.setdefault(name, 0)
+    # Sort by usage desc, then name — show EVERY command, not just top 15.
+    top_commands = sorted(cmd_uses.items(), key=lambda x: (-x[1], x[0]))
 
     days = _last_n_days(14)
     top5_cmds = [c for c, _ in top_commands[:5]]
@@ -215,7 +220,7 @@ def api_stats():
     return jsonify({
         "summary": {
             "total_commands_ever": sum(cmd_uses.values()),
-            "unique_commands": len(cmd_uses),
+            "unique_commands": sum(1 for v in cmd_uses.values() if v > 0),
             "active_users_today": len(active_today),
             "new_users_today": len(new_today),
             "total_users": user_count,
@@ -340,6 +345,11 @@ td { padding: 10px 4px; border-bottom: 1px solid var(--border); }
       <div class="card"><h2>🔥 Top 15 Commands (All Time)</h2><canvas id="commands-top"></canvas></div>
       <div class="card"><h2>📊 Top 5 Commands — Last 14 Days</h2><canvas id="commands-trend"></canvas></div>
     </div>
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>📋 All Commands — Full Usage</h2>
+      <input id="cmd-search" placeholder="Filter commands…" style="width:100%;padding:8px;margin-bottom:10px;background:#1a1a2e;border:1px solid #333;border-radius:6px;color:#eee;">
+      <div id="all-commands-table"></div>
+    </div>
   </div>
   <div id="tab-economy" class="tab-content">
     <div class="grid">
@@ -439,10 +449,11 @@ function renderOverview(d) {
   });
 }
 function renderCommands(d) {
+  const top15 = d.top_commands.slice(0, 15);
   destroyChart('commands-top');
   charts['commands-top'] = new Chart(document.getElementById('commands-top'), {
     type: 'bar',
-    data: { labels: d.top_commands.map(c => c.name), datasets: [{ label: 'Uses', data: d.top_commands.map(c => c.count), backgroundColor: palette[0] }] },
+    data: { labels: top15.map(c => c.name), datasets: [{ label: 'Uses', data: top15.map(c => c.count), backgroundColor: palette[0] }] },
     options: { ...chartOpts(), indexAxis: 'y' },
   });
   destroyChart('commands-trend');
@@ -453,6 +464,22 @@ function renderCommands(d) {
     }))},
     options: chartOpts(),
   });
+  // Full commands table — EVERY command, with usage counts
+  window._allCommands = d.top_commands;
+  renderCommandsTable('');
+  const search = document.getElementById('cmd-search');
+  if (search && !search._wired) {
+    search._wired = true;
+    search.addEventListener('input', e => renderCommandsTable(e.target.value));
+  }
+}
+function renderCommandsTable(filter) {
+  const cmds = (window._allCommands || []).filter(c => c.name.toLowerCase().includes((filter||'').toLowerCase()));
+  const total = cmds.reduce((a, c) => a + c.count, 0);
+  const rows = cmds.map((c, i) => `<tr><td>${i+1}</td><td>${c.name}</td><td class="right">${c.count.toLocaleString()}</td></tr>`).join('');
+  document.getElementById('all-commands-table').innerHTML =
+    `<p style="color:var(--muted);margin-bottom:8px;">${cmds.length} commands shown • ${total.toLocaleString()} total uses</p>`
+    + `<table><thead><tr><th>#</th><th>Command</th><th class="right">Total Uses</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 function renderEconomy(d) {
   destroyChart('economy-flow');
