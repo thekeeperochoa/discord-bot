@@ -11400,6 +11400,85 @@ BUST_FINE_PCT = 0.2       # lose 20% of balance when caught
 HEAT_DECAY_PER_HOUR = 5   # heat drops by 5 per hour of inactivity
 HEAT_MAX = 100            # at 100 heat, cops auto-bust next sell
 
+# ── Reinvestment upgrades (money sinks + progression) ──
+# Each upgrade has levels; cost scales; effect improves. Cosmetic-safe, all in-game.
+DEALER_UPGRADES = {
+    "stash": {
+        "emoji": "📦", "name": "Stash House",
+        "desc": "+50g max capacity per level",
+        "max_level": 5,
+        "base_cost": 5000,
+        "per_level": "+50g stash cap",
+    },
+    "lookout": {
+        "emoji": "👀", "name": "Lookouts",
+        "desc": "-8% bust chance per level",
+        "max_level": 5,
+        "base_cost": 8000,
+        "per_level": "-8% bust risk",
+    },
+    "burner": {
+        "emoji": "📱", "name": "Burner Phones",
+        "desc": "-15% sell cooldown per level",
+        "max_level": 4,
+        "base_cost": 6000,
+        "per_level": "faster deals",
+    },
+    "connect": {
+        "emoji": "🤝", "name": "Supplier Connect",
+        "desc": "-5% wholesale price per level",
+        "max_level": 4,
+        "base_cost": 10000,
+        "per_level": "cheaper supply",
+    },
+}
+
+# ── Jail ──
+JAIL_BASE_MINUTES = 30          # base sentence on bust
+JAIL_BAIL_COST_PER_MIN = 200    # coins per minute to bail out early
+
+# ── Random events (fire occasionally on sell) ──
+DEALER_EVENT_CHANCE = 0.18      # chance an event fires on a sell
+
+
+def _upgrade_cost(upgrade_key: str, current_level: int) -> int:
+    """Cost to buy the NEXT level of an upgrade (scales with level)."""
+    info = DEALER_UPGRADES.get(upgrade_key, {})
+    base = info.get("base_cost", 5000)
+    return int(base * (current_level + 1) * 1.4)
+
+
+def _dealer_upgrade_level(record: dict, key: str) -> int:
+    return record.get("upgrades", {}).get(key, 0)
+
+
+def _dealer_stash_max(record: dict, base_max: int) -> int:
+    """Effective stash cap including Stash House upgrades."""
+    return base_max + 50 * _dealer_upgrade_level(record, "stash")
+
+
+def _dealer_bust_modifier(record: dict) -> float:
+    """Multiplier on bust chance from Lookouts (lower = safer)."""
+    return max(0.2, 1.0 - 0.08 * _dealer_upgrade_level(record, "lookout"))
+
+
+def _dealer_sell_cooldown(record: dict) -> int:
+    """Effective sell cooldown in seconds, reduced by Burner Phones."""
+    mult = max(0.4, 1.0 - 0.15 * _dealer_upgrade_level(record, "burner"))
+    return int(SELL_COOLDOWN_MIN * 60 * mult)
+
+
+def _dealer_supply_discount(record: dict) -> float:
+    """Wholesale price multiplier from Supplier Connect (lower = cheaper)."""
+    return max(0.7, 1.0 - 0.05 * _dealer_upgrade_level(record, "connect"))
+
+
+def _dealer_in_jail(record: dict) -> int:
+    """Return seconds remaining in jail, or 0 if free."""
+    until = record.get("jail_until", 0)
+    rem = int(until - time.time())
+    return max(0, rem)
+
 
 def _load_dealer() -> dict:
     if DEALER_FILE.exists():
@@ -11448,6 +11527,9 @@ def _get_dealer_record(user_id: int) -> dict:
             "lifetime_sold": 0,
             "lifetime_profit": 0,
             "times_busted": 0,
+            "upgrades": {},        # upgrade_key -> level
+            "jail_until": 0,       # timestamp; >now = in jail
+            "dirty_money": 0,      # un-laundered profit (for laundering, later)
         }
         _save_dealer(data)
     return data["users"][uid]
@@ -11491,8 +11573,19 @@ async def buysupply_command(
     record = data["users"].setdefault(uid, {
         "stash": {}, "heat": 0, "last_supply": 0, "last_sell": 0,
         "last_heat_decay": time.time(), "lifetime_sold": 0,
-        "lifetime_profit": 0, "times_busted": 0,
+        "lifetime_profit": 0, "times_busted": 0, "upgrades": {},
+        "jail_until": 0, "dirty_money": 0,
     })
+
+    # Jail gate
+    jail_rem = _dealer_in_jail(record)
+    if jail_rem > 0:
+        await interaction.response.send_message(
+            f"🚔 You're locked up — out <t:{int(record['jail_until'])}:R>. "
+            f"Post bail with `/bail` first.",
+            ephemeral=True,
+        )
+        return
 
     # Cooldown
     cd_remaining = SUPPLY_COOLDOWN_MIN * 60 - (time.time() - record.get("last_supply", 0))
@@ -11503,19 +11596,21 @@ async def buysupply_command(
         )
         return
 
-    # Stash limit check
+    # Stash limit check (upgraded capacity)
+    stash_max = _dealer_stash_max(record, info["stash_max"])
     current_grams = record["stash"].get(sub_key, 0)
-    if current_grams + grams > info["stash_max"]:
-        room = info["stash_max"] - current_grams
+    if current_grams + grams > stash_max:
+        room = stash_max - current_grams
         await interaction.response.send_message(
             f"❌ Stash too full. You can hold **{room}g** more {info['name']} "
-            f"(max {info['stash_max']}g). Sell or get caught with less.",
+            f"(max {stash_max}g). Sell, or upgrade your Stash House in `/dealerupgrades`.",
             ephemeral=True,
         )
         return
 
     prices = _get_market_prices()
-    buy_price = prices[sub_key]["buy"]
+    # Supplier Connect discount on wholesale
+    buy_price = int(prices[sub_key]["buy"] * _dealer_supply_discount(record))
     total_cost = buy_price * grams
 
     if economy.balance(user.id) < total_cost:
@@ -11534,7 +11629,7 @@ async def buysupply_command(
         f"# {info['emoji']} SUPPLY ACQUIRED\n\n"
         f"You bought **{grams}g of {info['name']}** for **{total_cost:,}** coins "
         f"(**{buy_price}/g** today).\n\n"
-        f"📦 Stash: **{current_grams + grams}g / {info['stash_max']}g**\n"
+        f"📦 Stash: **{current_grams + grams}g / {stash_max}g**\n"
         f"💰 Balance: **{economy.balance(user.id):,}**\n\n"
         f"_Use `/sell` to move product. Watch your heat._"
     )
@@ -11574,8 +11669,19 @@ async def sell_command(
     record = data["users"][uid]
     _decay_heat(record)
 
-    # Cooldown
-    cd_remaining = SELL_COOLDOWN_MIN * 60 - (time.time() - record.get("last_sell", 0))
+    # Jail gate
+    jail_rem = _dealer_in_jail(record)
+    if jail_rem > 0:
+        await interaction.response.send_message(
+            f"🚔 You're locked up — out <t:{int(record['jail_until'])}:R>. "
+            f"Post bail with `/bail` to get back on the block.",
+            ephemeral=True,
+        )
+        return
+
+    # Cooldown (reduced by Burner Phone upgrades)
+    sell_cd = _dealer_sell_cooldown(record)
+    cd_remaining = sell_cd - (time.time() - record.get("last_sell", 0))
     if cd_remaining > 0:
         await interaction.response.send_message(
             f"⏰ Customers haven't lined up yet. Try again in **{fmt_cooldown(int(cd_remaining))}**.",
@@ -11596,8 +11702,8 @@ async def sell_command(
         await _bust_player(interaction, record, data, forced=True)
         return
 
-    # Roll for cops based on heat + substance heat
-    cop_chance = info["heat"] + (record["heat"] / 5)  # heat scales risk
+    # Roll for cops based on heat + substance heat (reduced by Lookout upgrades)
+    cop_chance = (info["heat"] + (record["heat"] / 5)) * _dealer_bust_modifier(record)
     if random.random() * 100 < cop_chance:
         await _bust_player(interaction, record, data, forced=False)
         return
@@ -11615,8 +11721,11 @@ async def sell_command(
     record["heat"] = min(HEAT_MAX, record["heat"] + heat_gain)
     record["lifetime_sold"] = record.get("lifetime_sold", 0) + grams
     record["lifetime_profit"] = record.get("lifetime_profit", 0) + total
-    _save_dealer(data)
     new_bal = economy.add(user.id, total, f"sold {sub_key}")
+    # Roll a random event (may mutate record + balance)
+    event_text = _roll_dealer_event(record, user.id) or ""
+    _save_dealer(data)
+    new_bal = economy.balance(user.id)
     track_economy_event("earned", total)
     track_feature_use("dealer")
     track_activity("dealer_sale", user.id, user.display_name, f"sold {grams}g of {info['name']} for {total:,}")
@@ -11633,24 +11742,31 @@ async def sell_command(
         "a tweaker on a bike", "an Uber driver on break", "a sad-looking lawyer",
         "a hot girl at the bar", "a guy who said 'my buddy sent me'",
     ]
+    stash_max_disp = _dealer_stash_max(record, info["stash_max"])
     await interaction.response.send_message(
         f"# 💰 DEAL DONE\n\n"
         f"Sold **{grams}g of {info['emoji']} {info['name']}** to {random.choice(npcs)} "
         f"for **{total:,}** coins (**{sell_price}/g**).\n\n"
-        f"📦 Stash: **{current_grams - grams}g / {info['stash_max']}g**\n"
+        f"📦 Stash: **{current_grams - grams}g / {stash_max_disp}g**\n"
         f"🔥 Heat: **{record['heat']}/100** _(+{heat_gain})_\n"
         f"💰 Balance: **{new_bal:,}**"
+        f"{event_text}"
     )
 
 
 async def _bust_player(interaction, record, data, forced=False):
-    """Cops catch the player. Lose all stash + a fine."""
+    """Cops catch the player. Lose all stash + a fine + jail time."""
     user = interaction.user
     stash_grams = sum(record["stash"].values())
     record["stash"] = {}
     record["heat"] = 0
     record["times_busted"] = record.get("times_busted", 0) + 1
     record["last_sell"] = time.time()
+
+    # Jail sentence scales slightly with repeat offenses
+    busts = record.get("times_busted", 1)
+    sentence_min = JAIL_BASE_MINUTES + min(60, (busts - 1) * 5)
+    record["jail_until"] = time.time() + sentence_min * 60
 
     bal = economy.balance(user.id)
     fine = int(bal * BUST_FINE_PCT)
@@ -11666,14 +11782,191 @@ async def _bust_player(interaction, record, data, forced=False):
         "Surveillance had been tailing you all week.",
         "Your customer was wearing a wire. Damn.",
     ]
+    bail_cost = sentence_min * JAIL_BAIL_COST_PER_MIN
     await interaction.response.send_message(
         f"# {title}\n\n"
         f"{random.choice(flavor)}\n\n"
         f"💸 **Lost {stash_grams}g** of product (entire stash).\n"
         f"⚖️ **Fine:** {fine:,} coins ({int(BUST_FINE_PCT*100)}% of balance)\n"
-        f"🔥 Heat reset to **0** — lay low for a while.\n\n"
+        f"🚔 **Jail:** {sentence_min} min — can't deal until <t:{int(record['jail_until'])}:R>\n"
+        f"💵 Post bail early with `/bail` (~{bail_cost:,} coins)\n\n"
         f"_Balance: **{economy.balance(user.id):,}**_"
     )
+
+
+# ── Random events on sell (tension) ──
+DEALER_EVENTS = [
+    # (id, weight, type, flavor, effect_fn-key)
+    {"id": "robbed", "weight": 3, "title": "🔫 ROBBED",
+     "text": "Some masked goons jumped you mid-deal and grabbed product."},
+    {"id": "drought", "weight": 2, "title": "📉 DROUGHT",
+     "text": "Supply dried up across the city — prices are spiking. Good time to be holding."},
+    {"id": "loyal", "weight": 4, "title": "🤝 LOYAL CUSTOMER",
+     "text": "A regular tipped you extra and brought a friend."},
+    {"id": "tip", "weight": 3, "title": "👀 STREET TIP",
+     "text": "A lookout warned you cops are sweeping the area — you laid low and dropped some heat."},
+    {"id": "snitch", "weight": 2, "title": "🐀 SNITCH NEARBY",
+     "text": "Word is someone's talking to the cops. Your heat just jumped."},
+    {"id": "windfall", "weight": 2, "title": "💰 WINDFALL",
+     "text": "A whale customer paid way over asking for the whole batch."},
+]
+
+
+def _roll_dealer_event(record: dict, user_id: int) -> str | None:
+    """Maybe fire a random event after a sale. Mutates record. Returns flavor text or None."""
+    if random.random() > DEALER_EVENT_CHANCE:
+        return None
+    ev = random.choices(DEALER_EVENTS, weights=[e["weight"] for e in DEALER_EVENTS])[0]
+    eid = ev["id"]
+    note = ""
+    if eid == "robbed":
+        stash = record.get("stash", {})
+        if stash:
+            sub = random.choice(list(stash.keys()))
+            lost = max(1, int(stash[sub] * random.uniform(0.2, 0.5)))
+            stash[sub] = max(0, stash[sub] - lost)
+            note = f" Lost ~{lost}g."
+        else:
+            note = " Lucky — you had nothing on you."
+    elif eid == "loyal":
+        bonus = random.randint(200, 1500)
+        economy.add(user_id, bonus, "dealer event: loyal")
+        note = f" +{bonus:,} coins."
+    elif eid == "tip":
+        record["heat"] = max(0, record.get("heat", 0) - random.randint(10, 25))
+        note = " Heat dropped."
+    elif eid == "snitch":
+        record["heat"] = min(HEAT_MAX, record.get("heat", 0) + random.randint(10, 20))
+        note = " Heat rose."
+    elif eid == "windfall":
+        bonus = random.randint(1000, 4000)
+        economy.add(user_id, bonus, "dealer event: windfall")
+        note = f" +{bonus:,} coins."
+    elif eid == "drought":
+        note = " (Prices citywide are up today.)"
+    return f"\n\n**{ev['title']}** — {ev['text']}{note}"
+
+
+async def _handle_bail(message: discord.Message):
+    """Prefix-only: _bail — pay to get out of dealer jail early."""
+    uid = message.author.id
+    data = _load_dealer()
+    record = data["users"].get(str(uid))
+    if not record:
+        await message.channel.send("You're not in the game. Nothing to bail out of.")
+        return
+    rem = _dealer_in_jail(record)
+    if rem <= 0:
+        await message.channel.send("You're not in jail. Back to business.")
+        return
+    rem_min = max(1, rem // 60)
+    cost = rem_min * JAIL_BAIL_COST_PER_MIN
+    if economy.balance(uid) < cost:
+        await message.channel.send(
+            f"🚔 Bail is **{cost:,}** coins for the remaining ~{rem_min} min. "
+            f"You've got **{economy.balance(uid):,}**. Sit tight or scrape it together."
+        )
+        return
+    economy.add(uid, -cost, "dealer bail")
+    record["jail_until"] = 0
+    _save_dealer(data)
+    await message.channel.send(
+        f"💵 Bail posted — **{cost:,}** coins. You're free. "
+        f"Watch your heat this time. Balance: **{economy.balance(uid):,}**"
+    )
+
+
+class DealerUpgradeView(discord.ui.View):
+    """Buttons to buy each dealer upgrade's next level."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self._build_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("That's not your operation.", ephemeral=True)
+            return False
+        return True
+
+    def _build_buttons(self):
+        data = _load_dealer()
+        record = data["users"].get(str(self.user_id), {})
+        for key, info in DEALER_UPGRADES.items():
+            lvl = _dealer_upgrade_level(record, key)
+            maxed = lvl >= info["max_level"]
+            cost = _upgrade_cost(key, lvl)
+            label = f"{info['name']} " + ("MAX" if maxed else f"Lv{lvl}→{lvl+1} ({cost:,})")
+            btn = discord.ui.Button(
+                label=label[:80], emoji=info["emoji"],
+                style=discord.ButtonStyle.secondary if maxed else discord.ButtonStyle.success,
+                disabled=maxed, custom_id=f"dupg_{key}",
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+    def _make_cb(self, key):
+        async def cb(interaction: discord.Interaction):
+            data = _load_dealer()
+            record = data["users"].setdefault(str(self.user_id), {
+                "stash": {}, "heat": 0, "last_supply": 0, "last_sell": 0,
+                "last_heat_decay": time.time(), "lifetime_sold": 0,
+                "lifetime_profit": 0, "times_busted": 0, "upgrades": {},
+                "jail_until": 0, "dirty_money": 0,
+            })
+            info = DEALER_UPGRADES[key]
+            lvl = _dealer_upgrade_level(record, key)
+            if lvl >= info["max_level"]:
+                await interaction.response.send_message("Already maxed.", ephemeral=True)
+                return
+            cost = _upgrade_cost(key, lvl)
+            if economy.balance(self.user_id) < cost:
+                await interaction.response.send_message(
+                    f"❌ Need **{cost:,}** coins. You have **{economy.balance(self.user_id):,}**.",
+                    ephemeral=True,
+                )
+                return
+            economy.add(self.user_id, -cost, f"dealer upgrade: {key}")
+            record.setdefault("upgrades", {})[key] = lvl + 1
+            _save_dealer(data)
+            # Rebuild the view + embed
+            new_view = DealerUpgradeView(self.user_id)
+            await interaction.response.edit_message(
+                embed=_build_dealer_upgrades_embed(self.user_id), view=new_view
+            )
+            await interaction.followup.send(
+                f"{info['emoji']} **{info['name']}** upgraded to **Lv{lvl+1}**!", ephemeral=True
+            )
+        return cb
+
+
+def _build_dealer_upgrades_embed(user_id: int) -> discord.Embed:
+    data = _load_dealer()
+    record = data["users"].get(str(user_id), {})
+    lines = []
+    for key, info in DEALER_UPGRADES.items():
+        lvl = _dealer_upgrade_level(record, key)
+        bar = "▰" * lvl + "▱" * (info["max_level"] - lvl)
+        nxt = "MAX" if lvl >= info["max_level"] else f"next: {_upgrade_cost(key, lvl):,}"
+        lines.append(
+            f"{info['emoji']} **{info['name']}** [{bar}] Lv{lvl}/{info['max_level']}\n"
+            f"   _{info['desc']}_ · {nxt}"
+        )
+    embed = discord.Embed(
+        title="🏗️ Dealer Upgrades",
+        description="Reinvest your profits. Buttons below buy the next level.\n\n" + "\n".join(lines),
+        color=0x00FFAA,
+    )
+    embed.set_footer(text=f"Balance: {economy.balance(user_id):,} coins")
+    return embed
+
+
+async def _send_dealer_upgrades(message: discord.Message):
+    """Prefix-only: _dealerupgrades — reinvest profits into upgrades."""
+    embed = _build_dealer_upgrades_embed(message.author.id)
+    view = DealerUpgradeView(message.author.id)
+    await message.channel.send(embed=embed, view=view)
+
 
 
 # ── /stash ───────────────────────────────────────────────────────────────────
@@ -11964,7 +12257,16 @@ def _build_dealer_overview_embed(user_id: int, display_name: str) -> discord.Emb
     )
     embed.add_field(name="⚡ OPERATIONS", value=ops_block, inline=False)
 
-    embed.set_footer(text="Buy low · Sell high · Watch the heat")
+    # Jail status warning
+    jail_rem = _dealer_in_jail(record)
+    if jail_rem > 0:
+        embed.add_field(
+            name="🚔 IN JAIL",
+            value=f"Out <t:{int(record['jail_until'])}:R> · post bail with `/bail`",
+            inline=False,
+        )
+
+    embed.set_footer(text="Upgrade your operation: _dealerupgrades · Watch the heat")
     return embed
 
 
@@ -18697,6 +18999,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("tldr", "summary", "recap"):
         await _handle_tldr(message)
+        return True
+    if cmd_name in ("bail", "postbail"):
+        await _handle_bail(message)
+        return True
+    if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
+        await _send_dealer_upgrades(message)
         return True
     if cmd_name in ("credits", "supporters"):
         await _send_credits_embed(message)
