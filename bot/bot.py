@@ -18028,18 +18028,53 @@ async def _send_flex_card(message: discord.Message):
     level = level_for_xp(xp)
     custom_line = _supporter_get(uid, "flex_line", "Runs the whole city.")
 
+    name = message.author.display_name.upper()[:24]
+    tagline = custom_line[:26]
+    bal_str = f"{bal:,}"
+
+    INNER = 30  # inner width between borders
+
+    def row(content="", pad_visual=0):
+        """One boxed row. content is the raw text (may contain ANSI); pad_visual
+        is the number of VISIBLE chars in content so we can pad correctly."""
+        gap = max(0, INNER - pad_visual)
+        return f"\u001b[1;33m║\u001b[0m{content}{' ' * gap}\u001b[1;33m║\u001b[0m\n"
+
+    top = "\u001b[1;33m╔" + "═" * INNER + "╗\u001b[0m\n"
+    mid = "\u001b[1;33m╠" + "═" * INNER + "╣\u001b[0m\n"
+    bot = "\u001b[1;33m╚" + "═" * INNER + "╝\u001b[0m\n"
+    blank = row("", 0)
+    divider = row("\u001b[0;30m  " + "─" * (INNER - 4) + "\u001b[0m", INNER - 2)
+
+    # Title — centered. "👑 KINGPIN FLEX 👑" = 18 visible cols (each 👑 ≈ 2).
+    title_text = "\u001b[1;35m👑 KINGPIN FLEX 👑\u001b[0m"
+    title_visual = 18
+    left_pad = max(0, (INNER - title_visual) // 2)
+    title_row = row(" " * left_pad + title_text, left_pad + title_visual)
+
+    # Content rows (label visual lengths counted manually)
+    name_row = row(f"  \u001b[1;37m{name}\u001b[0m", 2 + len(name))
+    tag_row = row(f"  \u001b[0;33m{tagline}\u001b[0m", 2 + len(tagline))
+    bal_row = row(f"  \u001b[0;36mBALANCE\u001b[0m  \u001b[1;33m{bal_str}\u001b[0m", 2 + 7 + 2 + len(bal_str))
+    lvl_row = row(f"  \u001b[0;36mLEVEL\u001b[0m    \u001b[1;37m{level}\u001b[0m", 2 + 5 + 4 + len(str(level)))
+
     card = (
         "```ansi\n"
-        "\u001b[1;33m╔══════════════════════════════╗\u001b[0m\n"
-        "\u001b[1;33m║\u001b[0m   \u001b[1;35m👑 KINGPIN FLEX 👑\u001b[0m         \u001b[1;33m║\u001b[0m\n"
-        "\u001b[1;33m╠══════════════════════════════╣\u001b[0m\n"
-        f"\u001b[1;37m {message.author.display_name.upper()[:24]}\u001b[0m\n"
-        f"\u001b[0;33m {custom_line[:28]}\u001b[0m\n"
-        "\u001b[0;30m ──────────────────────────\u001b[0m\n"
-        f"\u001b[0;36m BALANCE\u001b[0m \u001b[1;33m{bal:,}\u001b[0m\n"
-        f"\u001b[0;36m LEVEL  \u001b[0m \u001b[1;37m{level}\u001b[0m\n"
-        "\u001b[1;33m╚══════════════════════════════╝\u001b[0m\n"
-        "```"
+        + top
+        + blank
+        + title_row
+        + blank
+        + mid
+        + blank
+        + name_row
+        + tag_row
+        + divider
+        + blank
+        + bal_row
+        + lvl_row
+        + blank
+        + bot
+        + "```"
     )
     embed = discord.Embed(description=card, color=supporter_wallet_color(uid) or 0xF1C40F)
     embed.set_footer(text="Customize your tagline: _flexline <your text>")
