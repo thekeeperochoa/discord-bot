@@ -11480,6 +11480,88 @@ def _dealer_in_jail(record: dict) -> int:
     return max(0, rem)
 
 
+# ── Money laundering ──
+# Each dealer sale accrues "dirty money" (a bonus pool) on top of clean coins.
+# Dirty money can't be spent directly — you launder it through a business you own.
+# Laundering takes a wash fee; owning more/bigger businesses lets you wash more
+# per cycle. This connects the dealer game to the business system.
+DIRTY_MONEY_RATE = 0.35          # fraction of each sale that becomes dirty money
+LAUNDER_FEE_PCT = 0.15           # cut the "wash" takes (clean payout = 85%)
+LAUNDER_COOLDOWN_MIN = 60        # minutes between launder cycles
+LAUNDER_BASE_CAP = 5000          # base dirty money you can wash per cycle...
+LAUNDER_PER_BUSINESS = 4000      # ...plus this much per business owned
+
+
+def _launder_capacity(user_id: int) -> int:
+    """Max dirty money washable per cycle, based on businesses owned."""
+    try:
+        n_biz = len(_user_businesses(user_id))
+    except Exception:
+        n_biz = 0
+    return LAUNDER_BASE_CAP + LAUNDER_PER_BUSINESS * n_biz
+
+
+def _accrue_dirty_money(record: dict, sale_total: int) -> int:
+    """Add a portion of a sale to the dirty money pool. Returns amount added."""
+    dirty = int(sale_total * DIRTY_MONEY_RATE)
+    record["dirty_money"] = record.get("dirty_money", 0) + dirty
+    return dirty
+
+
+# ── Territory control ──
+# Corners are turf players can claim. Controlling one gives a % income bonus on
+# every sale. Unowned corners are claimed for a fee; owned corners must be taken
+# by a raid (dealer wars). Each corner has "defense" HP that deters raids and
+# regenerates over time / can be reinforced.
+TERRITORIES = {
+    "docks":      {"name": "The Docks",        "emoji": "⚓", "claim_cost": 15000, "income_bonus": 0.08},
+    "downtown":   {"name": "Downtown Strip",   "emoji": "🌆", "claim_cost": 25000, "income_bonus": 0.12},
+    "projects":   {"name": "The Projects",     "emoji": "🏚️", "claim_cost": 10000, "income_bonus": 0.06},
+    "uptown":     {"name": "Uptown",           "emoji": "🏙️", "claim_cost": 30000, "income_bonus": 0.15},
+    "westside":   {"name": "West Side",        "emoji": "🌴", "claim_cost": 18000, "income_bonus": 0.10},
+    "trainyard":  {"name": "The Trainyard",    "emoji": "🚂", "claim_cost": 12000, "income_bonus": 0.07},
+}
+TERRITORY_DEFENSE_MAX = 100
+TERRITORY_DEFENSE_REGEN_PER_HR = 4   # defense regenerates while held
+TERRITORY_REINFORCE_COST = 3000      # per reinforce action (+15 defense)
+TERRITORY_REINFORCE_AMOUNT = 15
+
+
+def _territory_store(data: dict) -> dict:
+    """Get (and init) the territory sub-store inside dealer data."""
+    return data.setdefault("territory", {})
+
+
+def _territory_get(data: dict, key: str) -> dict:
+    t = _territory_store(data)
+    if key not in t:
+        t[key] = {"controller": None, "since": 0, "defense": 0, "last_regen": time.time()}
+    return t[key]
+
+
+def _territory_regen(corner: dict):
+    """Regenerate defense for a held corner based on elapsed time."""
+    if not corner.get("controller"):
+        return
+    last = corner.get("last_regen", time.time())
+    hours = (time.time() - last) / 3600
+    if hours > 0:
+        corner["defense"] = min(
+            TERRITORY_DEFENSE_MAX,
+            corner.get("defense", 0) + int(hours * TERRITORY_DEFENSE_REGEN_PER_HR),
+        )
+        corner["last_regen"] = time.time()
+
+
+def _user_territory_bonus(user_id: int, data: dict) -> float:
+    """Total income-bonus multiplier from all corners a user controls."""
+    bonus = 0.0
+    for key, corner in _territory_store(data).items():
+        if corner.get("controller") == str(user_id):
+            bonus += TERRITORIES.get(key, {}).get("income_bonus", 0)
+    return bonus
+
+
 def _load_dealer() -> dict:
     if DEALER_FILE.exists():
         try:
@@ -11529,7 +11611,9 @@ def _get_dealer_record(user_id: int) -> dict:
             "times_busted": 0,
             "upgrades": {},        # upgrade_key -> level
             "jail_until": 0,       # timestamp; >now = in jail
-            "dirty_money": 0,      # un-laundered profit (for laundering, later)
+            "dirty_money": 0,      # un-laundered profit
+            "last_launder": 0,     # cooldown timestamp
+            "lifetime_laundered": 0,
         }
         _save_dealer(data)
     return data["users"][uid]
@@ -11711,7 +11795,11 @@ async def sell_command(
     # Successful sale
     prices = _get_market_prices()
     sell_price = prices[sub_key]["sell"]
-    total = sell_price * grams
+    base_total = sell_price * grams
+    # Territory bonus: controlling corners adds a cut to every sale
+    terr_bonus = _user_territory_bonus(user.id, data)
+    turf_cut = int(base_total * terr_bonus)
+    total = base_total + turf_cut
     record["stash"][sub_key] = current_grams - grams
     if record["stash"][sub_key] == 0:
         del record["stash"][sub_key]
@@ -11722,6 +11810,8 @@ async def sell_command(
     record["lifetime_sold"] = record.get("lifetime_sold", 0) + grams
     record["lifetime_profit"] = record.get("lifetime_profit", 0) + total
     new_bal = economy.add(user.id, total, f"sold {sub_key}")
+    # Accrue dirty money (launderable bonus pool) on top of the clean payout
+    dirty_added = _accrue_dirty_money(record, total)
     # Roll a random event (may mutate record + balance)
     event_text = _roll_dealer_event(record, user.id) or ""
     _save_dealer(data)
@@ -11743,19 +11833,22 @@ async def sell_command(
         "a hot girl at the bar", "a guy who said 'my buddy sent me'",
     ]
     stash_max_disp = _dealer_stash_max(record, info["stash_max"])
+    dirty_total = record.get("dirty_money", 0)
+    turf_line = f"\n🗺️ Turf cut: **+{turf_cut:,}** _(+{int(terr_bonus*100)}%)_" if turf_cut > 0 else ""
     await interaction.response.send_message(
         f"# 💰 DEAL DONE\n\n"
         f"Sold **{grams}g of {info['emoji']} {info['name']}** to {random.choice(npcs)} "
-        f"for **{total:,}** coins (**{sell_price}/g**).\n\n"
+        f"for **{total:,}** coins (**{sell_price}/g**).{turf_line}\n\n"
         f"📦 Stash: **{current_grams - grams}g / {stash_max_disp}g**\n"
         f"🔥 Heat: **{record['heat']}/100** _(+{heat_gain})_\n"
+        f"💵 Dirty money: **{dirty_total:,}** _(+{dirty_added:,})_ — launder it with `_launder`\n"
         f"💰 Balance: **{new_bal:,}**"
         f"{event_text}"
     )
 
 
 async def _bust_player(interaction, record, data, forced=False):
-    """Cops catch the player. Lose all stash + a fine + jail time."""
+    """Cops catch the player. Animated bust sequence + lose stash + fine + jail."""
     user = interaction.user
     stash_grams = sum(record["stash"].values())
     record["stash"] = {}
@@ -11773,25 +11866,77 @@ async def _bust_player(interaction, record, data, forced=False):
     economy.add(user.id, -fine, "cop fine")
     _save_dealer(data)
 
-    title = "🚨 BUSTED — HEAT MAXED OUT" if forced else "🚨 BUSTED"
-    flavor = [
+    flavor = random.choice([
         "Undercover cop. Sting operation. They had your face for weeks.",
         "Some snitch ratted you out for a plea deal.",
         "A patrol unit happened to roll up at the wrong moment.",
         "You sold to a narc. Rookie mistake.",
         "Surveillance had been tailing you all week.",
         "Your customer was wearing a wire. Damn.",
-    ]
+    ])
     bail_cost = sentence_min * JAIL_BAIL_COST_PER_MIN
-    await interaction.response.send_message(
+
+    def box(lines):
+        return "```ansi\n" + "\n".join(lines) + "\n```"
+
+    # ── Animated frames ──
+    frames = [
+        box([
+            "\u001b[0;33m  ...another routine deal...\u001b[0m",
+            "",
+            "\u001b[0;30m  the block is quiet\u001b[0m",
+        ]),
+        box([
+            "\u001b[1;31m  🚨 \u001b[0m\u001b[0;31mred and blue in the distance\u001b[0m",
+            "",
+            "\u001b[0;33m  ...that's not for you. right?\u001b[0m",
+        ]),
+        box([
+            "\u001b[1;31m  🚨🚨 SIRENS CLOSING IN 🚨🚨\u001b[0m",
+            "",
+            "\u001b[1;33m  RUN. \u001b[0m\u001b[0;33mdrop everything and—\u001b[0m",
+        ]),
+        box([
+            "\u001b[1;31m  ✋ FREEZE! HANDS UP!\u001b[0m",
+            "",
+            "\u001b[0;37m  too slow.\u001b[0m",
+        ]),
+        box([
+            "\u001b[1;31m  🚔 BUSTED 🚔\u001b[0m",
+            "\u001b[0;30m  ──────────────────────\u001b[0m",
+            f"\u001b[0;37m  {flavor[:36]}\u001b[0m",
+        ]),
+    ]
+
+    # Send first frame, then edit through the sequence
+    try:
+        await interaction.response.send_message(content=frames[0])
+        for fr in frames[1:]:
+            await asyncio.sleep(0.9)
+            await interaction.edit_original_response(content=fr)
+        await asyncio.sleep(0.9)
+    except Exception as e:
+        log.warning("bust animation failed: %s", e)
+
+    # Final detailed result as a follow-up (so the ping/details are clean)
+    title = "🚨 BUSTED — HEAT MAXED OUT" if forced else "🚨 BUSTED"
+    result = (
         f"# {title}\n\n"
-        f"{random.choice(flavor)}\n\n"
+        f"{flavor}\n\n"
         f"💸 **Lost {stash_grams}g** of product (entire stash).\n"
         f"⚖️ **Fine:** {fine:,} coins ({int(BUST_FINE_PCT*100)}% of balance)\n"
         f"🚔 **Jail:** {sentence_min} min — can't deal until <t:{int(record['jail_until'])}:R>\n"
-        f"💵 Post bail early with `/bail` (~{bail_cost:,} coins)\n\n"
+        f"💵 Post bail early with `_bail` (~{bail_cost:,} coins)\n\n"
         f"_Balance: **{economy.balance(user.id):,}**_"
     )
+    try:
+        await interaction.followup.send(result)
+    except Exception:
+        # Fallback: edit the animated message to the result if follow-up fails
+        try:
+            await interaction.edit_original_response(content=result)
+        except Exception as e:
+            log.warning("bust result send failed: %s", e)
 
 
 # ── Random events on sell (tension) ──
@@ -11874,6 +12019,318 @@ async def _handle_bail(message: discord.Message):
         f"💵 Bail posted — **{cost:,}** coins. You're free. "
         f"Watch your heat this time. Balance: **{economy.balance(uid):,}**"
     )
+
+
+async def _handle_launder(message: discord.Message):
+    """Prefix-only: _launder — wash dirty money through a business into clean coins."""
+    uid = message.author.id
+    data = _load_dealer()
+    record = data["users"].get(str(uid))
+    if not record:
+        await message.channel.send("You're not in the game yet. Move some product first with `/dealer`.")
+        return
+
+    dirty = record.get("dirty_money", 0)
+    if dirty <= 0:
+        await message.channel.send(
+            "💵 You've got no dirty money to wash. Make some sales with `/sell` first."
+        )
+        return
+
+    # Must own at least one business to launder
+    n_biz = len(_user_businesses(uid))
+    if n_biz == 0:
+        await message.channel.send(
+            "🏢 You need a **business** to wash money through. Buy one with `/buybusiness`, "
+            "then `_launder` runs dirty cash through the books."
+        )
+        return
+
+    # Cooldown
+    cd_remaining = LAUNDER_COOLDOWN_MIN * 60 - (time.time() - record.get("last_launder", 0))
+    if cd_remaining > 0:
+        await message.channel.send(
+            f"🧼 The books are still cooling off. Launder again in **{fmt_cooldown(int(cd_remaining))}**."
+        )
+        return
+
+    # How much can be washed this cycle
+    cap = _launder_capacity(uid)
+    to_wash = min(dirty, cap)
+    fee = int(to_wash * LAUNDER_FEE_PCT)
+    clean = to_wash - fee
+
+    record["dirty_money"] = dirty - to_wash
+    record["last_launder"] = time.time()
+    record["lifetime_laundered"] = record.get("lifetime_laundered", 0) + clean
+    _save_dealer(data)
+
+    new_bal = economy.add(uid, clean, "laundered money")
+    try:
+        track_economy_event("earned", clean)
+        track_activity("launder", uid, message.author.display_name, f"laundered {clean:,} coins")
+    except Exception:
+        pass
+
+    leftover = record["dirty_money"]
+    leftover_line = (
+        f"\n💵 Still dirty: **{leftover:,}** (wash more next cycle)" if leftover > 0 else
+        "\n✨ All clean. Books are spotless."
+    )
+    biz_word = "business" if n_biz == 1 else "businesses"
+    await message.channel.send(
+        f"# 🧼 MONEY LAUNDERED\n\n"
+        f"Ran **{to_wash:,}** dirty coins through your {n_biz} {biz_word}.\n"
+        f"🏦 Wash fee ({int(LAUNDER_FEE_PCT*100)}%): **-{fee:,}**\n"
+        f"✅ Clean payout: **+{clean:,}**"
+        f"{leftover_line}\n"
+        f"💰 Balance: **{new_bal:,}**\n\n"
+        f"_Cap per cycle scales with how many businesses you own._"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🗺️ TERRITORY CONTROL & DEALER WARS
+# Built on the existing territory data layer (TERRITORIES, _territory_get,
+# _territory_regen, _user_territory_bonus). Adds the player-facing commands:
+#   _turf        view the map
+#   _claimturf   take an unclaimed corner (costs coins)
+#   _raid        attack a rival's corner (PvP contest)
+#   _reinforce   add defense to a corner you hold
+# Controlling corners adds a passive income bonus to every sale (already wired).
+# ─────────────────────────────────────────────────────────────────────────────
+TERRITORY_RAID_COOLDOWN_MIN = 30    # minutes between raids per attacker
+TERRITORY_RAID_HEAT = 20            # heat gained from raiding (it's loud)
+
+
+def _territory_power(user_id: int, data: dict) -> int:
+    """Attacker/defender strength from dealer stats + upgrades. Higher = stronger."""
+    rec = data["users"].get(str(user_id), {})
+    lifetime = rec.get("lifetime_profit", 0)
+    upgrades = sum(rec.get("upgrades", {}).values())
+    busts = rec.get("times_busted", 0)
+    # Base off experience, plus upgrades, minus a small penalty for being sloppy
+    power = 20 + min(60, lifetime // 5000) + upgrades * 5 - min(15, busts)
+    return max(5, power)
+
+
+async def _send_turf_map(message: discord.Message):
+    """Prefix-only: _turf — show the territory map and who controls what."""
+    data = _load_dealer()
+    lines = []
+    for key, info in TERRITORIES.items():
+        corner = _territory_get(data, key)
+        _territory_regen(corner)
+        controller = corner.get("controller")
+        if controller:
+            try:
+                m = message.guild.get_member(int(controller)) if message.guild else None
+                cname = m.display_name if m else f"User {controller}"
+            except Exception:
+                cname = "someone"
+            defense = corner.get("defense", 0)
+            status = f"\u001b[1;31m{cname[:14]}\u001b[0m \u001b[0;30mDEF {defense}\u001b[0m"
+        else:
+            status = "\u001b[0;32mUNCLAIMED\u001b[0m"
+        bonus_pct = int(info["income_bonus"] * 100)
+        lines.append(
+            f"{info['emoji']} \u001b[1;36m{info['name']:<16}\u001b[0m +{bonus_pct}%  {status}"
+        )
+    _save_dealer(data)  # persist regen
+
+    body = (
+        "```ansi\n"
+        "\u001b[1;35m▓▒░ TURF MAP ░▒▓\u001b[0m\n"
+        "\u001b[0;30m──────────────────────────────────────\u001b[0m\n"
+        + "\n".join(lines) +
+        "\n```"
+    )
+    embed = discord.Embed(description=body, color=0xFF2BD6)
+    embed.set_footer(text="_claimturf <corner> · _raid <corner> · _reinforce <corner>")
+    await message.channel.send(embed=embed)
+
+
+def _resolve_corner_key(text: str) -> str | None:
+    """Match user input to a territory key by key or name (fuzzy-ish)."""
+    text = (text or "").strip().lower()
+    if not text:
+        return None
+    if text in TERRITORIES:
+        return text
+    for key, info in TERRITORIES.items():
+        if text in info["name"].lower() or text in key:
+            return key
+    return None
+
+
+async def _handle_claim_turf(message: discord.Message, rest: str):
+    """Prefix-only: _claimturf <corner> — take an unclaimed corner."""
+    key = _resolve_corner_key(rest)
+    if not key:
+        names = ", ".join(f"`{k}`" for k in TERRITORIES)
+        await message.channel.send(f"Which corner? Options: {names}. Try `_turf` to see the map.")
+        return
+    uid = message.author.id
+    info = TERRITORIES[key]
+    data = _load_dealer()
+    corner = _territory_get(data, key)
+    _territory_regen(corner)
+
+    if corner.get("controller"):
+        if corner["controller"] == str(uid):
+            await message.channel.send(f"{info['emoji']} You already control **{info['name']}**.")
+        else:
+            await message.channel.send(
+                f"{info['emoji']} **{info['name']}** is already held. "
+                f"You'd have to `_raid {key}` to take it."
+            )
+        return
+
+    cost = info["claim_cost"]
+    if economy.balance(uid) < cost:
+        await message.channel.send(
+            f"❌ Claiming **{info['name']}** costs **{cost:,}** coins. "
+            f"You have **{economy.balance(uid):,}**."
+        )
+        return
+
+    economy.add(uid, -cost, f"claim turf: {key}")
+    corner["controller"] = str(uid)
+    corner["since"] = time.time()
+    corner["defense"] = 50  # starts half-defended
+    corner["last_regen"] = time.time()
+    _save_dealer(data)
+
+    bonus_pct = int(info["income_bonus"] * 100)
+    await message.channel.send(
+        f"# {info['emoji']} CORNER CLAIMED\n\n"
+        f"**{info['name']}** is yours. Cost: **{cost:,}** coins.\n"
+        f"💰 +{bonus_pct}% on every sale while you hold it.\n"
+        f"🛡️ Defense: **50/100** — build it up with `_reinforce {key}`.\n\n"
+        f"_Rivals can `_raid` you for it. Keep it defended._"
+    )
+
+
+async def _handle_reinforce_turf(message: discord.Message, rest: str):
+    """Prefix-only: _reinforce <corner> — add defense to a corner you hold."""
+    key = _resolve_corner_key(rest)
+    if not key:
+        await message.channel.send("Which corner? Try `_reinforce docks` (see `_turf`).")
+        return
+    uid = message.author.id
+    info = TERRITORIES[key]
+    data = _load_dealer()
+    corner = _territory_get(data, key)
+    _territory_regen(corner)
+
+    if corner.get("controller") != str(uid):
+        await message.channel.send(f"You don't control **{info['name']}**. Can't reinforce it.")
+        return
+    if corner.get("defense", 0) >= TERRITORY_DEFENSE_MAX:
+        await message.channel.send(f"🛡️ **{info['name']}** is already at max defense ({TERRITORY_DEFENSE_MAX}).")
+        return
+    cost = TERRITORY_REINFORCE_COST
+    if economy.balance(uid) < cost:
+        await message.channel.send(f"❌ Reinforcing costs **{cost:,}** coins. You have **{economy.balance(uid):,}**.")
+        return
+
+    economy.add(uid, -cost, f"reinforce: {key}")
+    corner["defense"] = min(TERRITORY_DEFENSE_MAX, corner.get("defense", 0) + TERRITORY_REINFORCE_AMOUNT)
+    corner["last_regen"] = time.time()
+    _save_dealer(data)
+    await message.channel.send(
+        f"🛡️ Reinforced **{info['name']}** (+{TERRITORY_REINFORCE_AMOUNT} defense). "
+        f"Now at **{corner['defense']}/{TERRITORY_DEFENSE_MAX}**. Cost: **{cost:,}**."
+    )
+
+
+async def _handle_raid_turf(message: discord.Message, rest: str):
+    """Prefix-only: _raid <corner> — attack a rival's corner (PvP contest)."""
+    key = _resolve_corner_key(rest)
+    if not key:
+        await message.channel.send("Which corner? Try `_raid downtown` (see `_turf`).")
+        return
+    uid = message.author.id
+    info = TERRITORIES[key]
+    data = _load_dealer()
+
+    # Attacker must be in the game and not jailed
+    attacker = data["users"].get(str(uid))
+    if not attacker:
+        await message.channel.send("You're not in the game yet. Start dealing with `/dealer` first.")
+        return
+    if _dealer_in_jail(attacker):
+        await message.channel.send(
+            f"🚔 You're locked up — out <t:{int(attacker['jail_until'])}:R>. Can't raid from a cell."
+        )
+        return
+
+    corner = _territory_get(data, key)
+    _territory_regen(corner)
+    controller = corner.get("controller")
+
+    if not controller:
+        await message.channel.send(
+            f"{info['emoji']} **{info['name']}** is unclaimed — just `_claimturf {key}` it, no raid needed."
+        )
+        return
+    if controller == str(uid):
+        await message.channel.send(f"You already control **{info['name']}**. Can't raid yourself.")
+        return
+
+    # Raid cooldown (per attacker)
+    cd = TERRITORY_RAID_COOLDOWN_MIN * 60 - (time.time() - attacker.get("last_raid", 0))
+    if cd > 0:
+        await message.channel.send(f"🔫 Your crew needs to regroup. Raid again in **{fmt_cooldown(int(cd))}**.")
+        return
+
+    # ── Resolve the PvP contest ──
+    atk_power = _territory_power(uid, data)
+    def_power = _territory_power(int(controller), data)
+    defense = corner.get("defense", 0)
+    # Attacker rolls vs defender power + corner defense.
+    # Wide attacker variance keeps raids tense — even an underdog can get lucky.
+    atk_roll = atk_power + random.randint(0, 80)
+    def_roll = def_power + min(60, defense) + random.randint(0, 25)
+
+    attacker["last_raid"] = time.time()
+    attacker["heat"] = min(HEAT_MAX, attacker.get("heat", 0) + TERRITORY_RAID_HEAT)
+
+    try:
+        dm = message.guild.get_member(int(controller)) if message.guild else None
+        defender_name = dm.display_name if dm else "the holder"
+    except Exception:
+        defender_name = "the holder"
+
+    if atk_roll > def_roll:
+        # Attacker takes the corner
+        corner["controller"] = str(uid)
+        corner["since"] = time.time()
+        corner["defense"] = 30  # takes it weakened
+        corner["last_regen"] = time.time()
+        _save_dealer(data)
+        bonus_pct = int(info["income_bonus"] * 100)
+        await message.channel.send(
+            f"# 🔫 RAID SUCCESS\n\n"
+            f"You stormed **{info['name']}** and ran {defender_name} off the block.\n"
+            f"🏴 It's yours now — +{bonus_pct}% on sales.\n"
+            f"🛡️ Defense knocked down to **30** — shore it up with `_reinforce {key}`.\n"
+            f"🔥 Heat +{TERRITORY_RAID_HEAT} (raids are loud).\n\n"
+            f"_Rolled {atk_roll} vs {def_roll}._"
+        )
+    else:
+        # Defender holds; attacker takes some heat + a bruise
+        # Chip the corner's defense a little so repeated raids matter
+        corner["defense"] = max(0, corner.get("defense", 0) - 10)
+        _save_dealer(data)
+        await message.channel.send(
+            f"# 🛡️ RAID REPELLED\n\n"
+            f"{defender_name} held **{info['name']}**. Their muscle pushed you back.\n"
+            f"You chipped their defense down to **{corner['defense']}** though.\n"
+            f"🔥 Heat +{TERRITORY_RAID_HEAT} for nothing. Regroup and try again later.\n\n"
+            f"_Rolled {atk_roll} vs {def_roll}._"
+        )
+
 
 
 class DealerUpgradeView(discord.ui.View):
@@ -12247,26 +12704,45 @@ def _build_dealer_overview_embed(user_id: int, display_name: str) -> discord.Emb
         )
 
     # Status + lifetime as one neon block
+    dirty = record.get("dirty_money", 0)
     ops_block = (
         "```ansi\n"
         f"\u001b[1;36mSUPPLY\u001b[0m  {supply_str:<10} \u001b[1;36mSELL\u001b[0m  {sell_str}\n"
         "\u001b[0;30m─────────────────────────────\u001b[0m\n"
         f"\u001b[1;32mPROFIT\u001b[0m  {profit:<12,} \u001b[1;35mMOVED\u001b[0m {sold:,}g\n"
-        f"\u001b[1;31mBUSTS\u001b[0m   {busts}\n"
+        f"\u001b[1;33mDIRTY\u001b[0m   {dirty:<12,} \u001b[1;31mBUSTS\u001b[0m {busts}\n"
         "```"
     )
     embed.add_field(name="⚡ OPERATIONS", value=ops_block, inline=False)
+
+    # Controlled territory
+    try:
+        dealer_data = _load_dealer()
+        held = []
+        for tkey, corner in _territory_store(dealer_data).items():
+            if corner.get("controller") == str(user_id):
+                tinfo = TERRITORIES.get(tkey, {})
+                held.append(f"{tinfo.get('emoji','')} {tinfo.get('name', tkey)}")
+        if held:
+            total_bonus = int(_user_territory_bonus(user_id, dealer_data) * 100)
+            embed.add_field(
+                name=f"🗺️ TURF · +{total_bonus}% on sales",
+                value=" · ".join(held),
+                inline=False,
+            )
+    except Exception:
+        pass
 
     # Jail status warning
     jail_rem = _dealer_in_jail(record)
     if jail_rem > 0:
         embed.add_field(
             name="🚔 IN JAIL",
-            value=f"Out <t:{int(record['jail_until'])}:R> · post bail with `/bail`",
+            value=f"Out <t:{int(record['jail_until'])}:R> · post bail with `_bail`",
             inline=False,
         )
 
-    embed.set_footer(text="Upgrade your operation: _dealerupgrades · Watch the heat")
+    embed.set_footer(text="_dealerupgrades · _launder · _turf · Watch the heat")
     return embed
 
 
@@ -12659,7 +13135,17 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
         record = data["users"][uid]
         _decay_heat(record)
 
-        cd_remaining = SELL_COOLDOWN_MIN * 60 - (time.time() - record.get("last_sell", 0))
+        # Jail gate (consistent with main sell)
+        jail_rem = _dealer_in_jail(record)
+        if jail_rem > 0:
+            await interaction.response.send_message(
+                f"🚔 You're locked up — out <t:{int(record['jail_until'])}:R>. Post bail with `_bail`.",
+                ephemeral=True,
+            )
+            return
+
+        sell_cd = _dealer_sell_cooldown(record)
+        cd_remaining = sell_cd - (time.time() - record.get("last_sell", 0))
         if cd_remaining > 0:
             await interaction.response.send_message(
                 f"⏰ Customers haven't lined up yet. Try again in **{fmt_cooldown(int(cd_remaining))}**.",
@@ -12679,8 +13165,8 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
             await self._bust_via_modal(interaction, record, data, forced=True)
             return
 
-        # Roll for cops
-        cop_chance = info["heat"] + (record["heat"] / 5)
+        # Roll for cops (reduced by Lookout upgrades)
+        cop_chance = (info["heat"] + (record["heat"] / 5)) * _dealer_bust_modifier(record)
         if random.random() * 100 < cop_chance:
             await self._bust_via_modal(interaction, record, data, forced=False)
             return
@@ -12697,6 +13183,7 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
         record["heat"] = min(HEAT_MAX, record["heat"] + heat_gain)
         record["lifetime_sold"] = record.get("lifetime_sold", 0) + grams
         record["lifetime_profit"] = record.get("lifetime_profit", 0) + total
+        dirty_added = _accrue_dirty_money(record, total)
         _save_dealer(data)
         new_bal = economy.add(self.user_id, total, f"sold {sub_key}")
         track_quest_progress(self.user_id, "coins_earned", total)
@@ -12710,7 +13197,7 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
         ]
         await interaction.response.send_message(
             f"💰 Sold **{grams}g of {info['emoji']} {info['name']}** to {random.choice(npcs)} for **{total:,}** coins.\n"
-            f"🔥 Heat: **{record['heat']}/100** (+{heat_gain}) • Balance: **{new_bal:,}**",
+            f"🔥 Heat: **{record['heat']}/100** (+{heat_gain}) • 💵 Dirty: **{record.get('dirty_money',0):,}** (+{dirty_added:,}) • Balance: **{new_bal:,}**",
             ephemeral=True,
         )
 
@@ -12720,6 +13207,10 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
         record["heat"] = 0
         record["times_busted"] = record.get("times_busted", 0) + 1
         record["last_sell"] = time.time()
+        # Apply jail (consistent with the main sell path)
+        busts = record.get("times_busted", 1)
+        sentence_min = JAIL_BASE_MINUTES + min(60, (busts - 1) * 5)
+        record["jail_until"] = time.time() + sentence_min * 60
         bal = economy.balance(self.user_id)
         fine = int(bal * BUST_FINE_PCT)
         economy.add(self.user_id, -fine, "cop fine")
@@ -12733,11 +13224,13 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
             "You sold to a narc. Rookie mistake.",
             "Surveillance had been tailing you.",
         ]
+        bail_cost = sentence_min * JAIL_BAIL_COST_PER_MIN
         await interaction.response.send_message(
             f"# {title}\n\n"
             f"{random.choice(flavor)}\n\n"
             f"💸 Lost **{stash_grams}g**. Fine: **{fine:,}** coins ({int(BUST_FINE_PCT*100)}% of balance).\n"
-            f"Heat reset to **0**. Balance: **{economy.balance(self.user_id):,}**",
+            f"🚔 Jail: **{sentence_min} min** — out <t:{int(record['jail_until'])}:R> · `_bail` to post bail (~{bail_cost:,}).\n"
+            f"Balance: **{economy.balance(self.user_id):,}**",
             ephemeral=True,
         )
 
@@ -19002,6 +19495,21 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("bail", "postbail"):
         await _handle_bail(message)
+        return True
+    if cmd_name in ("launder", "wash", "cleanmoney"):
+        await _handle_launder(message)
+        return True
+    if cmd_name in ("turf", "territory", "territories", "map"):
+        await _send_turf_map(message)
+        return True
+    if cmd_name in ("claimturf", "claimcorner", "takecorner"):
+        await _handle_claim_turf(message, rest)
+        return True
+    if cmd_name in ("raid", "attackturf", "war"):
+        await _handle_raid_turf(message, rest)
+        return True
+    if cmd_name in ("reinforce", "defend", "fortify"):
+        await _handle_reinforce_turf(message, rest)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
