@@ -705,12 +705,38 @@ def _invite_counts(inviter_id: str, data: dict):
     return total, last7
 
 
+def _ordered_mention_ids(message) -> list:
+    """Return user IDs mentioned in a message IN THE ORDER they appear in the
+    text. discord.py's message.mentions does NOT preserve typed order, so for
+    commands where order matters (member vs inviter) we parse the raw content."""
+    ids = []
+    for m in re.finditer(r"<@!?(\d+)>", message.content or ""):
+        uid = int(m.group(1))
+        if uid not in ids:
+            ids.append(uid)
+    return ids
+
+
+def _ordered_members(message) -> list:
+    """Resolve ordered mention IDs to member objects (in typed order)."""
+    by_id = {m.id: m for m in message.mentions}
+    out = []
+    for uid in _ordered_mention_ids(message):
+        member = by_id.get(uid)
+        if member is None and message.guild:
+            member = message.guild.get_member(uid)
+        if member:
+            out.append(member)
+    return out
+
+
 async def _handle_invited_by(message, rest):
     """Prefix-only: _invitedby [@user] — list everyone a user has invited.
     Defaults to the author if no user is mentioned."""
     # Resolve the target: mentioned user, or the author
-    if message.mentions:
-        target = message.mentions[0]
+    ordered = _ordered_members(message)
+    if ordered:
+        target = ordered[0]
     else:
         target = message.author
 
@@ -981,15 +1007,15 @@ async def _handle_attribute_invite(message, rest):
     'manual verification' joins)."""
     if not _is_invite_admin(message):
         return  # silent for non-admins
-    mentions = message.mentions
-    if len(mentions) < 2:
+    ordered = _ordered_members(message)
+    if len(ordered) < 2:
         await message.channel.send(
             "Usage: `_attributejoin @member @inviter`\n"
-            "_Credits the first user as having been invited by the second._"
+            "_The **first** user is the one who joined; the **second** is who invited them._"
         )
         return
-    member = mentions[0]
-    inviter = mentions[1]
+    member = ordered[0]
+    inviter = ordered[1]
     if member.id == inviter.id:
         await message.channel.send("❌ A member can't have invited themselves.")
         return
@@ -1031,7 +1057,7 @@ async def _handle_attribute_invite(message, rest):
     log.info("MANUAL invite attribution: %s credited to %s by admin %s", member.id, inviter_id, message.author.id)
     await message.channel.send(
         f"# 📨 INVITE CREDITED\n\n"
-        f"**{member.display_name}** is now credited as invited by **{inviter.display_name}**.\n"
+        f"🔗 **{inviter.display_name}** ➜ invited ➜ **{member.display_name}**\n\n"
         f"📊 {inviter.display_name}'s totals: **{last7}** this week · **{total}** all-time.\n\n"
         f"_Manually attributed by {message.author.display_name}._"
     )
@@ -1041,14 +1067,14 @@ async def _handle_uncredit_invite(message, rest):
     """Admin-only: _uncreditinvite @member — remove a member's invite credit."""
     if not _is_invite_admin(message):
         return  # silent for non-admins
-    mentions = message.mentions
-    if len(mentions) < 1:
+    ordered = _ordered_members(message)
+    if len(ordered) < 1:
         await message.channel.send(
             "Usage: `_uncreditinvite @member`\n"
             "_Removes that member's invite credit from whoever currently has it._"
         )
         return
-    member = mentions[0]
+    member = ordered[0]
     data = _load_invites()
     removed_from = None
     for inviter_id, rec in data.get("inviters", {}).items():
