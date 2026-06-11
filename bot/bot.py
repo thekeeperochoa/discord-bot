@@ -894,6 +894,116 @@ async def _send_invites_leaderboard(message):
     await message.channel.send(embed=embed)
 
 
+def _is_invite_admin(message) -> bool:
+    """True if the author can manage the invite leaderboard (admin or boss)."""
+    cfg = load_config()
+    if str(message.author.id) in cfg.get("respected_users", []):
+        return True
+    if message.author.id == SECRET_GIVE_OWNER_ID:
+        return True
+    try:
+        perms = message.author.guild_permissions
+        return perms.administrator or perms.manage_guild
+    except Exception:
+        return False
+
+
+async def _handle_attribute_invite(message, rest):
+    """Admin-only: _attributejoin @member @inviter — manually credit an invite.
+    Fallback for joins the auto-tracker can't attribute (e.g. apply-to-join
+    'manual verification' joins)."""
+    if not _is_invite_admin(message):
+        return  # silent for non-admins
+    mentions = message.mentions
+    if len(mentions) < 2:
+        await message.channel.send(
+            "Usage: `_attributejoin @member @inviter`\n"
+            "_Credits the first user as having been invited by the second._"
+        )
+        return
+    member = mentions[0]
+    inviter = mentions[1]
+    if member.id == inviter.id:
+        await message.channel.send("❌ A member can't have invited themselves.")
+        return
+    if member.bot or inviter.bot:
+        await message.channel.send("❌ Bots can't be part of invite attribution.")
+        return
+
+    data = _load_invites()
+    inviter_id = str(inviter.id)
+    rec = data.setdefault("inviters", {}).setdefault(inviter_id, {"members": {}})
+    members = rec.setdefault("members", {})
+
+    # Check the member isn't already credited to someone (avoid double-counting)
+    already = None
+    for other_inviter, orec in data.get("inviters", {}).items():
+        if str(member.id) in orec.get("members", {}):
+            already = other_inviter
+            break
+    if already and already != inviter_id:
+        try:
+            am = message.guild.get_member(int(already))
+            aname = am.display_name if am else f"User {already}"
+        except Exception:
+            aname = f"User {already}"
+        await message.channel.send(
+            f"⚠️ **{member.display_name}** is already credited to **{aname}**.\n"
+            f"Remove that first with `_uncreditinvite @{member.display_name}`, then re-attribute."
+        )
+        return
+    if str(member.id) in members:
+        await message.channel.send(
+            f"✅ **{member.display_name}** is already credited to **{inviter.display_name}**. No change."
+        )
+        return
+
+    members[str(member.id)] = {"ts": int(time.time()), "code": "manual", "manual_by": str(message.author.id)}
+    _save_invites(data)
+    total, last7 = _invite_counts(inviter_id, data)
+    log.info("MANUAL invite attribution: %s credited to %s by admin %s", member.id, inviter_id, message.author.id)
+    await message.channel.send(
+        f"# 📨 INVITE CREDITED\n\n"
+        f"**{member.display_name}** is now credited as invited by **{inviter.display_name}**.\n"
+        f"📊 {inviter.display_name}'s totals: **{last7}** this week · **{total}** all-time.\n\n"
+        f"_Manually attributed by {message.author.display_name}._"
+    )
+
+
+async def _handle_uncredit_invite(message, rest):
+    """Admin-only: _uncreditinvite @member — remove a member's invite credit."""
+    if not _is_invite_admin(message):
+        return  # silent for non-admins
+    mentions = message.mentions
+    if len(mentions) < 1:
+        await message.channel.send(
+            "Usage: `_uncreditinvite @member`\n"
+            "_Removes that member's invite credit from whoever currently has it._"
+        )
+        return
+    member = mentions[0]
+    data = _load_invites()
+    removed_from = None
+    for inviter_id, rec in data.get("inviters", {}).items():
+        if str(member.id) in rec.get("members", {}):
+            del rec["members"][str(member.id)]
+            removed_from = inviter_id
+            break
+    if not removed_from:
+        await message.channel.send(f"**{member.display_name}** isn't credited to anyone — nothing to remove.")
+        return
+    _save_invites(data)
+    try:
+        im = message.guild.get_member(int(removed_from))
+        iname = im.display_name if im else f"User {removed_from}"
+    except Exception:
+        iname = f"User {removed_from}"
+    log.info("MANUAL invite REMOVAL: %s uncredited from %s by admin %s", member.id, removed_from, message.author.id)
+    await message.channel.send(
+        f"🗑️ Removed **{member.display_name}**'s invite credit from **{iname}**."
+    )
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19640,6 +19750,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("invites", "invitelb", "topinviters"):
         await _send_invites_leaderboard(message)
+        return True
+    if cmd_name in ("attributejoin", "creditinvite", "attributeinvite"):
+        await _handle_attribute_invite(message, rest)
+        return True
+    if cmd_name in ("uncreditinvite", "removeinvite", "unattributejoin"):
+        await _handle_uncredit_invite(message, rest)
         return True
     if cmd_name in ("tldr", "summary", "recap"):
         await _handle_tldr(message)
