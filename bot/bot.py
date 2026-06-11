@@ -16108,6 +16108,11 @@ def _format_listing_item(listing: dict) -> str:
     if asset_type == "venue":
         v_info = VENUE_TYPES.get(asset.get("type"), {"emoji": "🌃", "name": "?"})
         return f"{v_info['emoji']} **{v_info['name']}** — {len(asset.get('staff', []))} staff"
+    if asset_type == "realestate":
+        re_info = PROPERTIES.get(asset.get("type"), {"emoji": "🏠", "name": "?"})
+        legendary = " 🏆" if re_info.get("unique") else ""
+        cond = int(asset.get("condition", 0))
+        return f"{re_info['emoji']} **{re_info['name']}**{legendary} — {cond}% condition"
     if asset_type == "item":
         item_info = TRANSFERABLE_ITEMS.get(asset.get("key"), {"emoji": "📦", "name": "?"})
         meta = ""
@@ -16174,6 +16179,13 @@ def _return_asset_to_seller(listing: dict):
         ndata = _load_nightlife()
         ndata["users"].setdefault(str(seller_id), []).append(asset)
         _save_nightlife(ndata)
+    elif asset_type == "realestate":
+        redata = _load_re()
+        redata.setdefault("users", {}).setdefault(str(seller_id), []).append(asset)
+        info = PROPERTIES.get(asset.get("type"), {})
+        if info.get("unique"):
+            redata.setdefault("legendary_owners", {})[asset.get("type")] = seller_id
+        _save_re(redata)
     elif asset_type == "item":
         u = economy._user(seller_id)
         key = asset.get("key")
@@ -16205,6 +16217,13 @@ def _transfer_asset_to_buyer(listing: dict, buyer_id: int):
         ndata = _load_nightlife()
         ndata["users"].setdefault(str(buyer_id), []).append(asset)
         _save_nightlife(ndata)
+    elif asset_type == "realestate":
+        redata = _load_re()
+        redata.setdefault("users", {}).setdefault(str(buyer_id), []).append(asset)
+        info = PROPERTIES.get(asset.get("type"), {})
+        if info.get("unique"):
+            redata.setdefault("legendary_owners", {})[asset.get("type")] = buyer_id
+        _save_re(redata)
     elif asset_type == "item":
         u = economy._user(buyer_id)
         key = asset.get("key")
@@ -16250,6 +16269,19 @@ def _remove_asset_from_seller(seller_id: int, asset_type: str, asset_identifier)
         v = venues.pop(idx)
         _save_nightlife(ndata)
         return v
+    if asset_type == "realestate":
+        redata = _load_re()
+        props = redata.get("users", {}).get(str(seller_id), [])
+        idx = asset_identifier
+        if not (0 <= idx < len(props)):
+            return None
+        prop = props.pop(idx)
+        # If it's a legendary/unique, clear the owner mapping while in escrow
+        info = PROPERTIES.get(prop.get("type"), {})
+        if info.get("unique"):
+            redata.setdefault("legendary_owners", {}).pop(prop.get("type"), None)
+        _save_re(redata)
+        return prop
     if asset_type == "item":
         item_key = asset_identifier  # 'vip', 'xp_boost', etc.
         info = TRANSFERABLE_ITEMS.get(item_key)
@@ -16293,6 +16325,13 @@ def _seller_owns_inventory_summary(seller_id: int) -> list:
     for i, v in enumerate(ndata["users"].get(str(seller_id), [])):
         info = VENUE_TYPES.get(v.get("type"), {"emoji": "🌃", "name": "?"})
         out.append((f"{info['emoji']} {info['name']} (#{i+1})", "venue", i))
+    # Real estate properties
+    redata = _load_re()
+    for i, prop in enumerate(redata.get("users", {}).get(str(seller_id), [])):
+        info = PROPERTIES.get(prop.get("type"), {"emoji": "🏠", "name": "?"})
+        cond = int(prop.get("condition", 0))
+        legendary = " 🏆" if info.get("unique") else ""
+        out.append((f"{info['emoji']} {info['name']}{legendary} ({cond}% cond, #{i+1})", "realestate", i))
     # Items
     u = economy._user(seller_id)
     for key, info in TRANSFERABLE_ITEMS.items():
@@ -16399,7 +16438,7 @@ async def _market_list_picker(interaction, data):
     if not inv:
         await interaction.response.send_message(
             "❌ You don't own anything sellable.\n"
-            "_Sellable: pets, businesses, venues, and active boosts (VIP, XP Boost, Insurance, Heist Tools, Lottery Multiplier)._",
+            "_Sellable: pets, businesses, venues, real estate, and active boosts (VIP, XP Boost, Insurance, Heist Tools, Lottery Multiplier)._",
             ephemeral=True,
         )
         return
@@ -16438,7 +16477,7 @@ class MarketListPickerView(discord.ui.View):
         value = interaction.data["values"][0]
         asset_type, ident = value.split(":", 1)
         # Convert ident
-        if asset_type in ("business", "venue", "pet"):
+        if asset_type in ("business", "venue", "pet", "realestate"):
             try:
                 ident = int(ident)
             except ValueError:
