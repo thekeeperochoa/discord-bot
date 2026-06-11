@@ -91,6 +91,7 @@ DEFAULT_PERSONALITY = {
     "antispam_enabled": True,
     "antispam_mod_channel": "1242222689352155206",  # alerts go here
     "antispam_min_account_age_days": 7,  # invites from accounts younger than this don't count
+    "invite_risk_cap": 60,               # invites from accounts at/above this risk score don't count
     "antispam_scam_action": True,        # auto-delete + timeout on scam-link from new members
     "antispam_raid_threshold": 5,        # N joins...
     "antispam_raid_window_sec": 60,      # ...within M seconds = raid alert
@@ -655,6 +656,35 @@ async def attribute_join(member) -> str | None:
         log.info("Invite from young account NOT counted: %s invited by %s", member.id, inviter_id)
         return used_code
 
+    # Record the attribution. On apply-to-join servers, a member arrives
+    # `pending=True` and Discord later strips the invite info once a mod approves
+    # them (it shows as "manual verification"). So we capture the invite NOW,
+    # while it's still visible, but store it PROVISIONALLY — it only counts once
+    # the member is approved (pending -> False) and passes the risk check.
+    is_pending = getattr(member, "pending", False)
+
+    if is_pending:
+        # Stash provisionally; commit happens in on_member_update on approval.
+        prov = data.setdefault("provisional", {})
+        prov[str(member.id)] = {
+            "inviter_id": inviter_id,
+            "code": used_code,
+            "ts": int(time.time()),
+        }
+        _save_invites(data)
+        log.info("Provisional invite stored: %s invited by %s (awaiting approval)", member.id, inviter_id)
+        return used_code
+
+    # Not pending (normal join / invite-link server): apply risk gate, then count.
+    score, _reasons = compute_join_risk(member)
+    risk_cap = cfg.get("invite_risk_cap", 60)
+    if score >= risk_cap:
+        rec = data.setdefault("inviters", {}).setdefault(inviter_id, {"members": {}})
+        rec["skipped_risky"] = rec.get("skipped_risky", 0) + 1
+        _save_invites(data)
+        log.info("Invite NOT counted (risk %d >= %d): %s by %s", score, risk_cap, member.id, inviter_id)
+        return used_code
+
     # Record — UNIQUE members only (rejoin via different invite won't double-count)
     inviters = data.setdefault("inviters", {})
     rec = inviters.setdefault(inviter_id, {"members": {}})
@@ -673,6 +703,58 @@ def _invite_counts(inviter_id: str, data: dict):
     cutoff = time.time() - 7 * 86400
     last7 = sum(1 for m in members.values() if m.get("ts", 0) >= cutoff)
     return total, last7
+
+
+async def commit_provisional_attribution(member) -> bool:
+    """Called when a member is APPROVED (pending True -> False) on an apply-to-join
+    server. Promotes the provisional invite attribution to a real counted invite,
+    but only if the account passes the risk check (filters fake/throwaway accounts).
+    Returns True if an invite was counted."""
+    data = _load_invites()
+    prov = data.get("provisional", {})
+    entry = prov.get(str(member.id))
+    if not entry:
+        return False  # nothing stored for this member (joined some other way)
+
+    inviter_id = entry.get("inviter_id")
+    used_code = entry.get("code", "?")
+
+    # Remove the provisional entry no matter what happens next
+    prov.pop(str(member.id), None)
+
+    if not inviter_id:
+        _save_invites(data)
+        return False
+
+    cfg = load_config()
+
+    # Young-account filter (same as the contest rule)
+    if account_too_young_for_invite(member, cfg):
+        rec = data.setdefault("inviters", {}).setdefault(inviter_id, {"members": {}})
+        rec["skipped_young"] = rec.get("skipped_young", 0) + 1
+        _save_invites(data)
+        log.info("Approved but young account NOT counted: %s by %s", member.id, inviter_id)
+        return False
+
+    # Risk gate — high-risk (likely fake) accounts don't count even if approved
+    score, _reasons = compute_join_risk(member)
+    risk_cap = cfg.get("invite_risk_cap", 60)
+    if score >= risk_cap:
+        rec = data.setdefault("inviters", {}).setdefault(inviter_id, {"members": {}})
+        rec["skipped_risky"] = rec.get("skipped_risky", 0) + 1
+        _save_invites(data)
+        log.info("Approved but risky (%d) NOT counted: %s by %s", score, member.id, inviter_id)
+        return False
+
+    # Count it — unique members only
+    inviters = data.setdefault("inviters", {})
+    rec = inviters.setdefault(inviter_id, {"members": {}})
+    members = rec.setdefault("members", {})
+    if str(member.id) not in members:
+        members[str(member.id)] = {"ts": int(time.time()), "code": used_code}
+        log.info("Invite COUNTED on approval: %s invited by %s", member.id, inviter_id)
+    _save_invites(data)
+    return True
 
 
 # Channel the TLDR command always summarizes (regardless of where it's run).
@@ -14607,12 +14689,22 @@ async def handle_member_join(member: discord.Member):
 @client.event
 async def on_member_join(member: discord.Member):
     """Triggered when a new member joins the server."""
-    # Attribute the invite FIRST (before the welcome flow, which could error)
+    # Attribute the invite FIRST (before the welcome flow, which could error).
+    # On apply-to-join servers this captures the invite while it's still visible;
+    # it's stored provisionally and only counts once the member is approved.
     invite_code = None
     try:
         invite_code = await attribute_join(member)
     except Exception as e:
         log.warning("invite attribution failed: %s", e)
+
+    # If the member is still pending (apply-to-join screening), don't run the
+    # welcome flow yet — they can't see the server. The welcome + anti-spam run
+    # when they're approved (handled in on_member_update).
+    if getattr(member, "pending", False):
+        log.info("Member %s is pending approval — deferring welcome.", member.id)
+        return
+
     # Anti-spam: risk-score + raid detection (T1 + T4) — alerts only, no auto-ban
     try:
         await antispam_on_join(member, invite_code=invite_code)
@@ -14645,6 +14737,26 @@ async def on_invite_delete(invite: discord.Invite):
 @client.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     """When a member loses the booster role, remove their signature perk."""
+    # ── Apply-to-join: detect approval (pending True -> False) and commit invite ──
+    try:
+        was_pending = getattr(before, "pending", False)
+        now_pending = getattr(after, "pending", False)
+        if was_pending and not now_pending:
+            # Member was just approved through the application gate.
+            counted = await commit_provisional_attribution(after)
+            # Run the welcome flow + anti-spam now that they're a full member,
+            # regardless of whether the invite counted.
+            try:
+                await antispam_on_join(after)
+            except Exception as e:
+                log.warning("antispam on approval failed: %s", e)
+            try:
+                await handle_member_join(after)
+            except Exception as e:
+                log.warning("welcome on approval failed: %s", e)
+    except Exception as e:
+        log.warning("on_member_update approval handling failed: %s", e)
+
     try:
         had_role = any(r.id == BOOSTER_ROLE_ID for r in before.roles)
         has_role = any(r.id == BOOSTER_ROLE_ID for r in after.roles)
