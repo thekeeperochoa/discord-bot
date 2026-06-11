@@ -705,6 +705,73 @@ def _invite_counts(inviter_id: str, data: dict):
     return total, last7
 
 
+async def _handle_invited_by(message, rest):
+    """Prefix-only: _invitedby [@user] — list everyone a user has invited.
+    Defaults to the author if no user is mentioned."""
+    # Resolve the target: mentioned user, or the author
+    if message.mentions:
+        target = message.mentions[0]
+    else:
+        target = message.author
+
+    data = _load_invites()
+    rec = data.get("inviters", {}).get(str(target.id), {})
+    members = rec.get("members", {})
+
+    if not members:
+        skipped_young = rec.get("skipped_young", 0)
+        skipped_risky = rec.get("skipped_risky", 0)
+        extra = ""
+        if skipped_young or skipped_risky:
+            extra = (
+                f"\n\n_({skipped_young} young + {skipped_risky} risky account(s) "
+                f"didn't count toward the contest.)_"
+            )
+        await message.channel.send(
+            f"📨 **{target.display_name}** hasn't invited anyone tracked yet.{extra}"
+        )
+        return
+
+    # Sort newest first
+    entries = sorted(members.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)
+    cutoff = time.time() - 7 * 86400
+
+    lines = []
+    for mid, meta in entries:
+        ts = meta.get("ts", 0)
+        # Resolve member name
+        try:
+            m = message.guild.get_member(int(mid)) if message.guild else None
+            name = m.display_name if m else f"User {mid}"
+        except Exception:
+            name = f"User {mid}"
+        recent = "🆕 " if ts >= cutoff else ""
+        manual = " ·✍️" if meta.get("code") == "manual" else ""
+        when = f"<t:{int(ts)}:R>" if ts else "unknown"
+        lines.append(f"{recent}**{name}**{manual} — {when}")
+
+    total, last7 = _invite_counts(str(target.id), data)
+
+    # Discord embed description cap ~4096; chunk if needed
+    header = f"**{last7}** this week · **{total}** all-time\n\n"
+    body = header + "\n".join(lines)
+    if len(body) > 3900:
+        body = header + "\n".join(lines[:40]) + f"\n\n_…and {len(lines) - 40} more._"
+
+    embed = discord.Embed(
+        title=f"📨 Invited by {target.display_name}",
+        description=body,
+        color=0xFF2BD6,
+    )
+    skipped_young = rec.get("skipped_young", 0)
+    skipped_risky = rec.get("skipped_risky", 0)
+    foot = "🆕 = joined this week · ✍️ = manually credited"
+    if skipped_young or skipped_risky:
+        foot += f" · {skipped_young} young + {skipped_risky} risky not counted"
+    embed.set_footer(text=foot)
+    await message.channel.send(embed=embed)
+
+
 async def commit_provisional_attribution(member) -> bool:
     """Called when a member is APPROVED (pending True -> False) on an apply-to-join
     server. Promotes the provisional invite attribution to a real counted invite,
@@ -19750,6 +19817,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("invites", "invitelb", "topinviters"):
         await _send_invites_leaderboard(message)
+        return True
+    if cmd_name in ("invitedby", "whoinvited", "invitelist", "myinvites"):
+        await _handle_invited_by(message, rest)
         return True
     if cmd_name in ("attributejoin", "creditinvite", "attributeinvite"):
         await _handle_attribute_invite(message, rest)
