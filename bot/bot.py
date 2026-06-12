@@ -11735,6 +11735,13 @@ DEALER_UPGRADES = {
         "base_cost": 10000,
         "per_level": "cheaper supply",
     },
+    "warroom": {
+        "emoji": "🗺️", "name": "War Room",
+        "desc": "-6 min raid cooldown per level (0 at max)",
+        "max_level": 5,
+        "base_cost": 15000,
+        "per_level": "faster raids",
+    },
 }
 
 # ── Jail ──
@@ -12407,6 +12414,12 @@ TERRITORY_RAID_COOLDOWN_MIN = 30    # minutes between raids per attacker
 TERRITORY_RAID_HEAT = 20            # heat gained from raiding (it's loud)
 
 
+def _dealer_raid_cooldown(record: dict) -> int:
+    """Raid cooldown in seconds, reduced 6 min per War Room level (0 at max)."""
+    lvl = _dealer_upgrade_level(record, "warroom")
+    return max(0, (TERRITORY_RAID_COOLDOWN_MIN - 6 * lvl) * 60)
+
+
 def _territory_power(user_id: int, data: dict) -> int:
     """Attacker/defender strength from dealer stats + upgrades. Higher = stronger."""
     rec = data["users"].get(str(user_id), {})
@@ -12582,10 +12595,32 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
         await message.channel.send(f"You already control **{info['name']}**. Can't raid yourself.")
         return
 
-    # Raid cooldown (per attacker)
-    cd = TERRITORY_RAID_COOLDOWN_MIN * 60 - (time.time() - attacker.get("last_raid", 0))
+    # Raid cooldown (per attacker, reduced by War Room upgrades — 0 at max)
+    cd = _dealer_raid_cooldown(attacker) - (time.time() - attacker.get("last_raid", 0))
     if cd > 0:
-        await message.channel.send(f"🔫 Your crew needs to regroup. Raid again in **{fmt_cooldown(int(cd))}**.")
+        await message.channel.send(
+            f"🔫 Your crew needs to regroup. Raid again in **{fmt_cooldown(int(cd))}**.\n"
+            f"_Level up 🗺️ War Room in `_dealerupgrades` to shorten this._"
+        )
+        return
+
+    # Raiding at MAX heat is reckless — the cops are already watching.
+    # This is the limiter once War Room removes the time gate: heat, not clock.
+    if attacker.get("heat", 0) >= HEAT_MAX and random.random() < 0.35:
+        busts = attacker.get("times_busted", 0) + 1
+        attacker["times_busted"] = busts
+        sentence_min = JAIL_BASE_MINUTES + min(60, (busts - 1) * 5)
+        attacker["jail_until"] = time.time() + sentence_min * 60
+        attacker["heat"] = 0
+        attacker["last_raid"] = time.time()
+        _save_dealer(data)
+        await message.channel.send(
+            f"# 🚨 RAID INTERCEPTED\n\n"
+            f"You rolled out at **max heat** and drove straight into a patrol net. "
+            f"The raid never happened.\n"
+            f"🚔 Jail: **{sentence_min} min** — out <t:{int(attacker['jail_until'])}:R> · `_bail` to post bail.\n\n"
+            f"_Cool off with `/laylow` before raiding at 100 heat._"
+        )
         return
 
     # ── Resolve the PvP contest ──
