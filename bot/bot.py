@@ -4658,6 +4658,11 @@ async def daily_command(interaction: discord.Interaction):
         bonus_pct += prestige_daily_bonus_pct(user.id)
     except Exception:
         pass
+    # Crew gains XP from member activity
+    try:
+        _crew_add_xp(user.id, CREW_XP_DAILY)
+    except Exception:
+        pass
     passive = get_perk(user.id, "passive_income")
     # Escalating streak bonus — every consecutive day adds a little more, capped.
     # Makes EVERY day feel rewarding, not just the 7/14/30/100 milestones.
@@ -5167,6 +5172,9 @@ async def leaderboard_command(interaction: discord.Interaction):
         pbadge = prestige_badge(uid)
         if pbadge:
             sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
+        ctag = crew_tag_of(uid)
+        if ctag:
+            sbadge = f"{sbadge + ' ' if sbadge else ''}{ctag}"
         sb = f" {sbadge}" if sbadge else ""
         podium_lines.append(
             f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(networth):>8}\u001b[0m{sb}"
@@ -5181,6 +5189,9 @@ async def leaderboard_command(interaction: discord.Interaction):
         pbadge = prestige_badge(uid)
         if pbadge:
             sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
+        ctag = crew_tag_of(uid)
+        if ctag:
+            sbadge = f"{sbadge + ' ' if sbadge else ''}{ctag}"
         sb = f" {sbadge}" if sbadge else ""
         rest_lines.append(
             f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(networth):>8}\u001b[0m{sb}"
@@ -20388,6 +20399,521 @@ async def _send_employees_view(message: discord.Message):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 👥 CREWS — the social layer. Shared identity, shared vault, crew leaderboard.
+# Stage 1: core. (Crew territory wars hook in later.)
+# ─────────────────────────────────────────────────────────────────────────────
+CREWS_FILE = MEMORY_DIR / "crews.json"
+CREW_CREATE_COST = 50_000
+CREW_MAX_MEMBERS = 10
+CREW_XP_PER_100_DEPOSIT = 1
+CREW_XP_DAILY = 10
+
+
+def _load_crews() -> dict:
+    if CREWS_FILE.exists():
+        try:
+            with open(CREWS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"crews": {}, "user_crew": {}, "invites": {}, "next_id": 1}
+
+
+def _save_crews(data: dict):
+    try:
+        with open(CREWS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save crews failed: %s", e)
+
+
+def _crew_of(user_id, data=None):
+    data = data or _load_crews()
+    cid = data.get("user_crew", {}).get(str(user_id))
+    return (cid, data["crews"].get(cid)) if cid and cid in data.get("crews", {}) else (None, None)
+
+
+def crew_tag_of(user_id) -> str:
+    """'[TAG]' for display, or ''."""
+    try:
+        _, crew = _crew_of(user_id)
+        return f"[{crew['tag']}]" if crew else ""
+    except Exception:
+        return ""
+
+
+def _crew_level(xp: int) -> int:
+    return min(50, 1 + xp // 5000)
+
+
+def _crew_add_xp(user_id, amount: int):
+    """Add crew XP on behalf of a member (no-op if crewless)."""
+    try:
+        data = _load_crews()
+        cid, crew = _crew_of(user_id, data)
+        if not crew:
+            return
+        crew["xp"] = crew.get("xp", 0) + amount
+        crew["level"] = _crew_level(crew["xp"])
+        _save_crews(data)
+    except Exception:
+        pass
+
+
+def _clean_crew_text(s: str, maxlen: int) -> str:
+    s = re.sub(r"[`@#<>\*_~|]", "", s or "").strip()
+    return s[:maxlen]
+
+
+async def _handle_crew(message: discord.Message):
+    """Prefix-only: _crew — your crew's profile."""
+    data = _load_crews()
+    cid, crew = _crew_of(message.author.id, data)
+    if not crew:
+        await message.channel.send(
+            "👥 You're not in a crew.\n"
+            f"`_createcrew <TAG> <name>` to start one (**{CREW_CREATE_COST:,}** coins, tag 2-4 chars)\n"
+            "or get someone to `_crewinvite` you, then `_joincrew <TAG>`."
+        )
+        return
+    members = crew.get("members", [])
+    def _n(uid):
+        m = message.guild.get_member(int(uid)) if message.guild else None
+        return m.display_name if m else f"User {uid}"
+    leader = _n(crew["leader"])
+    roster = ", ".join(_n(u) for u in members[:15])
+    embed = discord.Embed(
+        title=f"👥 [{crew['tag']}] {crew['name']}",
+        description=(
+            f"⭐ Level **{crew.get('level', 1)}** · {crew.get('xp', 0):,} XP\n"
+            f"🏦 Vault: **{crew.get('vault', 0):,}** coins\n"
+            f"👑 Leader: **{leader}**\n"
+            f"👤 Members ({len(members)}/{CREW_MAX_MEMBERS}): {roster}"
+        ),
+        color=0x00F0FF,
+    )
+    embed.set_footer(text="_crewdeposit <amt> · _crewinvite @user · _crews for rankings")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_createcrew(message: discord.Message, rest: str):
+    """Prefix-only: _createcrew <TAG> <name>"""
+    uid = message.author.id
+    data = _load_crews()
+    if _crew_of(uid, data)[1]:
+        await message.channel.send("❌ You're already in a crew. `_leavecrew` first.")
+        return
+    parts = (rest or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.channel.send(f"Usage: `_createcrew <TAG> <name>` — e.g. `_createcrew DGN The Degenerates` (**{CREW_CREATE_COST:,}** coins)")
+        return
+    tag = _clean_crew_text(parts[0], 4).upper()
+    name = _clean_crew_text(parts[1], 24)
+    if len(tag) < 2 or not name:
+        await message.channel.send("❌ Tag must be 2-4 characters, and the crew needs a name.")
+        return
+    if any(c.get("tag") == tag for c in data["crews"].values()):
+        await message.channel.send(f"❌ Tag `[{tag}]` is taken. Pick another.")
+        return
+    if economy.balance(uid) < CREW_CREATE_COST:
+        await message.channel.send(f"❌ Founding a crew costs **{CREW_CREATE_COST:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -CREW_CREATE_COST, "crew founding")
+    cid = f"C{data.get('next_id', 1):04d}"
+    data["next_id"] = data.get("next_id", 1) + 1
+    data["crews"][cid] = {
+        "name": name, "tag": tag, "leader": str(uid), "members": [str(uid)],
+        "created": int(time.time()), "vault": 0, "xp": 0, "level": 1,
+    }
+    data["user_crew"][str(uid)] = cid
+    _save_crews(data)
+    try:
+        track_activity("crew_founded", uid, message.author.display_name, f"founded [{tag}] {name}")
+    except Exception:
+        pass
+    await message.channel.send(
+        f"# 👥 CREW FOUNDED\n\n**[{tag}] {name}** is on the map. You're the boss.\n"
+        f"📨 Recruit with `_crewinvite @user` (max {CREW_MAX_MEMBERS}) · 🏦 `_crewdeposit` to build the vault."
+    )
+
+
+async def _handle_crewinvite(message: discord.Message):
+    data = _load_crews()
+    cid, crew = _crew_of(message.author.id, data)
+    if not crew or crew["leader"] != str(message.author.id):
+        await message.channel.send("❌ Only the crew leader can invite.")
+        return
+    targets = _ordered_members(message)
+    if not targets:
+        await message.channel.send("Usage: `_crewinvite @user`")
+        return
+    t = targets[0]
+    if t.bot:
+        await message.channel.send("❌ Bots don't join crews. They ARE the crew.")
+        return
+    if len(crew.get("members", [])) >= CREW_MAX_MEMBERS:
+        await message.channel.send(f"❌ Crew is full ({CREW_MAX_MEMBERS}).")
+        return
+    if _crew_of(t.id, data)[1]:
+        await message.channel.send(f"❌ **{t.display_name}** is already in a crew.")
+        return
+    data.setdefault("invites", {}).setdefault(str(t.id), [])
+    if cid not in data["invites"][str(t.id)]:
+        data["invites"][str(t.id)].append(cid)
+    _save_crews(data)
+    await message.channel.send(
+        f"📨 {t.mention} — **[{crew['tag']}] {crew['name']}** wants you. "
+        f"Type `_joincrew {crew['tag']}` to accept.",
+        allowed_mentions=discord.AllowedMentions(users=[t]),
+    )
+
+
+async def _handle_joincrew(message: discord.Message, rest: str):
+    uid = message.author.id
+    data = _load_crews()
+    if _crew_of(uid, data)[1]:
+        await message.channel.send("❌ You're already in a crew. `_leavecrew` first.")
+        return
+    tag = _clean_crew_text((rest or "").strip(), 4).upper()
+    target = next(((cid, c) for cid, c in data["crews"].items() if c.get("tag") == tag), None)
+    if not target:
+        await message.channel.send(f"❌ No crew with tag `[{tag}]`. See `_crews`.")
+        return
+    cid, crew = target
+    if cid not in data.get("invites", {}).get(str(uid), []):
+        await message.channel.send(f"❌ You need an invite from **[{crew['tag']}]** first. Ask their leader.")
+        return
+    if len(crew.get("members", [])) >= CREW_MAX_MEMBERS:
+        await message.channel.send("❌ That crew filled up.")
+        return
+    crew["members"].append(str(uid))
+    data["user_crew"][str(uid)] = cid
+    data["invites"][str(uid)] = []
+    _save_crews(data)
+    await message.channel.send(f"👥 **{message.author.display_name}** joined **[{crew['tag']}] {crew['name']}**. Family now.")
+
+
+async def _handle_leavecrew(message: discord.Message):
+    uid = message.author.id
+    data = _load_crews()
+    cid, crew = _crew_of(uid, data)
+    if not crew:
+        await message.channel.send("❌ You're not in a crew.")
+        return
+    if crew["leader"] == str(uid):
+        if len(crew["members"]) > 1:
+            await message.channel.send("❌ Leaders can't walk out on a full crew — `_disbandcrew` or promote first (`_crewpromote @user`).")
+            return
+        # Solo leader leaving = disband; vault back to them
+        refund = crew.get("vault", 0)
+        if refund:
+            economy.add(uid, refund, "crew disband refund")
+        del data["crews"][cid]
+        data["user_crew"].pop(str(uid), None)
+        _save_crews(data)
+        await message.channel.send(f"💨 **[{crew['tag']}]** disbanded. Vault ({refund:,}) returned.")
+        return
+    crew["members"].remove(str(uid))
+    data["user_crew"].pop(str(uid), None)
+    _save_crews(data)
+    await message.channel.send(f"👋 You left **[{crew['tag']}] {crew['name']}**.")
+
+
+async def _handle_crewkick(message: discord.Message):
+    data = _load_crews()
+    cid, crew = _crew_of(message.author.id, data)
+    if not crew or crew["leader"] != str(message.author.id):
+        await message.channel.send("❌ Only the crew leader can kick.")
+        return
+    targets = _ordered_members(message)
+    if not targets:
+        await message.channel.send("Usage: `_crewkick @user`")
+        return
+    t = targets[0]
+    if str(t.id) not in crew.get("members", []):
+        await message.channel.send(f"❌ **{t.display_name}** isn't in your crew.")
+        return
+    if str(t.id) == crew["leader"]:
+        await message.channel.send("❌ You can't kick yourself. `_disbandcrew` if it's over.")
+        return
+    crew["members"].remove(str(t.id))
+    data["user_crew"].pop(str(t.id), None)
+    _save_crews(data)
+    await message.channel.send(f"🥾 **{t.display_name}** was kicked from **[{crew['tag']}]**.")
+
+
+async def _handle_crewpromote(message: discord.Message):
+    data = _load_crews()
+    cid, crew = _crew_of(message.author.id, data)
+    if not crew or crew["leader"] != str(message.author.id):
+        await message.channel.send("❌ Only the leader can hand over the crown.")
+        return
+    targets = _ordered_members(message)
+    if not targets or str(targets[0].id) not in crew.get("members", []):
+        await message.channel.send("Usage: `_crewpromote @member` (must be in your crew)")
+        return
+    crew["leader"] = str(targets[0].id)
+    _save_crews(data)
+    await message.channel.send(f"👑 **{targets[0].display_name}** now leads **[{crew['tag']}] {crew['name']}**.")
+
+
+async def _handle_disbandcrew(message: discord.Message):
+    uid = message.author.id
+    data = _load_crews()
+    cid, crew = _crew_of(uid, data)
+    if not crew or crew["leader"] != str(uid):
+        await message.channel.send("❌ Only the leader can disband.")
+        return
+    members = crew.get("members", [])
+    vault = crew.get("vault", 0)
+    share = vault // max(1, len(members))
+    for m in members:
+        if share:
+            try:
+                economy.add(int(m), share, "crew disband split")
+            except Exception:
+                pass
+        data["user_crew"].pop(m, None)
+    del data["crews"][cid]
+    _save_crews(data)
+    await message.channel.send(
+        f"💨 **[{crew['tag']}] {crew['name']}** is no more. "
+        f"Vault split: **{share:,}** to each of {len(members)} members."
+    )
+
+
+async def _handle_crewdeposit(message: discord.Message, rest: str):
+    uid = message.author.id
+    data = _load_crews()
+    cid, crew = _crew_of(uid, data)
+    if not crew:
+        await message.channel.send("❌ You're not in a crew.")
+        return
+    cleaned = (rest or "").split()[0].replace(",", "").lower().replace("k", "000").replace("m", "000000") if rest.strip() else ""
+    if not cleaned.isdigit() or int(cleaned) <= 0:
+        await message.channel.send("Usage: `_crewdeposit 5000` (or `5k`)")
+        return
+    amount = int(cleaned)
+    if economy.balance(uid) < amount:
+        await message.channel.send(f"❌ You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -amount, "crew deposit")
+    crew["vault"] = crew.get("vault", 0) + amount
+    crew["xp"] = crew.get("xp", 0) + (amount // 100) * CREW_XP_PER_100_DEPOSIT
+    old_lvl = crew.get("level", 1)
+    crew["level"] = _crew_level(crew["xp"])
+    _save_crews(data)
+    lvl_note = f"\n🆙 **CREW LEVEL UP → {crew['level']}!**" if crew["level"] > old_lvl else ""
+    await message.channel.send(
+        f"🏦 **{message.author.display_name}** deposited **{amount:,}** into the **[{crew['tag']}]** vault "
+        f"(now **{crew['vault']:,}**).{lvl_note}"
+    )
+
+
+async def _handle_crewwithdraw(message: discord.Message, rest: str):
+    uid = message.author.id
+    data = _load_crews()
+    cid, crew = _crew_of(uid, data)
+    if not crew or crew["leader"] != str(uid):
+        await message.channel.send("❌ Only the crew leader can withdraw from the vault.")
+        return
+    cleaned = (rest or "").split()[0].replace(",", "").lower().replace("k", "000").replace("m", "000000") if rest.strip() else ""
+    if not cleaned.isdigit() or int(cleaned) <= 0:
+        await message.channel.send("Usage: `_crewwithdraw 5000`")
+        return
+    amount = int(cleaned)
+    if crew.get("vault", 0) < amount:
+        await message.channel.send(f"❌ Vault holds **{crew.get('vault', 0):,}**.")
+        return
+    crew["vault"] -= amount
+    _save_crews(data)
+    economy.add(uid, amount, "crew withdraw")
+    await message.channel.send(f"🏦 Leader withdrew **{amount:,}** from the **[{crew['tag']}]** vault (now **{crew['vault']:,}**).")
+
+
+async def _handle_crews_lb(message: discord.Message):
+    """Prefix-only: _crews — crew leaderboard."""
+    data = _load_crews()
+    crews = sorted(data.get("crews", {}).values(), key=lambda c: (c.get("level", 1), c.get("xp", 0), c.get("vault", 0)), reverse=True)[:10]
+    if not crews:
+        await message.channel.send(f"👥 No crews yet. Be first: `_createcrew <TAG> <name>` ({CREW_CREATE_COST:,} coins).")
+        return
+    lines = []
+    for i, c in enumerate(crews):
+        lines.append(
+            f"**{i+1}.** **[{c['tag']}] {c['name']}** — ⭐ Lv{c.get('level',1)} · "
+            f"🏦 {c.get('vault',0):,} · 👤 {len(c.get('members',[]))}"
+        )
+    embed = discord.Embed(title="👥 CREW RANKINGS", description="\n".join(lines), color=0xFF2BD6)
+    embed.set_footer(text="Level up by depositing + member activity · _createcrew to start yours")
+    await message.channel.send(embed=embed)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚔️ PET BATTLES — wager fights between pets. Light PvP for the cozy crowd.
+# ─────────────────────────────────────────────────────────────────────────────
+PETBATTLE_COOLDOWN_MIN = 10
+PET_TYPE_BONUS = {  # flavor edge per type (small)
+    "dragon": 8, "shark": 6, "fox": 4, "raccoon": 4,
+    "owl": 3, "monkey": 3, "dog": 2, "cat": 2,
+}
+
+
+def _pet_power(pet: dict) -> int:
+    lvl = _pet_level(pet.get("xp", 0))
+    bonus = PET_TYPE_BONUS.get(pet.get("type"), 0)
+    wins = pet.get("battle_wins", 0)
+    return 20 + lvl * 8 + bonus + min(20, wins * 2)
+
+
+class PetBattleView(discord.ui.View):
+    def __init__(self, challenger: discord.Member, target: discord.Member, wager: int):
+        super().__init__(timeout=90)
+        self.challenger = challenger
+        self.target = target
+        self.wager = wager
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.target.id:
+            await interaction.response.send_message("This challenge isn't for your pet.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Accept Battle", emoji="⚔️", style=discord.ButtonStyle.danger)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pets = _load_pets()
+        p1 = pets.get(str(self.challenger.id))
+        p2 = pets.get(str(self.target.id))
+        if not p1 or not p2:
+            await interaction.response.edit_message(content="❌ One of the pets ran off. Battle cancelled.", view=None)
+            return
+        w = self.wager
+        if economy.balance(self.challenger.id) < w or economy.balance(self.target.id) < w:
+            await interaction.response.edit_message(content="❌ Someone can't cover the wager anymore. Cancelled.", view=None)
+            return
+        # Stake both
+        economy.add(self.challenger.id, -w, "pet battle stake")
+        economy.add(self.target.id, -w, "pet battle stake")
+
+        i1 = PET_TYPES.get(p1["type"], {"emoji": "🐾"})
+        i2 = PET_TYPES.get(p2["type"], {"emoji": "🐾"})
+        n1, n2 = p1.get("name", "Pet"), p2.get("name", "Pet")
+        pow1, pow2 = _pet_power(p1), _pet_power(p2)
+
+        await interaction.response.edit_message(
+            content=f"⚔️ **{i1['emoji']} {n1}** vs **{i2['emoji']} {n2}** — {w:,} coins each. FIGHT!",
+            view=None,
+        )
+        msg = await interaction.original_response()
+
+        score1 = score2 = 0
+        moves = ["lunges", "pounces", "bites", "swipes", "headbutts", "tail-whips", "fakes out", "dive-bombs"]
+        for rnd in range(1, 4):
+            await asyncio.sleep(1.6)
+            r1 = pow1 + random.randint(0, 120)
+            r2 = pow2 + random.randint(0, 120)
+            if r1 >= r2:
+                score1 += 1
+                line = f"**R{rnd}:** {i1['emoji']} {n1} {random.choice(moves)} — takes the round! ({score1}-{score2})"
+            else:
+                score2 += 1
+                line = f"**R{rnd}:** {i2['emoji']} {n2} {random.choice(moves)} — takes the round! ({score1}-{score2})"
+            try:
+                await msg.edit(content=msg.content + "\n" + line)
+            except Exception:
+                pass
+            if score1 == 2 or score2 == 2:
+                break
+
+        if score1 > score2:
+            winner, loser = self.challenger, self.target
+            wpet, wname, wemoji = p1, n1, i1["emoji"]
+            lpet = p2
+        else:
+            winner, loser = self.target, self.challenger
+            wpet, wname, wemoji = p2, n2, i2["emoji"]
+            lpet = p1
+        pot = w * 2
+        economy.add(winner.id, pot, "pet battle win")
+        wpet["battle_wins"] = wpet.get("battle_wins", 0) + 1
+        wpet["xp"] = wpet.get("xp", 0) + 15
+        lpet["battle_losses"] = lpet.get("battle_losses", 0) + 1
+        lpet["xp"] = lpet.get("xp", 0) + 5
+        pets[str(self.challenger.id)] = p1
+        pets[str(self.target.id)] = p2
+        _save_pets(pets)
+        try:
+            track_feature_use("petbattle")
+            track_activity("pet_battle", winner.id, winner.display_name, f"{wname} won {pot:,} in a pet battle")
+            add_tournament_score(winner.id, coins_earned=pot, games_won=1)
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
+        try:
+            await msg.edit(content=msg.content + (
+                f"\n\n🏆 **{wemoji} {wname} WINS!** {winner.mention} takes **{pot:,}** coins. "
+                f"_{wname} is now {wpet.get('battle_wins',0)}W-{wpet.get('battle_losses',0)}L._"
+            ))
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=f"🐾 **{self.target.display_name}**'s pet isn't fighting today.", view=None)
+
+
+async def _handle_petbattle(message: discord.Message, rest: str):
+    """Prefix-only: _petbattle @user <wager>"""
+    uid = message.author.id
+    targets = _ordered_members(message)
+    tok = [t for t in (rest or "").split() if not t.startswith("<@")]
+    wager = None
+    if tok:
+        c = tok[0].replace(",", "").lower().replace("k", "000").replace("m", "000000")
+        if c.isdigit():
+            wager = int(c)
+    if not targets or wager is None or wager < 100:
+        await message.channel.send("Usage: `_petbattle @user 5000` (min wager 100)")
+        return
+    target = targets[0]
+    if target.bot or target.id == uid:
+        await message.channel.send("❌ Find a real opponent with a real pet.")
+        return
+    pets = _load_pets()
+    p1, p2 = pets.get(str(uid)), pets.get(str(target.id))
+    if not p1:
+        await message.channel.send("❌ You need a pet first — `/adopt`.")
+        return
+    if not p2:
+        await message.channel.send(f"❌ **{target.display_name}** doesn't have a pet.")
+        return
+    # Cooldown per challenger
+    cd = PETBATTLE_COOLDOWN_MIN * 60 - (time.time() - p1.get("last_battle", 0))
+    if cd > 0:
+        await message.channel.send(f"⏰ Your pet is still catching its breath — **{fmt_cooldown(int(cd))}**.")
+        return
+    if economy.balance(uid) < wager:
+        await message.channel.send(f"❌ You can't cover **{wager:,}**.")
+        return
+    p1["last_battle"] = time.time()
+    pets[str(uid)] = p1
+    _save_pets(pets)
+    i1 = PET_TYPES.get(p1["type"], {"emoji": "🐾"})
+    i2 = PET_TYPES.get(p2["type"], {"emoji": "🐾"})
+    await message.channel.send(
+        f"⚔️ **PET BATTLE CHALLENGE**\n\n"
+        f"{i1['emoji']} **{p1.get('name','?')}** (Lv{_pet_level(p1.get('xp',0))}, {p1.get('battle_wins',0)}W) challenges "
+        f"{i2['emoji']} **{p2.get('name','?')}** (Lv{_pet_level(p2.get('xp',0))}, {p2.get('battle_wins',0)}W)\n"
+        f"💰 Wager: **{wager:,}** each — winner takes **{wager*2:,}**\n\n"
+        f"{target.mention} — accept?",
+        view=PetBattleView(message.author, target, wager),
+        allowed_mentions=discord.AllowedMentions(users=[target]),
+    )
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 💼 WEALTH-SCALED RISK
 # Being rich is no longer pure upside. Above the wealth threshold, claiming
 # /daily can trigger an audit/lawsuit/extortion event that takes a % of CASH.
@@ -21295,6 +21821,42 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("fbid", "bidforeclosure", "auctionbid"):
         await _handle_fbid(message, rest)
+        return True
+    if cmd_name == "crew":
+        await _handle_crew(message)
+        return True
+    if cmd_name in ("createcrew", "newcrew", "foundcrew"):
+        await _handle_createcrew(message, rest)
+        return True
+    if cmd_name in ("crewinvite", "cinvite"):
+        await _handle_crewinvite(message)
+        return True
+    if cmd_name in ("joincrew", "acceptcrew"):
+        await _handle_joincrew(message, rest)
+        return True
+    if cmd_name in ("leavecrew", "quitcrew"):
+        await _handle_leavecrew(message)
+        return True
+    if cmd_name in ("crewkick", "kickcrew"):
+        await _handle_crewkick(message)
+        return True
+    if cmd_name in ("crewpromote", "promotecrew"):
+        await _handle_crewpromote(message)
+        return True
+    if cmd_name in ("disbandcrew", "deletecrew"):
+        await _handle_disbandcrew(message)
+        return True
+    if cmd_name in ("crewdeposit", "cdep"):
+        await _handle_crewdeposit(message, rest)
+        return True
+    if cmd_name in ("crewwithdraw", "cwd"):
+        await _handle_crewwithdraw(message, rest)
+        return True
+    if cmd_name == "crews":
+        await _handle_crews_lb(message)
+        return True
+    if cmd_name in ("petbattle", "petfight", "pvpet"):
+        await _handle_petbattle(message, rest)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
