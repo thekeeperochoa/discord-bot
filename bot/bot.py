@@ -4653,6 +4653,11 @@ async def daily_command(interaction: discord.Interaction):
     await asyncio.sleep(0.7)
     # Apply daily_bonus_pct perk + passive_income perk
     bonus_pct = get_perk(user.id, "daily_bonus_pct")
+    # Permanent prestige bonus stacks on top
+    try:
+        bonus_pct += prestige_daily_bonus_pct(user.id)
+    except Exception:
+        pass
     passive = get_perk(user.id, "passive_income")
     # Escalating streak bonus — every consecutive day adds a little more, capped.
     # Makes EVERY day feel rewarding, not just the 7/14/30/100 milestones.
@@ -4672,10 +4677,18 @@ async def daily_command(interaction: discord.Interaction):
     streak_line = f"\n{fire} **{next_streak}-day streak** · +{streak_bonus:,} streak bonus"
     suggestion = suggest_next_step(user.id)
     tip = f"\n\n{suggestion}" if suggestion else ""
+    # Wealth-scaled risk: the rich attract audits, lawsuits, extortion
+    wealth_event = ""
+    try:
+        wealth_event = _roll_wealth_event(user.id) or ""
+        if wealth_event:
+            new_bal = economy.balance(user.id)
+    except Exception:
+        pass
     await edit(
         f"🎁 **DAILY REWARD!**\n\n"
         f"You found {COIN_EMOJI} **{final_reward:,}** coins!{bonus_text}{streak_line}\n"
-        f"Balance: **{new_bal:,}**{tip}"
+        f"Balance: **{new_bal:,}**{wealth_event}{tip}"
     )
     # Achievements
     await trigger_daily_claim(user.id, channel=interaction.channel)
@@ -5147,6 +5160,9 @@ async def leaderboard_command(interaction: discord.Interaction):
         color, num = rank_styles[i]
         name = _name_for(uid)[:16]
         sbadge = supporter_badge(int(uid))
+        pbadge = prestige_badge(uid)
+        if pbadge:
+            sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
         sb = f" {sbadge}" if sbadge else ""
         podium_lines.append(
             f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(networth):>8}\u001b[0m{sb}"
@@ -5158,6 +5174,9 @@ async def leaderboard_command(interaction: discord.Interaction):
         uid, networth, cash = top[i]
         name = _name_for(uid)[:16]
         sbadge = supporter_badge(int(uid))
+        pbadge = prestige_badge(uid)
+        if pbadge:
+            sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
         sb = f" {sbadge}" if sbadge else ""
         rest_lines.append(
             f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(networth):>8}\u001b[0m{sb}"
@@ -19723,6 +19742,573 @@ async def _send_employees_view(message: discord.Message):
     await message.channel.send(embed=embed, view=view)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 💼 WEALTH-SCALED RISK
+# Being rich is no longer pure upside. Above the wealth threshold, claiming
+# /daily can trigger an audit/lawsuit/extortion event that takes a % of CASH.
+# Active insurance halves the hit. Caps keep it stinging but never ruinous.
+# ─────────────────────────────────────────────────────────────────────────────
+WEALTH_EVENT_THRESHOLD = 1_000_000     # cash above this = on the radar
+WEALTH_EVENT_CHANCE = 0.15             # base chance per /daily claim
+WEALTH_EVENT_CHANCE_WHALE = 0.25       # chance for 10M+ cash
+WEALTH_EVENTS = [
+    ("🧾 IRS AUDIT", "The feds went through your books with a microscope.", 0.02, 0.04),
+    ("⚖️ LAWSUIT", "A 'slip and fall' at one of your operations. Your lawyer settled.", 0.015, 0.03),
+    ("🤝 EXTORTION", "Some connected guys suggested you'd like to make a 'donation'.", 0.01, 0.035),
+    ("🏛️ CITY FINES", "Permits, violations, inspections — the city found them all.", 0.015, 0.025),
+]
+
+
+def _roll_wealth_event(user_id: int) -> str | None:
+    """Maybe tax the rich on daily claim. Returns event text or None."""
+    bal = economy.balance(user_id)
+    if bal < WEALTH_EVENT_THRESHOLD:
+        return None
+    chance = WEALTH_EVENT_CHANCE_WHALE if bal >= 10_000_000 else WEALTH_EVENT_CHANCE
+    if random.random() > chance:
+        return None
+    title, flavor, lo, hi = random.choice(WEALTH_EVENTS)
+    pct = random.uniform(lo, hi)
+    hit = int(bal * pct)
+    # Insurance softens the blow
+    insured = False
+    try:
+        if has_insurance(user_id):
+            hit = hit // 2
+            insured = True
+    except Exception:
+        pass
+    hit = max(1000, min(hit, 2_000_000))  # floor + hard cap
+    economy.add(user_id, -hit, f"wealth event: {title}")
+    try:
+        track_economy_event("spent", hit)
+    except Exception:
+        pass
+    shield = "\n🛡️ _Insurance covered half the damage._" if insured else ""
+    return (
+        f"\n\n**{title}** — {flavor}\n"
+        f"💸 **-{hit:,}** coins. The price of being somebody.{shield}"
+    )
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💎 ULTRA-LUXURY VANITY SINKS
+# Whale-sized pure-status purchases. They produce NOTHING — no income, no edge.
+# They're permanent trophies (survive prestige) and a massive coin sink.
+# ─────────────────────────────────────────────────────────────────────────────
+LUXURY_FILE = MEMORY_DIR / "luxury.json"
+LUXURY_ITEMS = {
+    "watch":    {"emoji": "⌚", "name": "Diamond Watch",   "cost": 1_000_000,
+                 "flex": "checks the time on a wrist worth more than your house"},
+    "yacht":    {"emoji": "🛥️", "name": "Super Yacht",     "cost": 5_000_000,
+                 "flex": "docks a 90-meter problem in the marina"},
+    "jet":      {"emoji": "✈️", "name": "Private Jet",     "cost": 12_000_000,
+                 "flex": "doesn't fly commercial. ever."},
+    "island":   {"emoji": "🏝️", "name": "Private Island",  "cost": 30_000_000,
+                 "flex": "owns a dot on the map with their name on it"},
+    "monument": {"emoji": "🗿", "name": "City Monument",   "cost": 75_000_000,
+                 "flex": "has a statue downtown. an actual statue."},
+}
+
+
+def _load_luxury() -> dict:
+    if LUXURY_FILE.exists():
+        try:
+            with open(LUXURY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_luxury(data: dict):
+    try:
+        with open(LUXURY_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save luxury failed: %s", e)
+
+
+def luxury_owned(user_id) -> list:
+    data = _load_luxury()
+    return list(data.get("users", {}).get(str(user_id), {}).keys())
+
+
+class LuxuryShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        owned = set(luxury_owned(user_id))
+        for key, info in LUXURY_ITEMS.items():
+            have = key in owned
+            label = f"{info['name']} " + ("OWNED" if have else f"({info['cost']:,})")
+            btn = discord.ui.Button(
+                label=label[:80], emoji=info["emoji"],
+                style=discord.ButtonStyle.secondary if have else discord.ButtonStyle.success,
+                disabled=have,
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Window shopping is free — `_luxury` for your own.", ephemeral=True)
+            return False
+        return True
+
+    def _make_cb(self, key):
+        async def cb(interaction: discord.Interaction):
+            info = LUXURY_ITEMS[key]
+            data = _load_luxury()
+            urec = data.setdefault("users", {}).setdefault(str(self.user_id), {})
+            if key in urec:
+                await interaction.response.send_message("Already in your collection.", ephemeral=True)
+                return
+            if economy.balance(self.user_id) < info["cost"]:
+                await interaction.response.send_message(
+                    f"❌ **{info['name']}** runs **{info['cost']:,}**. You have **{economy.balance(self.user_id):,}**.",
+                    ephemeral=True,
+                )
+                return
+            economy.add(self.user_id, -info["cost"], f"luxury: {key}")
+            urec[key] = int(time.time())
+            _save_luxury(data)
+            try:
+                track_economy_event("spent", info["cost"])
+                track_activity("luxury", self.user_id, interaction.user.display_name, f"bought {info['name']} for {info['cost']:,}")
+            except Exception:
+                pass
+            # Public status moment — that's what they paid for
+            await interaction.response.send_message(
+                f"# {info['emoji']} {info['name'].upper()} ACQUIRED\n\n"
+                f"**{interaction.user.display_name}** just dropped **{info['cost']:,}** coins and now "
+                f"{info['flex']}.\n\n_Pure status. Zero income. All flex._"
+            )
+        return cb
+
+
+async def _handle_luxury(message: discord.Message):
+    """Prefix-only: _luxury — the ultra-luxury shop + your collection."""
+    uid = message.author.id
+    owned = set(luxury_owned(uid))
+    lines = []
+    for key, info in LUXURY_ITEMS.items():
+        mark = "✅" if key in owned else f"`{info['cost']:>12,}`"
+        lines.append(f"{info['emoji']} **{info['name']}** — {mark}")
+    embed = discord.Embed(
+        title="💎 THE LUXURY DEALER",
+        description=(
+            "For when money stops being the point.\n"
+            "_No income. No advantage. They survive prestige — trophies are forever._\n\n"
+            + "\n".join(lines)
+        ),
+        color=0xE5C07B,
+    )
+    embed.set_footer(text=f"Balance: {economy.balance(uid):,} · purchases are announced publicly")
+    await message.channel.send(embed=embed, view=LuxuryShopView(uid))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎩 HIGH-ROLLER ROOM
+# Whale-only gambling: 100k minimum bets, multiplier tiers, public wins.
+# ─────────────────────────────────────────────────────────────────────────────
+HIGHROLLER_MIN_BET = 100_000
+HIGHROLLER_MAX_BET = 5_000_000
+HIGHROLLER_TIERS = [
+    ("Double or Nothing", 2, 0.48),   # 48% to double (4% house edge)
+    ("Five Stack",        5, 0.19),   # 19% to 5x      (5% edge)
+    ("The Ten",          10, 0.095),  # 9.5% to 10x    (5% edge)
+]
+
+
+class HighRollerView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.bet = bet
+        for label, mult, prob in HIGHROLLER_TIERS:
+            btn = discord.ui.Button(
+                label=f"{label} ·x{mult}", emoji="🎲",
+                style=discord.ButtonStyle.danger if mult >= 10 else discord.ButtonStyle.primary,
+            )
+            btn.callback = self._make_cb(label, mult, prob)
+            self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your table. `_highroller <bet>` to sit down.", ephemeral=True)
+            return False
+        return True
+
+    def _make_cb(self, label, mult, prob):
+        async def cb(interaction: discord.Interaction):
+            bal = economy.balance(self.user_id)
+            if bal < self.bet:
+                await interaction.response.edit_message(
+                    content=f"❌ Your balance dropped below the **{self.bet:,}** bet. Table closed.",
+                    embed=None, view=None,
+                )
+                return
+            won = random.random() < prob
+            if won:
+                payout = self.bet * (mult - 1)
+                new_bal = economy.add(self.user_id, payout, f"highroller win x{mult}")
+                economy.record_win(self.user_id, "highroller")
+                try:
+                    track_economy_event("earned", payout)
+                    track_activity("highroller_win", self.user_id, interaction.user.display_name, f"won {payout:,} on {label}")
+                    add_tournament_score(self.user_id, coins_earned=payout, games_won=1)
+                except Exception:
+                    pass
+                await interaction.response.edit_message(
+                    content=None,
+                    embed=discord.Embed(
+                        title=f"🎩 {label.upper()} — HIT",
+                        description=(
+                            f"**{interaction.user.display_name}** put **{self.bet:,}** on the felt and hit **x{mult}**.\n\n"
+                            f"💰 **+{payout:,}** · Balance: **{new_bal:,}**"
+                        ),
+                        color=0x3DFF9A,
+                    ),
+                    view=None,
+                )
+            else:
+                new_bal = economy.add(self.user_id, -self.bet, f"highroller loss x{mult}")
+                economy.record_loss(self.user_id, "highroller")
+                try:
+                    track_economy_event("spent", self.bet)
+                except Exception:
+                    pass
+                await interaction.response.edit_message(
+                    content=None,
+                    embed=discord.Embed(
+                        title=f"🎩 {label.upper()} — BUST",
+                        description=(
+                            f"The house took **{self.bet:,}** without blinking.\n"
+                            f"Balance: **{new_bal:,}**\n\n_The room stays open. The room always stays open._"
+                        ),
+                        color=0xFF3B5C,
+                    ),
+                    view=None,
+                )
+        return cb
+
+
+async def _handle_highroller(message: discord.Message, rest: str):
+    """Prefix-only: _highroller <bet> — whale-stakes gambling."""
+    uid = message.author.id
+    tok = (rest or "").split()
+    bet = None
+    if tok:
+        cleaned = tok[0].replace(",", "").lower().replace("k", "000").replace("m", "000000")
+        if cleaned.isdigit():
+            bet = int(cleaned)
+    if bet is None:
+        await message.channel.send(
+            f"🎩 **THE HIGH-ROLLER ROOM**\n\n"
+            f"Minimum bet: **{HIGHROLLER_MIN_BET:,}**. Maximum: **{HIGHROLLER_MAX_BET:,}**.\n"
+            f"Tables: Double or Nothing (x2) · Five Stack (x5) · The Ten (x10).\n\n"
+            f"Buy in: `_highroller 250k`"
+        )
+        return
+    if bet < HIGHROLLER_MIN_BET:
+        await message.channel.send(f"🎩 This room starts at **{HIGHROLLER_MIN_BET:,}**. The slots are down the hall.")
+        return
+    if bet > HIGHROLLER_MAX_BET:
+        await message.channel.send(f"🎩 House limit is **{HIGHROLLER_MAX_BET:,}** per hand. Even we have rules.")
+        return
+    if economy.balance(uid) < bet:
+        await message.channel.send(f"❌ You need **{bet:,}** to sit. You have **{economy.balance(uid):,}**.")
+        return
+    embed = discord.Embed(
+        title="🎩 THE HIGH-ROLLER ROOM",
+        description=(
+            f"**{bet:,}** on the felt. Pick your table:\n\n"
+            f"🎲 **Double or Nothing** — x2 · 48% odds\n"
+            f"🎲 **Five Stack** — x5 · 19% odds\n"
+            f"🎲 **The Ten** — x10 · 9.5% odds\n\n"
+            f"_Bet is taken only when you pick a table._"
+        ),
+        color=0xE5C07B,
+    )
+    await message.channel.send(embed=embed, view=HighRollerView(uid, bet))
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⭐ PRESTIGE / REBIRTH SYSTEM
+# Endgame for the rich: burn your entire empire (10M+ net worth) for a permanent
+# prestige rank, badge, and a small daily bonus. Resets the economy grind while
+# keeping identity (XP, achievements, pets). Solves "rich = game over".
+# ─────────────────────────────────────────────────────────────────────────────
+PRESTIGE_FILE = MEMORY_DIR / "prestige.json"
+PRESTIGE_REQUIREMENT = 10_000_000   # net worth needed to prestige
+PRESTIGE_FRESH_START = 50_000       # starting cash after rebirth
+PRESTIGE_DAILY_BONUS_PCT = 5        # +5% daily reward per prestige level
+PRESTIGE_DAILY_BONUS_CAP = 25       # capped at +25%
+
+_ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
+
+
+def _roman(n: int) -> str:
+    if n <= 10:
+        return _ROMAN[n]
+    return f"X{n - 10}" if n <= 20 else str(n)
+
+
+def _load_prestige() -> dict:
+    if PRESTIGE_FILE.exists():
+        try:
+            with open(PRESTIGE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_prestige(data: dict):
+    try:
+        with open(PRESTIGE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save prestige failed: %s", e)
+
+
+def prestige_level(user_id) -> int:
+    data = _load_prestige()
+    return data.get("users", {}).get(str(user_id), {}).get("level", 0)
+
+
+def prestige_badge(user_id) -> str:
+    """Short badge like '⭐III' for display next to names. Empty if level 0."""
+    lvl = prestige_level(user_id)
+    return f"⭐{_roman(lvl)}" if lvl > 0 else ""
+
+
+def prestige_daily_bonus_pct(user_id) -> int:
+    return min(PRESTIGE_DAILY_BONUS_CAP, prestige_level(user_id) * PRESTIGE_DAILY_BONUS_PCT)
+
+
+def _has_active_listings(user_id) -> bool:
+    """Guard: can't prestige with assets hidden in marketplace escrow."""
+    try:
+        mdata = _load_market()
+        for l in mdata.get("listings", {}).values():
+            if l.get("status") == "active" and int(l.get("seller_id", 0)) == int(user_id):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _execute_prestige_reset(user_id: int) -> dict:
+    """Wipe the user's economic empire. Returns a summary of what was burned."""
+    uid = str(user_id)
+    summary = {}
+
+    # Cash -> fresh start
+    bal = economy.balance(user_id)
+    summary["cash"] = bal
+    economy.add(user_id, PRESTIGE_FRESH_START - bal, "prestige rebirth")
+
+    # Businesses
+    bdata = _load_businesses()
+    summary["businesses"] = len(bdata.get("users", {}).pop(uid, []) or [])
+    _save_businesses(bdata)
+
+    # Real estate (+ clear any legendary ownership)
+    redata = _load_re()
+    props = redata.get("users", {}).pop(uid, []) or []
+    summary["properties"] = len(props)
+    legends = redata.get("legendary_owners", {})
+    for ptype in [p.get("type") for p in props]:
+        if legends.get(ptype) in (user_id, uid, str(user_id)):
+            legends.pop(ptype, None)
+    _save_re(redata)
+
+    # Stocks
+    sdata = _load_stocks()
+    holdings = sdata.get("holdings", {}).pop(uid, {}) or {}
+    summary["stocks"] = sum(1 for v in holdings.values() if v > 0)
+    _save_stocks(sdata)
+
+    # Venues
+    ndata = _load_nightlife()
+    summary["venues"] = len(ndata.get("users", {}).pop(uid, []) or [])
+    _save_nightlife(ndata)
+
+    # Dealer empire: stash, dirty money, upgrades, jail — and release territories
+    ddata = _load_dealer()
+    rec = ddata.get("users", {}).get(uid)
+    if rec:
+        summary["stash_g"] = sum(rec.get("stash", {}).values())
+        rec["stash"] = {}
+        rec["dirty_money"] = 0
+        rec["upgrades"] = {}
+        rec["jail_until"] = 0
+        rec["heat"] = 0
+    released = 0
+    for corner in _territory_store(ddata).values():
+        if corner.get("controller") == uid:
+            corner["controller"] = None
+            corner["defense"] = 0
+            released += 1
+    summary["territories"] = released
+    _save_dealer(ddata)
+
+    return summary
+
+
+class PrestigeConfirmView(discord.ui.View):
+    def __init__(self, user_id: int, net_worth: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.net_worth = net_worth
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This rebirth isn't yours to confirm.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="BURN IT ALL — PRESTIGE", emoji="🔥", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Re-verify at click time (state may have changed)
+        nw = compute_net_worth(self.user_id)["total"]
+        if nw < PRESTIGE_REQUIREMENT:
+            await interaction.response.edit_message(
+                content=f"❌ Your net worth dropped below **{PRESTIGE_REQUIREMENT:,}**. Rebirth cancelled.",
+                embed=None, view=None,
+            )
+            return
+        if _has_active_listings(self.user_id):
+            await interaction.response.edit_message(
+                content="❌ You still have active marketplace listings. Cancel them first — no hiding assets in escrow.",
+                embed=None, view=None,
+            )
+            return
+
+        summary = _execute_prestige_reset(self.user_id)
+
+        pdata = _load_prestige()
+        prec = pdata.setdefault("users", {}).setdefault(str(self.user_id), {"level": 0, "first_at": int(time.time()), "burned_total": 0})
+        prec["level"] = prec.get("level", 0) + 1
+        prec["last_at"] = int(time.time())
+        prec["burned_total"] = prec.get("burned_total", 0) + nw
+        _save_prestige(pdata)
+        lvl = prec["level"]
+
+        try:
+            track_activity("prestige", self.user_id, interaction.user.display_name, f"prestiged to {_roman(lvl)} (burned {nw:,})")
+        except Exception:
+            pass
+        log.info("PRESTIGE: %s -> level %d (burned %s)", self.user_id, lvl, nw)
+
+        burned_lines = []
+        if summary.get("businesses"): burned_lines.append(f"🏢 {summary['businesses']} businesses")
+        if summary.get("properties"): burned_lines.append(f"🏘️ {summary['properties']} properties")
+        if summary.get("venues"): burned_lines.append(f"🌃 {summary['venues']} venues")
+        if summary.get("stocks"): burned_lines.append(f"📈 {summary['stocks']} stock positions")
+        if summary.get("territories"): burned_lines.append(f"🗺️ {summary['territories']} territories released")
+        if summary.get("stash_g"): burned_lines.append(f"💊 {summary['stash_g']}g of product")
+        burned = "\n".join(burned_lines) if burned_lines else "_just a pile of cash_"
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=discord.Embed(
+                title=f"⭐ REBORN — DON {_roman(lvl)}",
+                description=(
+                    f"**{interaction.user.display_name}** burned a **{nw:,}** coin empire to the ground.\n\n"
+                    f"**Gone:**\n{burned}\n\n"
+                    f"**Forever yours:**\n"
+                    f"⭐ Prestige rank **{_roman(lvl)}** — badge on the leaderboard\n"
+                    f"💰 **+{prestige_daily_bonus_pct(self.user_id)}%** on every `/daily` (permanent)\n"
+                    f"🏛️ A spot in `_legends`\n\n"
+                    f"Fresh start: **{PRESTIGE_FRESH_START:,}** coins. Run it back. 🥃"
+                ),
+                color=0xFFD700,
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="Keep my empire", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Rebirth cancelled. The empire stands.", embed=None, view=None)
+
+
+async def _handle_prestige(message: discord.Message):
+    """Prefix-only: _prestige — burn your empire for a permanent rank."""
+    uid = message.author.id
+    nw = compute_net_worth(uid)["total"]
+    lvl = prestige_level(uid)
+    rank_line = f"Current rank: **⭐ Don {_roman(lvl)}**\n" if lvl else ""
+
+    if nw < PRESTIGE_REQUIREMENT:
+        await message.channel.send(
+            f"⭐ **PRESTIGE**\n\n{rank_line}"
+            f"Burn your entire empire — cash, businesses, property, stocks, venues, turf — "
+            f"for a permanent rank, leaderboard badge, and **+{PRESTIGE_DAILY_BONUS_PCT}%** daily bonus per level.\n\n"
+            f"📊 Requirement: net worth **{PRESTIGE_REQUIREMENT:,}**\n"
+            f"💼 You: **{nw:,}** ({max(0, PRESTIGE_REQUIREMENT - nw):,} to go)"
+        )
+        return
+    if _has_active_listings(uid):
+        await message.channel.send(
+            "❌ Cancel your active marketplace listings first — you can't prestige with assets parked in escrow."
+        )
+        return
+
+    embed = discord.Embed(
+        title="⭐ PRESTIGE — POINT OF NO RETURN",
+        description=(
+            f"{rank_line}"
+            f"Net worth on the table: **{nw:,}**\n\n"
+            f"**This wipes:** cash (fresh {PRESTIGE_FRESH_START:,} start), businesses, real estate, "
+            f"stocks, venues, dealer stash/upgrades, and releases your territories.\n"
+            f"**This survives:** XP & level, achievements, pets, marriage, rep, supporter perks.\n\n"
+            f"**You gain forever:** rank **Don {_roman(lvl + 1)}**, the ⭐ badge, "
+            f"and **+{min(PRESTIGE_DAILY_BONUS_CAP, (lvl + 1) * PRESTIGE_DAILY_BONUS_PCT)}%** daily bonus.\n\n"
+            f"_No undo. No refunds. Legends only._"
+        ),
+        color=0xFF3B5C,
+    )
+    await message.channel.send(embed=embed, view=PrestigeConfirmView(uid, nw))
+
+
+async def _send_legends(message: discord.Message):
+    """Prefix-only: _legends — the Hall of Legends (prestige leaderboard)."""
+    data = _load_prestige()
+    users = data.get("users", {})
+    ranked = sorted(users.items(), key=lambda kv: (kv[1].get("level", 0), kv[1].get("burned_total", 0)), reverse=True)
+    ranked = [(u, r) for u, r in ranked if r.get("level", 0) > 0][:10]
+    if not ranked:
+        await message.channel.send(
+            "🏛️ **HALL OF LEGENDS**\n\nEmpty. Nobody's had the stones to burn an empire yet.\n"
+            f"Hit **{PRESTIGE_REQUIREMENT:,}** net worth and `_prestige` to be the first."
+        )
+        return
+    lines = []
+    for i, (uid, rec) in enumerate(ranked):
+        try:
+            m = message.guild.get_member(int(uid)) if message.guild else None
+            name = m.display_name if m else f"User {uid}"
+        except Exception:
+            name = f"User {uid}"
+        lines.append(
+            f"**{i+1}.** ⭐ **Don {_roman(rec.get('level', 0))}** — {name} · "
+            f"_{rec.get('burned_total', 0):,} burned_"
+        )
+    embed = discord.Embed(
+        title="🏛️ HALL OF LEGENDS",
+        description="\n".join(lines),
+        color=0xFFD700,
+    )
+    embed.set_footer(text="Ranked by prestige level · _prestige to join them")
+    await message.channel.send(embed=embed)
+
+
+
 async def _send_perks_embed(message: discord.Message):
     """Show supporter tiers + perks. Doubles as advertising. Prefix-only: _perks"""
     # Patreon page
@@ -19873,6 +20459,18 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("reinforce", "defend", "fortify"):
         await _handle_reinforce_turf(message, rest)
+        return True
+    if cmd_name in ("prestige", "rebirth", "ascend"):
+        await _handle_prestige(message)
+        return True
+    if cmd_name in ("legends", "prestigelb", "halloflegends"):
+        await _send_legends(message)
+        return True
+    if cmd_name in ("luxury", "luxuryshop", "lux"):
+        await _handle_luxury(message)
+        return True
+    if cmd_name in ("highroller", "hr", "whale"):
+        await _handle_highroller(message, rest)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
