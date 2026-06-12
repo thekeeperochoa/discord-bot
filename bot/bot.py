@@ -5088,6 +5088,10 @@ def compute_net_worth(uid) -> dict:
         re_data = _load_re()
         for prop in re_data.get("users", {}).get(uid_str, []):
             re_value += _re_current_price(prop.get("type"), re_data)
+            # Outstanding mortgage debt counts against you — otherwise borrowing
+            # against property would inflate net worth (free prestige exploit)
+            if prop.get("mortgage"):
+                re_value -= prop["mortgage"].get("amount", 0)
     except Exception:
         pass
 
@@ -16644,6 +16648,8 @@ def _remove_asset_from_seller(seller_id: int, asset_type: str, asset_identifier)
         idx = asset_identifier
         if not (0 <= idx < len(props)):
             return None
+        if props[idx].get("mortgage"):
+            return None  # bank holds the deed — can't list mortgaged property
         prop = props.pop(idx)
         # If it's a legendary/unique, clear the owner mapping while in escrow
         info = PROPERTIES.get(prop.get("type"), {})
@@ -16694,9 +16700,11 @@ def _seller_owns_inventory_summary(seller_id: int) -> list:
     for i, v in enumerate(ndata["users"].get(str(seller_id), [])):
         info = VENUE_TYPES.get(v.get("type"), {"emoji": "🌃", "name": "?"})
         out.append((f"{info['emoji']} {info['name']} (#{i+1})", "venue", i))
-    # Real estate properties
+    # Real estate properties (mortgaged ones can't be listed — bank holds the deed)
     redata = _load_re()
     for i, prop in enumerate(redata.get("users", {}).get(str(seller_id), [])):
+        if prop.get("mortgage"):
+            continue
         info = PROPERTIES.get(prop.get("type"), {"emoji": "🏠", "name": "?"})
         cond = int(prop.get("condition", 0))
         legendary = " 🏆" if info.get("unique") else ""
@@ -17311,13 +17319,14 @@ def _re_current_price(prop_key: str, data: dict = None) -> int:
 
 
 def _re_decay_condition(prop: dict):
-    """Apply condition decay since last_updated."""
+    """Apply condition decay since last_updated. Airbnb mode wears 2x faster."""
     now = time.time()
     last = prop.get("last_updated", now)
     hours = (now - last) / 3600
     if hours <= 0:
         return
-    decay = hours * RE_CONDITION_DECAY_PER_HOUR
+    rate = RE_CONDITION_DECAY_PER_HOUR * (2.0 if prop.get("airbnb") else 1.0)
+    decay = hours * rate
     prop["condition"] = max(0, prop.get("condition", RE_MAX_CONDITION) - decay)
     prop["last_updated"] = now
 
@@ -17341,12 +17350,557 @@ def _re_pending_rent(prop: dict) -> int:
     # Apply condition penalty
     cond_pct = prop["condition"] / RE_MAX_CONDITION
     rent = int(rent * cond_pct)
+    # Renovations: +25% rent per level (0-3)
+    reno = prop.get("reno_level", 0)
+    if reno:
+        rent = int(rent * (1 + 0.25 * reno))
     return rent
 
 
 def _user_properties(uid: int) -> list:
     data = _load_re()
     return data.get("users", {}).get(str(uid), [])
+
+
+# ── Renovations & Airbnb mode (prefix commands for /realestate) ──────────────
+RENO_MAX_LEVEL = 3
+RENO_COST_PCT = 0.30          # of current property value, scaling with level
+AIRBNB_CONVERT_PCT = 0.02     # one-time conversion fee, min 1k
+
+
+def _re_slot(message_rest: str) -> int | None:
+    tok = (message_rest or "").split()
+    if tok and tok[0].isdigit():
+        return int(tok[0])
+    return None
+
+
+async def _handle_renovate(message: discord.Message, rest: str):
+    """Prefix-only: _renovate <slot> — +25% rent per level, max 3."""
+    slot = _re_slot(rest)
+    if slot is None:
+        await message.channel.send("Usage: `_renovate <slot>` — slot number from `/realestate portfolio`.")
+        return
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    if not (1 <= slot <= len(props)):
+        await message.channel.send(f"❌ You have {len(props)} properties. Slot must be 1-{max(1, len(props))}.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"name": "?", "emoji": "🏠"})
+    lvl = prop.get("reno_level", 0)
+    if lvl >= RENO_MAX_LEVEL:
+        await message.channel.send(f"{info['emoji']} **{info['name']}** is already fully renovated (⭐⭐⭐).")
+        return
+    value = _re_current_price(prop["type"], data)
+    cost = int(value * RENO_COST_PCT * (lvl + 1))
+    if economy.balance(uid) < cost:
+        await message.channel.send(
+            f"❌ Renovation Lv{lvl + 1} on **{info['name']}** costs **{cost:,}**. You have **{economy.balance(uid):,}**."
+        )
+        return
+    economy.add(uid, -cost, f"renovation: {prop['type']}")
+    prop["reno_level"] = lvl + 1
+    _save_re(data)
+    try:
+        track_economy_event("spent", cost)
+        track_activity("realestate_reno", uid, message.author.display_name, f"renovated {info['name']} to Lv{lvl+1}")
+    except Exception:
+        pass
+    await message.channel.send(
+        f"# 🔨 RENOVATED\n\n"
+        f"{info['emoji']} **{info['name']}** upgraded to {'⭐' * (lvl + 1)} (Lv{lvl + 1}/{RENO_MAX_LEVEL}).\n"
+        f"💰 Rent boost: **+{(lvl + 1) * 25}%** permanently · Cost: **{cost:,}**\n"
+        f"Balance: **{economy.balance(uid):,}**"
+    )
+
+
+async def _handle_airbnb(message: discord.Message, rest: str):
+    """Prefix-only: _airbnb <slot> — toggle short-term rental mode."""
+    slot = _re_slot(rest)
+    if slot is None:
+        await message.channel.send(
+            "Usage: `_airbnb <slot>` — toggles short-term rental on that property.\n"
+            "_Higher average rent but swingy (x0.5–x2.0 per collection), and the place wears 2x faster._"
+        )
+        return
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    if not (1 <= slot <= len(props)):
+        await message.channel.send(f"❌ You have {len(props)} properties. Slot must be 1-{max(1, len(props))}.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"name": "?", "emoji": "🏠"})
+    if prop.get("airbnb"):
+        prop["airbnb"] = False
+        _save_re(data)
+        await message.channel.send(
+            f"🏠 **{info['name']}** is back to long-term tenants. Steady rent, normal wear."
+        )
+        return
+    fee = max(1000, int(_re_current_price(prop["type"], data) * AIRBNB_CONVERT_PCT))
+    if economy.balance(uid) < fee:
+        await message.channel.send(f"❌ Listing setup (photos, cleaning, lockbox) costs **{fee:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -fee, f"airbnb setup: {prop['type']}")
+    prop["airbnb"] = True
+    _save_re(data)
+    await message.channel.send(
+        f"# 🏖️ LISTED ON SHORT-TERM RENTAL\n\n"
+        f"{info['emoji']} **{info['name']}** is live. Setup fee: **{fee:,}**.\n"
+        f"📈 Each collection now rolls **x0.5–x2.0** on the rent\n"
+        f"🔧 Wear is **2x faster** + party damage on collections\n\n"
+        f"_Toggle back anytime with `_airbnb {slot}`. High season or bust._"
+    )
+
+
+
+# ── Tenants & Property Managers ───────────────────────────────────────────────
+TENANT_TYPES = {
+    "dream":     {"emoji": "💎", "name": "Dream Tenant",     "weight": 10,
+                  "desc": "+20% rent, treats the place like their own"},
+    "solid":     {"emoji": "🙂", "name": "Solid Tenant",     "weight": 55,
+                  "desc": "pays on time, no drama"},
+    "messy":     {"emoji": "😬", "name": "Messy Tenant",     "weight": 25,
+                  "desc": "-5% rent, dings the place up"},
+    "nightmare": {"emoji": "💀", "name": "Nightmare Tenant", "weight": 10,
+                  "desc": "sometimes skips rent entirely, wrecks things"},
+}
+EVICT_COST_PCT = 0.05      # of property value, min 2k (lawyers aren't free)
+MANAGER_HIRE_FEE = 5_000
+MANAGER_CUT = 0.12         # of every auto-collected payment
+
+
+def _assign_tenant(prop: dict) -> dict:
+    keys = list(TENANT_TYPES.keys())
+    weights = [TENANT_TYPES[k]["weight"] for k in keys]
+    q = random.choices(keys, weights=weights)[0]
+    prop["tenant"] = {"quality": q, "since": int(time.time())}
+    return prop["tenant"]
+
+
+def _apply_tenant_to_rent(prop: dict, pending: int) -> tuple:
+    """Apply tenant effects at manual collection. Returns (pending, note)."""
+    if prop.get("airbnb"):
+        return pending, ""  # short-term guests, no tenant
+    tenant = prop.get("tenant") or _assign_tenant(prop)
+    q = tenant.get("quality", "solid")
+    if q == "dream":
+        bonus = int(pending * 0.20)
+        return pending + bonus, f" · 💎 dream tenant (+{bonus:,})"
+    if q == "messy":
+        cut = int(pending * 0.05)
+        prop["condition"] = max(0, prop.get("condition", 0) - random.randint(1, 4))
+        return pending - cut, f" · 😬 messy tenant (-{cut:,})"
+    if q == "nightmare":
+        prop["condition"] = max(0, prop.get("condition", 0) - random.randint(2, 6))
+        if random.random() < 0.25:
+            return 0, " · 💀 tenant SKIPPED rent"
+        cut = int(pending * 0.10)
+        return pending - cut, f" · 💀 nightmare tenant (-{cut:,})"
+    return pending, ""
+
+
+async def _handle_tenants(message: discord.Message):
+    """Prefix-only: _tenants — see who's living in your properties."""
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    if not props:
+        await message.channel.send("❌ You don't own any properties.")
+        return
+    changed = False
+    lines = []
+    for i, prop in enumerate(props, start=1):
+        info = PROPERTIES.get(prop["type"], {"emoji": "🏠", "name": "?"})
+        if prop.get("airbnb"):
+            lines.append(f"#{i} {info['emoji']} **{info['name']}** — 🏖️ short-term guests (no tenant)")
+            continue
+        tenant = prop.get("tenant")
+        if not tenant:
+            tenant = _assign_tenant(prop)
+            changed = True
+        t = TENANT_TYPES.get(tenant.get("quality", "solid"), TENANT_TYPES["solid"])
+        mgr = " · 🧑‍💼 managed" if prop.get("manager") else ""
+        lines.append(f"#{i} {info['emoji']} **{info['name']}** — {t['emoji']} {t['name']} (_{t['desc']}_){mgr}")
+    if changed:
+        _save_re(data)
+    embed = discord.Embed(title="🏠 Your Tenants", description="\n".join(lines), color=0x5865F2)
+    embed.set_footer(text="_evict <slot> to kick a bad one (legal fees apply) · _manager <slot> to hire help")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_evict(message: discord.Message, rest: str):
+    """Prefix-only: _evict <slot> — evict the tenant; a new one moves in on next collection."""
+    slot = _re_slot(rest)
+    if slot is None:
+        await message.channel.send("Usage: `_evict <slot>` — slot from `/realestate portfolio`.")
+        return
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    if not (1 <= slot <= len(props)):
+        await message.channel.send(f"❌ You have {len(props)} properties. Slot must be 1-{max(1, len(props))}.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"emoji": "🏠", "name": "?"})
+    if prop.get("airbnb"):
+        await message.channel.send(f"{info['emoji']} **{info['name']}** is on short-term rental — no tenant to evict.")
+        return
+    if not prop.get("tenant"):
+        await message.channel.send(f"{info['emoji']} **{info['name']}** has no tenant yet — one moves in at the next collection.")
+        return
+    cost = max(2000, int(_re_current_price(prop["type"], data) * EVICT_COST_PCT))
+    if economy.balance(uid) < cost:
+        await message.channel.send(f"❌ Eviction (lawyers, notices, locksmith) costs **{cost:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    old = TENANT_TYPES.get(prop["tenant"].get("quality", "solid"), TENANT_TYPES["solid"])
+    economy.add(uid, -cost, f"eviction: {prop['type']}")
+    prop["tenant"] = None
+    _save_re(data)
+    await message.channel.send(
+        f"# 📦 EVICTED\n\n"
+        f"{old['emoji']} The {old['name'].lower()} is out of {info['emoji']} **{info['name']}**. "
+        f"Legal fees: **{cost:,}**.\n"
+        f"_A new tenant moves in at your next rent collection. Roll the dice._"
+    )
+
+
+async def _handle_manager(message: discord.Message, rest: str):
+    """Prefix-only: _manager <slot> — hire/fire a property manager (auto-collects, 12% cut)."""
+    slot = _re_slot(rest)
+    if slot is None:
+        await message.channel.send(
+            f"Usage: `_manager <slot>` — toggles a property manager.\n"
+            f"_Hire fee **{MANAGER_HIRE_FEE:,}**. They auto-collect rent every 2h for a "
+            f"**{int(MANAGER_CUT*100)}% cut** and handle all tenant drama (no events, good or bad)._"
+        )
+        return
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    if not (1 <= slot <= len(props)):
+        await message.channel.send(f"❌ You have {len(props)} properties. Slot must be 1-{max(1, len(props))}.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"emoji": "🏠", "name": "?"})
+    if prop.get("manager"):
+        prop["manager"] = False
+        _save_re(data)
+        await message.channel.send(f"🧑‍💼 Manager fired from {info['emoji']} **{info['name']}**. Rent collection is on you again.")
+        return
+    if economy.balance(uid) < MANAGER_HIRE_FEE:
+        await message.channel.send(f"❌ Hiring costs **{MANAGER_HIRE_FEE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -MANAGER_HIRE_FEE, f"manager hire: {prop['type']}")
+    prop["manager"] = True
+    _save_re(data)
+    await message.channel.send(
+        f"# 🧑‍💼 MANAGER HIRED\n\n"
+        f"{info['emoji']} **{info['name']}** is now professionally managed.\n"
+        f"✅ Rent auto-collected every ~2h (never hits the 48h cap)\n"
+        f"✅ No tenant drama, no property events\n"
+        f"💸 Their cut: **{int(MANAGER_CUT*100)}%** of every payment · Hire fee: **{MANAGER_HIRE_FEE:,}**"
+    )
+
+
+async def re_manager_scheduler():
+    """Every 2h: auto-collect managed rent, seize defaulted/neglected properties,
+    and resolve ended foreclosure auctions."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            data = _load_re()
+            # Seizures (defaults + neglect) and auction resolution
+            seized = _re_seizure_sweep(data)
+            resolved = _re_resolve_auctions(data)
+            payouts = {}  # uid -> total
+            for uid, props in data.get("users", {}).items():
+                for prop in props:
+                    if not prop.get("manager"):
+                        continue
+                    pending = _re_pending_rent(prop)
+                    if pending <= 0:
+                        continue
+                    cut = int(pending * MANAGER_CUT)
+                    net = pending - cut
+                    prop["last_rent_collected"] = time.time()
+                    payouts[uid] = payouts.get(uid, 0) + net
+            if payouts or seized or resolved:
+                _save_re(data)
+                for uid, amount in payouts.items():
+                    economy.add(int(uid), amount, "managed rent")
+                    try:
+                        track_economy_event("earned", amount)
+                    except Exception:
+                        pass
+                if payouts:
+                    log.info("Manager auto-collect: paid %d landlords", len(payouts))
+                if seized or resolved:
+                    log.info("RE sweep: %d seized, %d auctions resolved", seized, resolved)
+        except Exception as e:
+            log.warning("re_manager_scheduler error: %s", e)
+        await asyncio.sleep(2 * 3600)
+
+
+
+# ── Collateral Loans (mortgages) & Foreclosure Auctions ──────────────────────
+MORTGAGE_LTV = 0.50            # borrow up to 50% of property value
+MORTGAGE_INTEREST = 0.15       # owe principal + 15%
+MORTGAGE_TERM_HOURS = 72       # repay within 72h or the bank takes the deed
+FORECLOSE_NEGLECT_HOURS = 48   # 0% condition for this long = city seizes it
+FORECLOSE_AUCTION_HOURS = 24   # auction duration
+FORECLOSE_MIN_BID_PCT = 0.40   # auctions start at 40% of value — the bargain
+
+
+def _re_foreclosures(data: dict) -> dict:
+    return data.setdefault("foreclosures", {})
+
+
+def _foreclose_next_id(data: dict) -> str:
+    nid = data.get("foreclose_next_id", 1)
+    data["foreclose_next_id"] = nid + 1
+    return f"F{nid:04d}"
+
+
+def _seize_property(data: dict, owner_id: str, prop: dict, reason: str):
+    """Move a property from an owner into the foreclosure auction pool."""
+    info = PROPERTIES.get(prop.get("type"), {})
+    if info.get("unique"):
+        data.setdefault("legendary_owners", {}).pop(prop.get("type"), None)
+    fid = _foreclose_next_id(data)
+    value = _re_current_price(prop.get("type"), data)
+    debt = prop.get("mortgage", {}).get("amount", 0) if prop.get("mortgage") else 0
+    prop.pop("mortgage", None)
+    prop.pop("manager", None)
+    _re_foreclosures(data)[fid] = {
+        "prop": prop,
+        "seized_from": owner_id,
+        "reason": reason,                  # "default" | "neglect"
+        "debt": debt,
+        "min_bid": max(1000, int(value * FORECLOSE_MIN_BID_PCT)),
+        "ends_at": time.time() + FORECLOSE_AUCTION_HOURS * 3600,
+        "top_bid": None,                   # {"uid": str, "amount": int}
+    }
+    log.info("FORECLOSED %s from %s (%s) -> auction %s", prop.get("type"), owner_id, reason, fid)
+    return fid
+
+
+def _re_seizure_sweep(data: dict) -> int:
+    """Find defaulted mortgages + long-neglected ruins and seize them."""
+    seized = 0
+    now = time.time()
+    for uid, props in list(data.get("users", {}).items()):
+        keep = []
+        for prop in props:
+            _re_decay_condition(prop)
+            take = None
+            m = prop.get("mortgage")
+            if m and now > m.get("due", 0):
+                take = "default"
+            elif prop.get("condition", 100) <= 0:
+                if not prop.get("zero_since"):
+                    prop["zero_since"] = now
+                elif now - prop["zero_since"] > FORECLOSE_NEGLECT_HOURS * 3600:
+                    take = "neglect"
+            else:
+                prop.pop("zero_since", None)
+            if take:
+                _seize_property(data, uid, prop, take)
+                seized += 1
+            else:
+                keep.append(prop)
+        data["users"][uid] = keep
+    return seized
+
+
+def _re_resolve_auctions(data: dict) -> int:
+    """Close ended foreclosure auctions: deliver to winner, pay out the old owner."""
+    resolved = 0
+    now = time.time()
+    fc = _re_foreclosures(data)
+    for fid in list(fc.keys()):
+        auc = fc[fid]
+        if now < auc.get("ends_at", 0):
+            continue
+        prop = auc["prop"]
+        info = PROPERTIES.get(prop.get("type"), {})
+        top = auc.get("top_bid")
+        if top:
+            winner = top["uid"]
+            data.setdefault("users", {}).setdefault(winner, []).append(prop)
+            if info.get("unique"):
+                data.setdefault("legendary_owners", {})[prop.get("type")] = int(winner)
+            # Old owner gets: bid minus bank debt (default), or half (neglect — city's cut)
+            if auc.get("reason") == "default":
+                payout = max(0, top["amount"] - auc.get("debt", 0))
+            else:
+                payout = top["amount"] // 2
+            if payout > 0:
+                try:
+                    economy.add(int(auc["seized_from"]), payout, "foreclosure proceeds")
+                except Exception:
+                    pass
+            log.info("Auction %s won by %s at %s", fid, winner, top["amount"])
+        # No bids -> property dissolves back to the open market (buyable fresh)
+        del fc[fid]
+        resolved += 1
+    return resolved
+
+
+async def _handle_mortgage(message: discord.Message, rest: str):
+    """Prefix-only: _mortgage <slot> — borrow 50% LTV against a property. No arg = status."""
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    slot = _re_slot(rest)
+    if slot is None:
+        loans = [(i, p) for i, p in enumerate(props, 1) if p.get("mortgage")]
+        if not loans:
+            await message.channel.send(
+                f"🏦 No active mortgages. `_mortgage <slot>` borrows **{int(MORTGAGE_LTV*100)}%** of a "
+                f"property's value — repay +{int(MORTGAGE_INTEREST*100)}% within {MORTGAGE_TERM_HOURS}h "
+                f"with `_payloan <slot>`, or the bank takes the deed."
+            )
+            return
+        lines = []
+        for i, p in loans:
+            info = PROPERTIES.get(p["type"], {"emoji": "🏠", "name": "?"})
+            m = p["mortgage"]
+            lines.append(f"#{i} {info['emoji']} **{info['name']}** — owe **{m['amount']:,}** · due <t:{int(m['due'])}:R>")
+        await message.channel.send("🏦 **Your mortgages:**\n" + "\n".join(lines) + "\n\n_`_payloan <slot>` to clear one._")
+        return
+    if not (1 <= slot <= len(props)):
+        await message.channel.send(f"❌ You have {len(props)} properties. Slot must be 1-{max(1, len(props))}.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"emoji": "🏠", "name": "?"})
+    if prop.get("mortgage"):
+        m = prop["mortgage"]
+        await message.channel.send(
+            f"{info['emoji']} **{info['name']}** is already mortgaged — owe **{m['amount']:,}**, due <t:{int(m['due'])}:R>."
+        )
+        return
+    value = _re_current_price(prop["type"], data)
+    loan = int(value * MORTGAGE_LTV)
+    owed = int(loan * (1 + MORTGAGE_INTEREST))
+    due = time.time() + MORTGAGE_TERM_HOURS * 3600
+    prop["mortgage"] = {"amount": owed, "borrowed": loan, "due": due}
+    _save_re(data)
+    new_bal = economy.add(uid, loan, f"mortgage: {prop['type']}")
+    await message.channel.send(
+        f"# 🏦 MORTGAGE APPROVED\n\n"
+        f"{info['emoji']} **{info['name']}** is now collateral.\n"
+        f"💰 Cash in hand: **+{loan:,}** · Balance: **{new_bal:,}**\n"
+        f"📜 You owe: **{owed:,}** (+{int(MORTGAGE_INTEREST*100)}%) by <t:{int(due)}:F>\n"
+        f"⚠️ Miss the deadline and the bank **seizes the property** for auction. "
+        f"It can't be sold while mortgaged. `_payloan {slot}` to clear it."
+    )
+
+
+async def _handle_payloan(message: discord.Message, rest: str):
+    """Prefix-only: _payloan <slot> — pay off a mortgage."""
+    uid = message.author.id
+    data = _load_re()
+    props = data.get("users", {}).get(str(uid), [])
+    slot = _re_slot(rest)
+    if slot is None or not (1 <= slot <= len(props)):
+        await message.channel.send("Usage: `_payloan <slot>` — see `_mortgage` for your loans.")
+        return
+    prop = props[slot - 1]
+    info = PROPERTIES.get(prop["type"], {"emoji": "🏠", "name": "?"})
+    m = prop.get("mortgage")
+    if not m:
+        await message.channel.send(f"{info['emoji']} **{info['name']}** isn't mortgaged.")
+        return
+    owed = m["amount"]
+    if economy.balance(uid) < owed:
+        await message.channel.send(f"❌ You owe **{owed:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -owed, f"mortgage payoff: {prop['type']}")
+    prop.pop("mortgage", None)
+    _save_re(data)
+    await message.channel.send(
+        f"# ✅ DEED CLEARED\n\n{info['emoji']} **{info['name']}** is yours again, free and clear. "
+        f"Paid **{owed:,}**. Balance: **{economy.balance(uid):,}**"
+    )
+
+
+async def _handle_foreclosures(message: discord.Message):
+    """Prefix-only: _foreclosures — browse seized-property auctions."""
+    data = _load_re()
+    fc = {k: v for k, v in _re_foreclosures(data).items() if time.time() < v.get("ends_at", 0)}
+    if not fc:
+        await message.channel.send(
+            "🏛️ No foreclosure auctions right now. Properties land here when owners default "
+            "on mortgages or let a place rot at 0% condition. Check back."
+        )
+        return
+    lines = []
+    for fid, auc in sorted(fc.items()):
+        prop = auc["prop"]
+        info = PROPERTIES.get(prop.get("type"), {"emoji": "🏠", "name": "?"})
+        cond = int(prop.get("condition", 0))
+        top = auc.get("top_bid")
+        bid_line = f"top bid **{top['amount']:,}**" if top else f"min bid **{auc['min_bid']:,}**"
+        legendary = " 🏆" if info.get("unique") else ""
+        lines.append(
+            f"`{fid}` {info['emoji']} **{info['name']}**{legendary} ({cond}% cond) — {bid_line} · ends <t:{int(auc['ends_at'])}:R>"
+        )
+    embed = discord.Embed(
+        title="🏛️ FORECLOSURE AUCTIONS",
+        description="\n".join(lines) + "\n\n_Bid with `_fbid <id> <amount>` — seized property sells cheap._",
+        color=0xE5C07B,
+    )
+    await message.channel.send(embed=embed)
+
+
+async def _handle_fbid(message: discord.Message, rest: str):
+    """Prefix-only: _fbid <id> <amount> — bid on a foreclosure."""
+    uid = message.author.id
+    tok = (rest or "").split()
+    if len(tok) < 2:
+        await message.channel.send("Usage: `_fbid F0001 25000` (or `25k`). See `_foreclosures`.")
+        return
+    fid = tok[0].upper()
+    cleaned = tok[1].replace(",", "").lower().replace("k", "000").replace("m", "000000")
+    if not cleaned.isdigit():
+        await message.channel.send("❌ That amount doesn't parse. Try `_fbid F0001 25k`.")
+        return
+    amount = int(cleaned)
+    data = _load_re()
+    auc = _re_foreclosures(data).get(fid)
+    if not auc or time.time() >= auc.get("ends_at", 0):
+        await message.channel.send(f"❌ Auction `{fid}` isn't active. `_foreclosures` for the live list.")
+        return
+    if auc.get("seized_from") == str(uid):
+        await message.channel.send("❌ You can't bid on your own seized property. The bank has feelings about that.")
+        return
+    top = auc.get("top_bid")
+    floor = max(auc["min_bid"], int(top["amount"] * 1.05) + 1 if top else 0)
+    if amount < floor:
+        await message.channel.send(f"❌ Minimum next bid is **{floor:,}** (5% over the top bid).")
+        return
+    if economy.balance(uid) < amount:
+        await message.channel.send(f"❌ You need **{amount:,}** on hand to bid. You have **{economy.balance(uid):,}**.")
+        return
+    # Escrow: charge now, refund previous top bidder
+    economy.add(uid, -amount, f"foreclosure bid {fid}")
+    if top:
+        try:
+            economy.add(int(top["uid"]), top["amount"], f"outbid refund {fid}")
+        except Exception:
+            pass
+    auc["top_bid"] = {"uid": str(uid), "amount": amount}
+    _save_re(data)
+    prop_info = PROPERTIES.get(auc["prop"].get("type"), {"name": "?", "emoji": "🏠"})
+    await message.channel.send(
+        f"🔨 **{message.author.display_name}** bids **{amount:,}** on {prop_info['emoji']} "
+        f"**{prop_info['name']}** (`{fid}`). Ends <t:{int(auc['ends_at'])}:R> — outbid them or it's theirs."
+    )
+
 
 
 # ── /realestate command (multi-action dispatcher) ────────────────────────────
@@ -17456,15 +18010,18 @@ async def _re_portfolio(interaction):
         pending = _re_pending_rent(prop)
         total_value += value
         total_pending += pending
+        reno = prop.get("reno_level", 0)
+        reno_tag = f" {'⭐' * reno}" if reno else ""
+        bnb_tag = " 🏖️AIRBNB" if prop.get("airbnb") else ""
         lines = [
-            f"💰 Value: **{value:,}** • Rent: **{info.get('rent_per_hour', 0):,}/hr**",
+            f"💰 Value: **{value:,}** • Rent: **{info.get('rent_per_hour', 0):,}/hr**" + (f" _(+{reno*25}% reno)_" if reno else ""),
             f"{cond_emoji} Condition: **{cond}/100**",
             f"💵 Pending rent: **{pending:,}**" if pending > 0 else "💵 Pending rent: _none yet (6h cooldown)_",
         ]
         if cond < RE_MIN_CONDITION_FOR_RENT:
             lines.append(f"⚠️ **Below {RE_MIN_CONDITION_FOR_RENT}% — no rent until repaired**")
         embed.add_field(
-            name=f"#{i} {info['emoji']} {info['name']}",
+            name=f"#{i} {info['emoji']} {info['name']}{reno_tag}{bnb_tag}",
             value="\n".join(lines),
             inline=False,
         )
@@ -17578,6 +18135,13 @@ async def _re_sell(interaction, data, slot):
         )
         return
     prop = props[slot - 1]
+    if prop.get("mortgage"):
+        await interaction.response.send_message(
+            f"🏦 That property is mortgaged (owe **{prop['mortgage']['amount']:,}**). "
+            f"Pay it off with `_payloan {slot}` before selling.",
+            ephemeral=True,
+        )
+        return
     info = PROPERTIES.get(prop["type"])
     # Market sale (instant) — current price × condition factor (90% min)
     current = _re_current_price(prop["type"], data)
@@ -17661,9 +18225,54 @@ async def _re_collect(interaction, data):
         info = PROPERTIES.get(prop["type"], {})
         pending = _re_pending_rent(prop)
         if pending > 0:
+            note = ""
+            if prop.get("manager"):
+                # Managed: no drama (no tenants, no events, no airbnb swing) — flat cut
+                cut = int(pending * MANAGER_CUT)
+                pending -= cut
+                note = f" · 🧑‍💼 manager cut (-{cut:,})"
+            else:
+                # Airbnb mode: swingy payout (great weekends, dead weeks) + party wear
+                if prop.get("airbnb"):
+                    roll = random.uniform(0.5, 2.0)
+                    pending = int(pending * roll)
+                    wear = random.randint(2, 8)
+                    prop["condition"] = max(0, prop.get("condition", 0) - wear)
+                    note = f" 🏖️x{roll:.1f}"
+                # Tenant effects (long-term rentals only)
+                pending, t_note = _apply_tenant_to_rent(prop, pending)
+                note += t_note
+                # Property events (~12% per property per collection)
+                if random.random() < 0.12:
+                    ev = random.choice(["fire", "pipe", "squatters", "boom", "greattenants"])
+                    if ev == "fire":
+                        dmg = 15
+                        if has_insurance(user.id):
+                            dmg = 7
+                            note += " · 🔥 small fire (insured, -7 cond)"
+                        else:
+                            note += " · 🔥 small fire (-15 cond)"
+                        prop["condition"] = max(0, prop.get("condition", 0) - dmg)
+                    elif ev == "pipe":
+                        bill = int(pending * 0.10)
+                        pending -= bill
+                        note += f" · 🚿 burst pipe (-{bill:,})"
+                    elif ev == "squatters":
+                        lost = int(pending * 0.30)
+                        pending -= lost
+                        note += f" · 🏚️ squatters (-{lost:,})"
+                    elif ev == "boom":
+                        bonus = int(pending * 0.50)
+                        pending += bonus
+                        note += f" · 📈 neighborhood boom (+{bonus:,})"
+                    elif ev == "greattenants":
+                        bonus = int(pending * 0.25)
+                        pending += bonus
+                        note += f" · 💝 great tenants (+{bonus:,})"
+            pending = max(0, pending)
             total += pending
             prop["last_rent_collected"] = time.time()
-            lines.append(f"#{i} {info.get('emoji', '🏚️')} **{info.get('name', '?')}** — +{pending:,}")
+            lines.append(f"#{i} {info.get('emoji', '🏚️')} **{info.get('name', '?')}** — +{pending:,}{note}")
     _save_re(data)
     if total <= 0:
         await interaction.response.send_message(
@@ -18920,6 +19529,7 @@ async def on_ready():
     client.loop.create_task(nightlife_events_scheduler())
     client.loop.create_task(market_expire_scheduler())
     client.loop.create_task(stocks_scheduler())
+    client.loop.create_task(re_manager_scheduler())
     # Build invite cache for every guild so join attribution works
     for guild in client.guilds:
         await rebuild_invite_cache(guild)
@@ -20658,6 +21268,33 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("ask", "askjordan", "question", "qa"):
         await _handle_ask(message)
+        return True
+    if cmd_name in ("renovate", "reno", "upgradeproperty"):
+        await _handle_renovate(message, rest)
+        return True
+    if cmd_name in ("airbnb", "str", "shortterm"):
+        await _handle_airbnb(message, rest)
+        return True
+    if cmd_name in ("tenants", "tenant"):
+        await _handle_tenants(message)
+        return True
+    if cmd_name in ("evict", "eviction"):
+        await _handle_evict(message, rest)
+        return True
+    if cmd_name in ("manager", "hiremanager", "propertymanager"):
+        await _handle_manager(message, rest)
+        return True
+    if cmd_name in ("mortgage", "collateral", "borrow"):
+        await _handle_mortgage(message, rest)
+        return True
+    if cmd_name in ("payloan", "repaymortgage", "payoff"):
+        await _handle_payloan(message, rest)
+        return True
+    if cmd_name in ("foreclosures", "auctions", "seized"):
+        await _handle_foreclosures(message)
+        return True
+    if cmd_name in ("fbid", "bidforeclosure", "auctionbid"):
+        await _handle_fbid(message, rest)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
