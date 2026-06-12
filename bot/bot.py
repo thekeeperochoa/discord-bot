@@ -19828,6 +19828,155 @@ def _roll_wealth_event(user_id: int) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🤖 ASK JORDAN — personalized game Q&A
+# _ask -> button -> modal text box -> AI answers using the player's REAL stats
+# and the game's REAL price catalog (built live from the data structures, so
+# answers stay accurate as prices change).
+# ─────────────────────────────────────────────────────────────────────────────
+ASK_SYSTEM_PROMPT = (
+    "You are Jordan Belfort, the helpful concierge for a Discord economy game. "
+    "Answer the player's question accurately using ONLY the GAME CATALOG and "
+    "PLAYER PROFILE provided. Be concrete: name items and exact prices, and "
+    "tailor the answer to what the player can actually afford or already owns. "
+    "If they ask what they can buy, list real options at or under their budget, "
+    "cheapest to priciest, with prices. Keep it under 250 words, light charm, "
+    "no lectures, never invent items or prices that aren't in the catalog. "
+    "If the catalog doesn't cover something, say so and point them to _help or the docs."
+)
+
+
+def _build_game_catalog() -> str:
+    """Compact live price catalog from the real game data structures."""
+    parts = []
+    try:
+        parts.append("BUSINESSES (passive income/hr): " + "; ".join(
+            f"{i['name']} {i['cost']:,}c ({i['income_per_hour']:,}/hr)" for i in BUSINESS_TYPES.values()))
+    except Exception: pass
+    try:
+        parts.append("REAL ESTATE (rent/hr, prices drift daily): " + "; ".join(
+            f"{i['name']} ~{i['base_price']:,}c ({i['rent_per_hour']:,}/hr){' UNIQUE-1of1' if i.get('unique') else ''}"
+            for i in PROPERTIES.values()))
+    except Exception: pass
+    try:
+        parts.append("VENUES: " + "; ".join(
+            f"{i['name']} {i['cost']:,}c" for i in VENUE_TYPES.values()))
+    except Exception: pass
+    try:
+        parts.append("LUXURY (pure status, survives prestige): " + "; ".join(
+            f"{i['name']} {i['cost']:,}c" for i in LUXURY_ITEMS.values()))
+    except Exception: pass
+    try:
+        parts.append("TERRITORIES (claim cost, % bonus on sales): " + "; ".join(
+            f"{i['name']} {i['claim_cost']:,}c +{int(i['income_bonus']*100)}%" for i in TERRITORIES.values()))
+    except Exception: pass
+    try:
+        parts.append("DEALER UPGRADES (level costs scale ~1.4x): " + "; ".join(
+            f"{i['name']} from {int(i['base_cost']*1.4):,}c, {i['desc']}" for i in DEALER_UPGRADES.values()))
+    except Exception: pass
+    try:
+        parts.append(f"SHOP ITEMS: VIP {VIP_PRICE:,}c; XP Boost {XP_BOOST_PRICE:,}c; Insurance {INSURANCE_PRICE:,}c")
+    except Exception: pass
+    parts.append(
+        "KEY SYSTEMS: /daily /weekly /work /crime /run earn coins. /dealer street game "
+        "(jail on bust, _bail, _launder dirty money thru businesses, _turf territories, _raid wars, "
+        "_dealerupgrades). Prestige at 10,000,000 net worth via _prestige (burns empire, permanent rank). "
+        "_highroller gambling 100k min bet. Marketplace trades pets/businesses/venues/realestate/boosts. "
+        "Wealth events (audits) hit cash above 1,000,000."
+    )
+    return "\n".join(parts)
+
+
+def _build_player_context(uid: int) -> str:
+    bits = []
+    try:
+        nw = compute_net_worth(uid)
+        bits.append(f"cash {nw['cash']:,}c, net worth {nw['total']:,}c "
+                    f"(biz {nw['business']:,}, realestate {nw['realestate']:,}, stocks {nw['stocks']:,}, venues {nw['venues']:,})")
+    except Exception:
+        bits.append(f"cash {economy.balance(uid):,}c")
+    try:
+        lvl = prestige_level(uid)
+        if lvl: bits.append(f"prestige Don {_roman(lvl)}")
+    except Exception: pass
+    try:
+        lux = luxury_owned(uid)
+        if lux: bits.append("luxury owned: " + ", ".join(lux))
+    except Exception: pass
+    try:
+        d = _load_dealer()["users"].get(str(uid))
+        if d:
+            bits.append(f"dealer: heat {d.get('heat',0)}/100, dirty {d.get('dirty_money',0):,}c, "
+                        f"upgrades {d.get('upgrades',{}) or 'none'}"
+                        + (", IN JAIL" if _dealer_in_jail(d) else ""))
+    except Exception: pass
+    try:
+        held = [TERRITORIES[k]["name"] for k, c in _territory_store(_load_dealer()).items()
+                if c.get("controller") == str(uid)]
+        if held: bits.append("territories: " + ", ".join(held))
+    except Exception: pass
+    return " | ".join(bits)
+
+
+class AskJordanModal(discord.ui.Modal, title="Ask Jordan"):
+    question = discord.ui.TextInput(
+        label="What do you want to know?",
+        style=discord.TextStyle.paragraph,
+        placeholder="e.g. What can I buy for 2m coins? How does laundering work?",
+        max_length=400,
+    )
+
+    def __init__(self, user_id: int):
+        super().__init__()
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        q = str(self.question.value).strip()
+        cfg = load_config()
+        ask_cfg = dict(cfg)
+        ask_cfg["max_tokens"] = 600
+        prompt_user = (
+            f"GAME CATALOG:\n{_build_game_catalog()}\n\n"
+            f"PLAYER PROFILE ({interaction.user.display_name}): {_build_player_context(self.user_id)}\n\n"
+            f"QUESTION: {q}"
+        )
+        try:
+            answer = await ask_ai(ASK_SYSTEM_PROMPT, [{"role": "user", "content": prompt_user}], ask_cfg)
+        except Exception as e:
+            log.warning("ask jordan failed: %s", e)
+            await interaction.followup.send("⚠️ Couldn't reach the brain right now. Try again in a minute.")
+            return
+        embed = discord.Embed(
+            title="🤖 Jordan answers",
+            description=(f"**Q:** {q[:200]}\n\n{answer}")[:4000],
+            color=0x00F0FF,
+        )
+        embed.set_footer(text="Personalized to your wallet · _ask anytime")
+        await interaction.followup.send(embed=embed)
+
+
+class AskJordanView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    @discord.ui.button(label="Ask a question", emoji="💬", style=discord.ButtonStyle.primary)
+    async def ask(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Anyone can use the button — the modal personalizes to whoever clicks
+        await interaction.response.send_modal(AskJordanModal(interaction.user.id))
+
+
+async def _handle_ask(message: discord.Message):
+    """Prefix-only: _ask — opens a personalized game Q&A box."""
+    await message.channel.send(
+        "💬 **Got a question about the game?** Hit the button — I'll answer based on "
+        "your actual wallet, what you own, and today's real prices.",
+        view=AskJordanView(message.author.id),
+    )
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 💎 ULTRA-LUXURY VANITY SINKS
 # Whale-sized pure-status purchases. They produce NOTHING — no income, no edge.
 # They're permanent trophies (survive prestige) and a massive coin sink.
@@ -20506,6 +20655,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("highroller", "hr", "whale"):
         await _handle_highroller(message, rest)
+        return True
+    if cmd_name in ("ask", "askjordan", "question", "qa"):
+        await _handle_ask(message)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
