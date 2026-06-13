@@ -11866,26 +11866,101 @@ def _territory_get(data: dict, key: str) -> dict:
 
 
 def _territory_regen(corner: dict):
-    """Regenerate defense for a held corner based on elapsed time."""
+    """Regenerate defense for a held corner based on elapsed time.
+    Crew-held corners regenerate twice as fast (the crew watches it)."""
     if not corner.get("controller"):
         return
     last = corner.get("last_regen", time.time())
     hours = (time.time() - last) / 3600
     if hours > 0:
+        rate = TERRITORY_DEFENSE_REGEN_PER_HR * (2 if corner.get("crew") else 1)
         corner["defense"] = min(
             TERRITORY_DEFENSE_MAX,
-            corner.get("defense", 0) + int(hours * TERRITORY_DEFENSE_REGEN_PER_HR),
+            corner.get("defense", 0) + int(hours * rate),
         )
         corner["last_regen"] = time.time()
 
 
 def _user_territory_bonus(user_id: int, data: dict) -> float:
-    """Total income-bonus multiplier from all corners a user controls."""
+    """Total income-bonus multiplier from all corners a user controls,
+    PLUS a half-rate share of any corner held by the user's crew (that they
+    don't personally control). Controllers get the full bonus; fellow crew
+    members get half — no stacking on a corner you already control."""
+    uid = str(user_id)
     bonus = 0.0
+    # Resolve the user's crew once (safe if crewless / crews unavailable)
+    my_crew = None
+    try:
+        my_crew, _ = _crew_of(user_id)
+    except Exception:
+        my_crew = None
     for key, corner in _territory_store(data).items():
-        if corner.get("controller") == str(user_id):
-            bonus += TERRITORIES.get(key, {}).get("income_bonus", 0)
+        info_bonus = TERRITORIES.get(key, {}).get("income_bonus", 0)
+        if corner.get("controller") == uid:
+            bonus += info_bonus
+        elif my_crew and corner.get("crew") == my_crew:
+            # Fellow crew member benefits at half rate
+            bonus += info_bonus * 0.5
     return bonus
+
+
+# ── Crew territory wars: weekly war points ──
+def _crew_war_week() -> str:
+    """ISO-ish week key, matching the weekly pattern used elsewhere."""
+    return datetime.now(timezone.utc).strftime("%Y-W%U")
+
+
+def _crew_add_war_points(user_id, points: int):
+    """Award war points to the user's crew for the current week (no-op if crewless)."""
+    try:
+        cdata = _load_crews()
+        cid, crew = _crew_of(user_id, cdata)
+        if not crew:
+            return
+        _crew_add_war_points_by_cid(cid, points, cdata, save=True)
+    except Exception:
+        pass
+
+
+def _crew_add_war_points_by_cid(cid: str, points: int, cdata: dict, save: bool = False):
+    """Award war points to a specific crew id. Lazily resets on week rollover."""
+    crew = cdata.get("crews", {}).get(cid)
+    if not crew:
+        return
+    week = _crew_war_week()
+    war = crew.get("war", {})
+    if war.get("week") != week:
+        war = {"week": week, "points": 0}
+    war["points"] = war.get("points", 0) + points
+    crew["war"] = war
+    if save:
+        _save_crews(cdata)
+
+
+def _crew_war_points(crew: dict) -> int:
+    """Current-week war points for a crew (0 if stale week)."""
+    war = crew.get("war", {})
+    return war.get("points", 0) if war.get("week") == _crew_war_week() else 0
+
+
+def _clear_crew_from_territory(cid: str):
+    """When a crew disbands, strip its flag from any corners it held. The
+    controller KEEPS the corner (personal ownership), it just stops flying crew
+    colors — which also stops the 2x crew defense regen for a crew that no
+    longer exists. Safe no-op if dealer data or the flag isn't present."""
+    if not cid:
+        return
+    try:
+        ddata = _load_dealer()
+        changed = False
+        for corner in _territory_store(ddata).values():
+            if corner.get("crew") == cid:
+                corner["crew"] = None
+                changed = True
+        if changed:
+            _save_dealer(ddata)
+    except Exception as e:
+        log.warning("clear crew from territory failed: %s", e)
 
 
 def _load_dealer() -> dict:
@@ -12449,6 +12524,11 @@ def _territory_power(user_id: int, data: dict) -> int:
 async def _send_turf_map(message: discord.Message):
     """Prefix-only: _turf — show the territory map and who controls what."""
     data = _load_dealer()
+    cdata_map = None
+    try:
+        cdata_map = _load_crews()
+    except Exception:
+        cdata_map = {"crews": {}}
     lines = []
     for key, info in TERRITORIES.items():
         corner = _territory_get(data, key)
@@ -12460,8 +12540,15 @@ async def _send_turf_map(message: discord.Message):
                 cname = m.display_name if m else f"User {controller}"
             except Exception:
                 cname = "someone"
+            # Crew tag, if the corner belongs to a crew that still exists
+            ctag = ""
+            ccid = corner.get("crew")
+            if ccid:
+                crew = cdata_map.get("crews", {}).get(ccid)
+                if crew:
+                    ctag = f"[{crew['tag']}] "
             defense = corner.get("defense", 0)
-            status = f"\u001b[1;31m{cname[:14]}\u001b[0m \u001b[0;30mDEF {defense}\u001b[0m"
+            status = f"\u001b[1;31m{ctag}{cname[:12]}\u001b[0m \u001b[0;30mDEF {defense}\u001b[0m"
         else:
             status = "\u001b[0;32mUNCLAIMED\u001b[0m"
         bonus_pct = int(info["income_bonus"] * 100)
@@ -12531,14 +12618,26 @@ async def _handle_claim_turf(message: discord.Message, rest: str):
     corner["since"] = time.time()
     corner["defense"] = 50  # starts half-defended
     corner["last_regen"] = time.time()
+    # If the claimer is in a crew, the corner flies that crew's colors
+    cid, crew = (None, None)
+    try:
+        cid, crew = _crew_of(uid)
+    except Exception:
+        cid, crew = (None, None)
+    corner["crew"] = cid  # None if crewless
     _save_dealer(data)
+
+    crew_line = ""
+    if crew:
+        _crew_add_war_points(uid, 2)  # claiming an open corner = small war points
+        crew_line = f"\n🏴 Claimed for **[{crew['tag']}] {crew['name']}** — crewmates share the income.\n"
 
     bonus_pct = int(info["income_bonus"] * 100)
     await message.channel.send(
         f"# {info['emoji']} CORNER CLAIMED\n\n"
         f"**{info['name']}** is yours. Cost: **{cost:,}** coins.\n"
         f"💰 +{bonus_pct}% on every sale while you hold it.\n"
-        f"🛡️ Defense: **50/100** — build it up with `_reinforce {key}`.\n\n"
+        f"🛡️ Defense: **50/100** — build it up with `_reinforce {key}`.{crew_line}\n"
         f"_Rivals can `_raid` you for it. Keep it defended._"
     )
 
@@ -12555,8 +12654,22 @@ async def _handle_reinforce_turf(message: discord.Message, rest: str):
     corner = _territory_get(data, key)
     _territory_regen(corner)
 
-    if corner.get("controller") != str(uid):
-        await message.channel.send(f"You don't control **{info['name']}**. Can't reinforce it.")
+    # The controller can always reinforce. If the corner belongs to a crew,
+    # any member of that crew can reinforce it too.
+    is_controller = corner.get("controller") == str(uid)
+    is_crewmate = False
+    corner_crew = corner.get("crew")
+    if corner_crew and not is_controller:
+        try:
+            my_cid, _ = _crew_of(uid)
+            is_crewmate = (my_cid == corner_crew)
+        except Exception:
+            is_crewmate = False
+    if not (is_controller or is_crewmate):
+        if corner.get("controller"):
+            await message.channel.send(f"You don't control **{info['name']}** (or aren't in the crew that does).")
+        else:
+            await message.channel.send(f"**{info['name']}** is unclaimed — nothing to reinforce.")
         return
     if corner.get("defense", 0) >= TERRITORY_DEFENSE_MAX:
         await message.channel.send(f"🛡️ **{info['name']}** is already at max defense ({TERRITORY_DEFENSE_MAX}).")
@@ -12642,10 +12755,31 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
     atk_power = _territory_power(uid, data)
     def_power = _territory_power(int(controller), data)
     defense = corner.get("defense", 0)
-    # Attacker rolls vs defender power + corner defense.
+
+    # Crew context for both sides
+    attacker_cid, attacker_crew = (None, None)
+    try:
+        attacker_cid, attacker_crew = _crew_of(uid)
+    except Exception:
+        attacker_cid, attacker_crew = (None, None)
+    defending_cid = corner.get("crew")
+    defending_crew = None
+    def_crew_bonus = 0
+    if defending_cid:
+        try:
+            cdata_def = _load_crews()
+            defending_crew = cdata_def.get("crews", {}).get(defending_cid)
+            if defending_crew:
+                # A defended crew corner gets a bonus from the crew's level (cap +25)
+                def_crew_bonus = min(25, defending_crew.get("level", 1))
+        except Exception:
+            defending_crew = None
+            def_crew_bonus = 0
+
+    # Attacker rolls vs defender power + corner defense + crew defensive bonus.
     # Wide attacker variance keeps raids tense — even an underdog can get lucky.
     atk_roll = atk_power + random.randint(0, 80)
-    def_roll = def_power + min(60, defense) + random.randint(0, 25)
+    def_roll = def_power + min(60, defense) + def_crew_bonus + random.randint(0, 25)
 
     attacker["last_raid"] = time.time()
     attacker["heat"] = min(HEAT_MAX, attacker.get("heat", 0) + TERRITORY_RAID_HEAT)
@@ -12656,17 +12790,33 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
     except Exception:
         defender_name = "the holder"
 
+    # Crew-vs-crew framing for the announcement
+    atk_tag = f"[{attacker_crew['tag']}] " if attacker_crew else ""
+    def_tag = f"[{defending_crew['tag']}] " if defending_crew else ""
+
     if atk_roll > def_roll:
-        # Attacker takes the corner
+        # Attacker takes the corner — it now flies the attacker's crew (or no crew)
         corner["controller"] = str(uid)
         corner["since"] = time.time()
         corner["defense"] = 30  # takes it weakened
         corner["last_regen"] = time.time()
+        corner["crew"] = attacker_cid  # None if attacker is crewless — flag cleared
         _save_dealer(data)
+
+        # War points: capturing a corner is the headline scoring event
+        if attacker_crew:
+            _crew_add_war_points(uid, 10)
+
         bonus_pct = int(info["income_bonus"] * 100)
+        crew_line = ""
+        if attacker_crew and defending_crew:
+            crew_line = f"🏴 **{atk_tag.strip()}** seized it from **{def_tag.strip()}** — crew war! (+10 war pts)\n"
+        elif attacker_crew:
+            crew_line = f"🏴 Taken for **[{attacker_crew['tag']}] {attacker_crew['name']}** (+10 war pts)\n"
         await message.channel.send(
             f"# 🔫 RAID SUCCESS\n\n"
             f"You stormed **{info['name']}** and ran {defender_name} off the block.\n"
+            f"{crew_line}"
             f"🏴 It's yours now — +{bonus_pct}% on sales.\n"
             f"🛡️ Defense knocked down to **30** — shore it up with `_reinforce {key}`.\n"
             f"🔥 Heat +{TERRITORY_RAID_HEAT} (raids are loud).\n\n"
@@ -12677,9 +12827,19 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
         # Chip the corner's defense a little so repeated raids matter
         corner["defense"] = max(0, corner.get("defense", 0) - 10)
         _save_dealer(data)
+
+        # War points: a crew that successfully defends earns a little
+        if defending_crew:
+            _cdata_award = _load_crews()
+            _crew_add_war_points_by_cid(defending_cid, 3, _cdata_award, save=True)
+
+        crew_line = ""
+        if defending_crew and attacker_crew:
+            crew_line = f"🛡️ **{def_tag.strip()}** held off **{atk_tag.strip()}** (+3 war pts to the defenders)\n"
         await message.channel.send(
             f"# 🛡️ RAID REPELLED\n\n"
             f"{defender_name} held **{info['name']}**. Their muscle pushed you back.\n"
+            f"{crew_line}"
             f"You chipped their defense down to **{corner['defense']}** though.\n"
             f"🔥 Heat +{TERRITORY_RAID_HEAT} for nothing. Regroup and try again later.\n\n"
             f"_Rolled {atk_roll} vs {def_roll}._"
@@ -20611,6 +20771,7 @@ async def _handle_leavecrew(message: discord.Message):
         del data["crews"][cid]
         data["user_crew"].pop(str(uid), None)
         _save_crews(data)
+        _clear_crew_from_territory(cid)
         await message.channel.send(f"💨 **[{crew['tag']}]** disbanded. Vault ({refund:,}) returned.")
         return
     crew["members"].remove(str(uid))
@@ -20676,6 +20837,7 @@ async def _handle_disbandcrew(message: discord.Message):
         data["user_crew"].pop(m, None)
     del data["crews"][cid]
     _save_crews(data)
+    _clear_crew_from_territory(cid)
     await message.channel.send(
         f"💨 **[{crew['tag']}] {crew['name']}** is no more. "
         f"Vault split: **{share:,}** to each of {len(members)} members."
@@ -20746,6 +20908,55 @@ async def _handle_crews_lb(message: discord.Message):
         )
     embed = discord.Embed(title="👥 CREW RANKINGS", description="\n".join(lines), color=0xFF2BD6)
     embed.set_footer(text="Level up by depositing + member activity · _createcrew to start yours")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_crewwars(message: discord.Message):
+    """Prefix-only: _crewwars — this week's territory war standings."""
+    data = _load_crews()
+    week = _crew_war_week()
+    # Build (crew, points) for crews with points this week
+    standings = []
+    for c in data.get("crews", {}).values():
+        pts = _crew_war_points(c)
+        if pts > 0:
+            standings.append((c, pts))
+    standings.sort(key=lambda cp: cp[1], reverse=True)
+
+    # Count corners each crew currently holds (live territory snapshot)
+    held_counts = {}
+    try:
+        ddata = _load_dealer()
+        for corner in _territory_store(ddata).values():
+            ccid = corner.get("crew")
+            if ccid and corner.get("controller"):
+                held_counts[ccid] = held_counts.get(ccid, 0) + 1
+    except Exception:
+        pass
+
+    if not standings and not held_counts:
+        await message.channel.send(
+            "🏴 **CREW WARS**\n\nNo territory action this week yet. Claim and raid corners as a crew "
+            "to rack up war points. `_turf` to see the map · `_crewwars` to track standings."
+        )
+        return
+
+    # Merge: show crews with points; include any holding corners but with 0 pts at the end
+    seen = set()
+    lines = []
+    rank = 1
+    for c, pts in standings:
+        cid = next((k for k, v in data.get("crews", {}).items() if v is c), None)
+        held = held_counts.get(cid, 0)
+        seen.add(cid)
+        lines.append(f"**{rank}.** **[{c['tag']}] {c['name']}** — ⚔️ **{pts}** war pts · 🏴 {held} corner(s)")
+        rank += 1
+    embed = discord.Embed(
+        title="🏴 CREW WARS — THIS WEEK",
+        description="\n".join(lines),
+        color=0xFF2BD6,
+    )
+    embed.set_footer(text=f"Week {week} · capture +10 · claim +2 · defend +3 · resets weekly")
     await message.channel.send(embed=embed)
 
 
@@ -21473,6 +21684,7 @@ def _execute_prestige_reset(user_id: int) -> dict:
         if corner.get("controller") == uid:
             corner["controller"] = None
             corner["defense"] = 0
+            corner["crew"] = None  # release crew flag too — no phantom income share
             released += 1
     summary["territories"] = released
     _save_dealer(ddata)
@@ -21854,6 +22066,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name == "crews":
         await _handle_crews_lb(message)
+        return True
+    if cmd_name in ("crewwars", "warstandings", "territorywars"):
+        await _handle_crewwars(message)
         return True
     if cmd_name in ("petbattle", "petfight", "pvpet"):
         await _handle_petbattle(message, rest)
