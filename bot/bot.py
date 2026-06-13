@@ -20166,6 +20166,31 @@ async def _handle_dropemoji(message: discord.Message, rest: str):
     if len(emoji) > 40:  # custom emoji format <:name:id> can be long; cap sanely
         await message.channel.send("❌ That doesn't look like a valid emoji.")
         return
+
+    # Custom emojis (<:name:id> or <a:name:id>) only render if they live in THIS
+    # server — the bot can't post an emoji this guild doesn't have. Unicode
+    # emojis always work, so they pass straight through.
+    custom_match = re.match(r"<a?:\w+:(\d+)>", emoji)
+    if emoji.startswith("<"):
+        # It's formatted as a custom emoji — verify the ID belongs to this server
+        guild = message.guild
+        emoji_id = int(custom_match.group(1)) if custom_match else None
+        in_this_server = bool(
+            emoji_id and guild and any(e.id == emoji_id for e in guild.emojis)
+        )
+        if not in_this_server:
+            await message.channel.send(
+                f"❌ {emoji} isn't an emoji **in this server**, so the bot can't use it for coin drops.\n\n"
+                f"**To use a custom emoji:** add it to *this* server first "
+                f"(Server Settings → Emoji → Upload Emoji), then run `_dropemoji` with it.\n"
+                f"_Or use any standard emoji like 🪙 💵 🔥 — those always work._"
+            )
+            return
+    elif custom_match:
+        # Defensive: shouldn't happen (no leading '<'), but treat as invalid
+        await message.channel.send("❌ That doesn't look like a valid emoji.")
+        return
+
     cfg_drop["custom_emoji"] = emoji
     _save_coindrop_cfg(cfg_drop)
     await message.channel.send(
