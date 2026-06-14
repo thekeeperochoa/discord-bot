@@ -21217,6 +21217,72 @@ ASK_SYSTEM_PROMPT = (
 )
 
 
+# Single source of truth for prefix-only command names (no slash equivalent).
+# The dispatcher reads from this, and _ask auto-includes them — so adding a new
+# prefix-only command here makes the bot's AI aware of it automatically.
+ASK_PREFIX_ONLY_COMMANDS = {
+    # Supporter / meta
+    "perks", "supporter", "donate", "vip", "help", "commands", "cmds",
+    "docs", "guide", "manual", "employees", "staff", "workers",
+    "credits", "supporters", "flex", "flexline", "setclass", "classification",
+    "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
+    "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
+    # Invites
+    "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
+    "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
+    # Utility
+    "tldr", "summary", "recap", "ask", "askjordan", "question", "qa",
+    # Dealer extras
+    "bail", "launder", "wash", "turf", "territory", "claimturf", "raid",
+    "reinforce", "defend", "dealerupgrades",
+    # Endgame
+    "prestige", "rebirth", "legends", "luxury", "highroller", "hr",
+    # Real estate extras
+    "renovate", "reno", "airbnb", "tenants", "evict", "manager",
+    "mortgage", "payloan", "foreclosures", "fbid",
+    # Crews
+    "crew", "createcrew", "crewinvite", "joincrew", "leavecrew", "crewkick",
+    "crewpromote", "disbandcrew", "crewdeposit", "crewwithdraw", "crews", "crewwars",
+    # Pets
+    "petbattle", "petfight",
+}
+
+
+def _ask_known_commands() -> str:
+    """Auto-derive the full command list from the live registries so _ask always
+    knows every command that exists — including ones added in the future, with
+    zero manual upkeep. Pulls canonical names from PREFIX_COMMANDS, the prefix-only
+    set, and the slash-command tree."""
+    cmds = set()
+    # Canonical names behind every prefix alias
+    try:
+        for canonical, _spec in PREFIX_COMMANDS.values():
+            cmds.add("_" + canonical)
+    except Exception:
+        pass
+    # Prefix-only commands (no slash equivalent)
+    try:
+        for name in ASK_PREFIX_ONLY_COMMANDS:
+            cmds.add("_" + name)
+    except Exception:
+        pass
+    # Slash commands registered on the tree
+    try:
+        for c in tree.get_commands():
+            cmds.add("/" + c.name)
+    except Exception:
+        pass
+    # De-dupe: if a slash and prefix share a base name, keep both forms is noisy,
+    # so prefer showing the base name once.
+    bases = {}
+    for c in sorted(cmds):
+        base = c.lstrip("_/")
+        # Prefer slash form if both exist
+        if base not in bases or c.startswith("/"):
+            bases[base] = c
+    return ", ".join(sorted(bases.values()))
+
+
 def _build_game_catalog() -> str:
     """Compact live price catalog from the real game data structures."""
     parts = []
@@ -21246,14 +21312,35 @@ def _build_game_catalog() -> str:
             f"{i['name']} from {int(i['base_cost']*1.4):,}c, {i['desc']}" for i in DEALER_UPGRADES.values()))
     except Exception: pass
     try:
+        parts.append("PET TYPES: " + "; ".join(
+            f"{i.get('name', k)}" for k, i in PET_TYPES.items()))
+    except Exception: pass
+    try:
         parts.append(f"SHOP ITEMS: VIP {VIP_PRICE:,}c; XP Boost {XP_BOOST_PRICE:,}c; Insurance {INSURANCE_PRICE:,}c")
     except Exception: pass
+    # System notes — the mechanics that prices alone don't convey. Kept current
+    # as systems are added; the command LIST below is auto-derived so new commands
+    # always appear even if this prose isn't updated.
     parts.append(
-        "KEY SYSTEMS: /daily /weekly /work /crime /run earn coins. /dealer street game "
-        "(jail on bust, _bail, _launder dirty money thru businesses, _turf territories, _raid wars, "
-        "_dealerupgrades). Prestige at 10,000,000 net worth via _prestige (burns empire, permanent rank). "
-        "_highroller gambling 100k min bet. Marketplace trades pets/businesses/venues/realestate/boosts. "
-        "Wealth events (audits) hit cash above 1,000,000."
+        "KEY SYSTEMS:\n"
+        "• EARN: /daily (streak bonus + prestige bonus), /weekly, /work, /crime, /run, /beg, /rob, /pay.\n"
+        "• DEALER (/dealer): buy supply, /sell (builds heat, random events, animated busts), jail on bust + _bail, "
+        "_launder dirty money through businesses you own, _dealerupgrades (stash/lookouts/burner/supplier/War Room which cuts raid cooldown).\n"
+        "• TERRITORY & WARS: _turf map, _claimturf, _raid rivals, _reinforce. Corners give % income bonus on sales.\n"
+        "• CREWS (social/factions): _createcrew, _crewinvite, _joincrew, _crew, _crews leaderboard, shared _crewdeposit vault, "
+        "crew levels. CREW TERRITORY WARS: crew-flagged corners share income with crewmates (half rate), regen defense 2x, "
+        "any crewmate can reinforce; _crewwars weekly war-point standings (capture +10, claim +2, defend +3, resets weekly).\n"
+        "• REAL ESTATE (/realestate): buy property, collect rent, repair condition. _renovate (+25% rent/level, max 3), "
+        "_airbnb mode (swingy x0.5-2.0 income, 2x wear), tenants (_tenants, _evict — quality affects rent), _manager (auto-collects every 2h for 12% cut), "
+        "_mortgage (borrow 50% LTV, 72h term) + _payloan, foreclosure auctions (_foreclosures, _fbid) for defaulted/neglected property.\n"
+        "• PETS: /adopt, feed/collect, _petbattle (wagered animated fights between pets).\n"
+        "• ENDGAME: prestige at 10,000,000 net worth via _prestige (burns empire for permanent Don rank + daily bonus + _legends spot, "
+        "but XP/achievements/pets/luxury survive), _luxury vanity items (pure status), _highroller gambling (100k min bet). "
+        "Wealth events (audits/lawsuits) randomly tax cash above 1,000,000 — insurance halves the hit.\n"
+        "• TRADING: marketplace trades pets/businesses/venues/real-estate/boosts via listing IDs (LXXXXX); fixed price or auction.\n"
+        "• OTHER: /whois profile, leaderboard, _invites + _invitedby (invite tracking), _tldr chat summary, many casino games "
+        "(blackjack, slots, roulette/wheel, duel, fight, race, connect4, etc.).\n"
+        "FULL COMMAND LIST (auto-generated, always current): " + _ask_known_commands()
     )
     return "\n".join(parts)
 
@@ -21955,14 +22042,7 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         await _handle_secret_give(message, rest)
         return True
     # Track prefix command usage for the dashboard (secret command excluded above).
-    _PREFIX_ONLY_NAMES = {
-        "perks", "supporter", "donate", "vip", "help", "commands", "cmds",
-        "docs", "guide", "manual", "employees", "staff", "workers",
-        "invites", "invitelb", "topinviters", "tldr", "summary", "recap",
-        "credits", "supporters", "flex", "flexline", "setclass", "classification",
-        "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
-        "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
-    }
+    _PREFIX_ONLY_NAMES = ASK_PREFIX_ONLY_COMMANDS
     if cmd_name in _PREFIX_ONLY_NAMES or cmd_name in PREFIX_COMMANDS:
         try:
             track_command_use(cmd_name, message.author.id)
