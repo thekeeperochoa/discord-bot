@@ -4701,6 +4701,7 @@ async def daily_command(interaction: discord.Interaction):
     await check_streak_bonus(user.id, channel=interaction.channel)
     add_tournament_score(user.id, coins_earned=final_reward)
     track_quest_progress(user.id, "coins_earned", final_reward)
+    await check_rank_up(user.id, interaction.channel)
 
 
 @tree.command(name="weekly", description="Claim your weekly coin reward (bigger but rarer).")
@@ -5124,6 +5125,292 @@ def compute_net_worth(uid) -> dict:
         "cash": cash, "business": biz_value, "realestate": re_value,
         "stocks": stock_value, "venues": venue_value, "total": total,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏙️ CITY RANKS — progression-gated access
+# New joiners follow a guided path instead of a wall of 100+ commands. Ranks are
+# computed LIVE from in-game stats (no stored state to migrate — every existing
+# player instantly gets their correct rank). Each rank unlocks a system; the
+# basics (earning + casino) are always open so newcomers can play immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+# Rank index -> (name, emoji, requirement dict, what it unlocks (for display))
+# Requirement keys: "earned" (lifetime coins earned), "businesses" (count owned),
+#                   "net_worth" (total), "heist" (bool: completed a heist).
+CITY_RANKS = [
+    (0, "Nobody",         "🧥", {},                       "The basics: earning, casino, pets, shop"),
+    (1, "Corner Hustler", "🔵", {"earned": 25_000},       "🏢 Businesses"),
+    (2, "Runner",         "💵", {"businesses": 2},         "💊 The Dealer game"),
+    (3, "Soldier",        "🔫", {"net_worth": 100_000},    "🏘️ Real Estate & 📈 Stocks"),
+    (4, "Made",           "🎩", {"heist": True},           "👥 Crews, 🗺️ Territory Wars & 🌃 Venues"),
+    (5, "Boss",           "👑", {"net_worth": 1_000_000},  "🎩 High-Roller, 💎 Luxury & Prestige path"),
+]
+# System name -> minimum rank index required to use it (for gating + help)
+SYSTEM_RANK_REQUIREMENTS = {
+    "businesses":  1,
+    "dealer":      2,
+    "realestate":  3,
+    "stocks":      3,
+    "crews":       4,
+    "territory":   4,
+    "venues":      4,
+    "highroller":  5,
+    "luxury":      5,
+}
+# Friendly system labels for lock messages
+SYSTEM_LABELS = {
+    "businesses": "Businesses", "dealer": "The Dealer game",
+    "realestate": "Real Estate", "stocks": "The Stock Market",
+    "crews": "Crews", "territory": "Territory & Wars", "venues": "Venues",
+    "highroller": "The High-Roller Room", "luxury": "The Luxury Dealer",
+}
+
+
+def _system_locked_message(user_id: int, system: str) -> str | None:
+    """If the user can't access `system` yet, return a themed lock message.
+    Returns None if they have access (or the system isn't gated)."""
+    need = SYSTEM_RANK_REQUIREMENTS.get(system)
+    if not need:
+        return None
+    if city_rank(user_id) >= need:
+        return None
+    # Find the rank that unlocks it + the requirement to reach it
+    rank_entry = CITY_RANKS[need]
+    rname, remoji, rreq = rank_entry[1], rank_entry[2], rank_entry[3]
+    cur, needval, _met = _rank_progress_value(user_id, rreq)
+    label = SYSTEM_LABELS.get(system, system)
+    cur_rank_name = CITY_RANKS[city_rank(user_id)][1]
+    if "heist" in rreq:
+        progress = "Pull off a successful `/heist` to make your name."
+    else:
+        progress = f"You're at **{cur:,} / {needval:,}**."
+    return (
+        f"🔒 **{label} is locked.**\n"
+        f"You're a **{cur_rank_name}** — reach **{remoji} {rname}** to unlock it "
+        f"({_req_text(rreq)}). {progress}\n"
+        f"_See your path with `_rank`._"
+    )
+
+
+async def gate_slash(interaction, system: str) -> bool:
+    """Gate a slash command. Returns True if BLOCKED (caller should return).
+    Sends an ephemeral lock message when blocked."""
+    msg = _system_locked_message(interaction.user.id, system)
+    if msg is None:
+        return False
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+    return True
+
+
+async def gate_prefix(message, system: str) -> bool:
+    """Gate a prefix command. Returns True if BLOCKED (caller should return)."""
+    msg = _system_locked_message(message.author.id, system)
+    if msg is None:
+        return False
+    try:
+        await message.channel.send(msg)
+    except Exception:
+        pass
+    return True
+
+
+
+
+def _rank_progress_value(user_id: int, req: dict) -> tuple:
+    """Return (current_value, needed_value, met) for a rank's single requirement."""
+    if "earned" in req:
+        cur = 0
+        try:
+            cur = economy._user(user_id).get("stats", {}).get("total_earned", 0)
+        except Exception:
+            pass
+        return cur, req["earned"], cur >= req["earned"]
+    if "businesses" in req:
+        cur = 0
+        try:
+            cur = len(_user_businesses(user_id))
+        except Exception:
+            pass
+        return cur, req["businesses"], cur >= req["businesses"]
+    if "net_worth" in req:
+        cur = 0
+        try:
+            cur = compute_net_worth(user_id)["total"]
+        except Exception:
+            pass
+        return cur, req["net_worth"], cur >= req["net_worth"]
+    if "heist" in req:
+        done = False
+        try:
+            done = _user_has_achievement(user_id, "heist_success")
+        except Exception:
+            pass
+        return (1 if done else 0), 1, done
+    return 1, 1, True  # empty requirement (rank 0) always met
+
+
+def _rank_requirement_met(user_id: int, req: dict) -> bool:
+    return _rank_progress_value(user_id, req)[2]
+
+
+def city_rank(user_id: int) -> int:
+    """The player's current city rank index. A player holds a rank if they meet
+    its requirement OR any higher requirement — so meeting a later milestone
+    (e.g. millionaire) grants all ranks below it, and no existing player ever
+    loses access to a system they've already been using. Newcomers still get a
+    clean guided path because the requirements rise in order."""
+    highest_met = 0
+    for idx, _name, _emoji, req, _unlocks in CITY_RANKS:
+        if idx == 0:
+            continue
+        if _rank_requirement_met(user_id, req):
+            highest_met = max(highest_met, idx)
+    return highest_met
+
+
+def city_rank_name(user_id: int) -> str:
+    idx = city_rank(user_id)
+    name, emoji = CITY_RANKS[idx][1], CITY_RANKS[idx][2]
+    return f"{emoji} {name}"
+
+
+def city_rank_badge(user_id: int) -> str:
+    """Just the emoji for compact display next to names."""
+    try:
+        return CITY_RANKS[city_rank(user_id)][2]
+    except Exception:
+        return ""
+
+
+def _req_text(req: dict) -> str:
+    """Human-readable requirement, e.g. 'earn 25,000 coins'."""
+    if "earned" in req:
+        return f"earn {req['earned']:,} total coins"
+    if "businesses" in req:
+        return f"own {req['businesses']} businesses"
+    if "net_worth" in req:
+        return f"reach {req['net_worth']:,} net worth"
+    if "heist" in req:
+        return "pull off a successful /heist"
+    return "—"
+
+
+def _rank_unlock_message(user_id: int, new_rank: int) -> discord.Embed:
+    """Themed rank-up announcement (Jordan's voice)."""
+    name, emoji, _req, unlocks = CITY_RANKS[new_rank][1], CITY_RANKS[new_rank][2], CITY_RANKS[new_rank][3], CITY_RANKS[new_rank][4]
+    flavor = {
+        1: "Word's getting around. You're not just another face on the corner anymore.",
+        2: "People are starting to notice your hustle. The connect's willing to talk now.",
+        3: "You've got real capital and real respect. Time to make your money work for you.",
+        4: "You pulled a real job and people saw it. The crews want you now — go build something.",
+        5: "You run this city now. The high rollers, the luxury, the legends — it's all yours to take.",
+    }.get(new_rank, "You moved up in the world.")
+    nxt = ""
+    if new_rank + 1 < len(CITY_RANKS):
+        nreq = CITY_RANKS[new_rank + 1][3]
+        nname = CITY_RANKS[new_rank + 1][1]
+        nxt = f"\n\n**Next:** {_req_text(nreq)} → **{nname}**"
+    return discord.Embed(
+        title=f"{emoji} RANK UP — YOU'RE NOW {name.upper()}",
+        description=f"{flavor}\n\n**🔓 Unlocked:** {unlocks}{nxt}",
+        color=0xFFD700,
+    )
+
+
+async def check_rank_up(user_id: int, channel):
+    """Detect a city-rank increase and announce it. Stores last-seen rank on the
+    economy user record so we only announce each rank once."""
+    if channel is None:
+        return
+    try:
+        u = economy._user(user_id)
+        last = u.get("city_rank_seen", 0)
+        now = city_rank(user_id)
+        if now > last:
+            u["city_rank_seen"] = now
+            economy._save()
+            try:
+                await channel.send(embed=_rank_unlock_message(user_id, now))
+            except Exception:
+                pass
+            try:
+                track_activity("rank_up", user_id, "", f"reached city rank {CITY_RANKS[now][1]}")
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("check_rank_up failed: %s", e)
+
+
+def _rank_progress_bar(cur: int, need: int, width: int = 10) -> str:
+    if need <= 0:
+        return "█" * width
+    filled = max(0, min(width, int(width * cur / need)))
+    return "█" * filled + "░" * (width - filled)
+
+
+async def _handle_rank(message: discord.Message):
+    """Prefix-only: _rank — your city rank, progress, and next unlock."""
+    uid = message.author.id
+    idx = city_rank(uid)
+    name, emoji, _req, unlocks = CITY_RANKS[idx][1], CITY_RANKS[idx][2], CITY_RANKS[idx][3], CITY_RANKS[idx][4]
+    # sync seen-rank so the next earn doesn't re-announce a rank they already see
+    try:
+        u = economy._user(uid)
+        if u.get("city_rank_seen", 0) < idx:
+            u["city_rank_seen"] = idx
+            economy._save()
+    except Exception:
+        pass
+
+    lines = [f"**{emoji} {name}** — Rank {idx}/{len(CITY_RANKS)-1}", f"_{unlocks} unlocked_"]
+    # Next rank = lowest rank above current whose requirement isn't met yet
+    next_rank = None
+    for r in CITY_RANKS:
+        if r[0] > idx and not _rank_requirement_met(uid, r[3]):
+            next_rank = r
+            break
+    if next_rank is not None:
+        nidx, nname, nemoji, nreq, nunlocks = next_rank
+        cur, need, _met = _rank_progress_value(uid, nreq)
+        if "heist" in nreq:
+            prog = "Pull off a successful /heist"
+        else:
+            bar = _rank_progress_bar(cur, need)
+            prog = f"`{bar}`  {cur:,} / {need:,}"
+        lines.append(f"\n**Next → {nemoji} {nname}**\n{_req_text(nreq).capitalize()}\n{prog}\n_Unlocks: {nunlocks}_")
+    else:
+        lines.append("\n👑 **You've reached the top of the city.** Everything's unlocked.")
+    embed = discord.Embed(title="🏙️ YOUR CITY RANK", description="\n".join(lines), color=0x00F0FF)
+    embed.set_footer(text="_ranks to see the full ladder")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_ranks(message: discord.Message):
+    """Prefix-only: _ranks — the full city ladder with your progress."""
+    uid = message.author.id
+    my = city_rank(uid)
+    lines = []
+    for idx, name, emoji, req, unlocks in CITY_RANKS:
+        if idx == 0:
+            lines.append(f"▫️ **{emoji} {name}** — {unlocks}")
+        elif _rank_requirement_met(uid, req):
+            lines.append(f"✅ **{emoji} {name}** — {unlocks}")
+        else:
+            lines.append(f"🔒 **{emoji} {name}** — _{_req_text(req)}_ → {unlocks}")
+    embed = discord.Embed(
+        title="🏙️ LEVELS IN THE CITY",
+        description="\n".join(lines),
+        color=0xFF2BD6,
+    )
+    embed.set_footer(text=f"You're {CITY_RANKS[my][1]} · _rank for your progress")
+    await message.channel.send(embed=embed)
+
 
 
 @tree.command(name="leaderboard", description="See the richest users in the server.")
@@ -10435,6 +10722,8 @@ async def buybusiness_command(
     business_type: discord.app_commands.Choice[str],
 ):
     user = interaction.user
+    if await gate_slash(interaction, "businesses"):
+        return
     biz_type = business_type.value
     if biz_type not in BUSINESS_TYPES:
         await interaction.response.send_message("Invalid business type.", ephemeral=True)
@@ -10478,6 +10767,7 @@ async def buybusiness_command(
         await grant_first_time(user.id, "first_business", channel=interaction.channel)
     except Exception:
         pass
+    await check_rank_up(user.id, interaction.channel)
 
 
 # ── /businesses ──────────────────────────────────────────────────────────────
@@ -12044,6 +12334,8 @@ async def buysupply_command(
     grams: int,
 ):
     user = interaction.user
+    if await gate_slash(interaction, "dealer"):
+        return
     sub_key = substance.value
     if sub_key not in SUBSTANCES:
         await interaction.response.send_message("Invalid substance.", ephemeral=True)
@@ -12135,6 +12427,8 @@ async def sell_command(
     grams: int,
 ):
     user = interaction.user
+    if await gate_slash(interaction, "dealer"):
+        return
     sub_key = substance.value
     if sub_key not in SUBSTANCES:
         await interaction.response.send_message("Invalid substance.", ephemeral=True)
@@ -12395,6 +12689,8 @@ def _roll_dealer_event(record: dict, user_id: int) -> str | None:
 
 async def _handle_bail(message: discord.Message):
     """Prefix-only: _bail — pay to get out of dealer jail early."""
+    if await gate_prefix(message, "dealer"):
+        return
     uid = message.author.id
     data = _load_dealer()
     record = data["users"].get(str(uid))
@@ -12424,6 +12720,8 @@ async def _handle_bail(message: discord.Message):
 
 async def _handle_launder(message: discord.Message):
     """Prefix-only: _launder — wash dirty money through a business into clean coins."""
+    if await gate_prefix(message, "dealer"):
+        return
     uid = message.author.id
     data = _load_dealer()
     record = data["users"].get(str(uid))
@@ -12584,6 +12882,8 @@ def _resolve_corner_key(text: str) -> str | None:
 
 async def _handle_claim_turf(message: discord.Message, rest: str):
     """Prefix-only: _claimturf <corner> — take an unclaimed corner."""
+    if await gate_prefix(message, "territory"):
+        return
     key = _resolve_corner_key(rest)
     if not key:
         names = ", ".join(f"`{k}`" for k in TERRITORIES)
@@ -12644,6 +12944,8 @@ async def _handle_claim_turf(message: discord.Message, rest: str):
 
 async def _handle_reinforce_turf(message: discord.Message, rest: str):
     """Prefix-only: _reinforce <corner> — add defense to a corner you hold."""
+    if await gate_prefix(message, "territory"):
+        return
     key = _resolve_corner_key(rest)
     if not key:
         await message.channel.send("Which corner? Try `_reinforce docks` (see `_turf`).")
@@ -12691,6 +12993,8 @@ async def _handle_reinforce_turf(message: discord.Message, rest: str):
 
 async def _handle_raid_turf(message: discord.Message, rest: str):
     """Prefix-only: _raid <corner> — attack a rival's corner (PvP contest)."""
+    if await gate_prefix(message, "territory"):
+        return
     key = _resolve_corner_key(rest)
     if not key:
         await message.channel.send("Which corner? Try `_raid downtown` (see `_turf`).")
@@ -12934,6 +13238,8 @@ def _build_dealer_upgrades_embed(user_id: int) -> discord.Embed:
 
 async def _send_dealer_upgrades(message: discord.Message):
     """Prefix-only: _dealerupgrades — reinvest profits into upgrades."""
+    if await gate_prefix(message, "dealer"):
+        return
     embed = _build_dealer_upgrades_embed(message.author.id)
     view = DealerUpgradeView(message.author.id)
     await message.channel.send(embed=embed, view=view)
@@ -13752,6 +14058,8 @@ class DealerSellModal(discord.ui.Modal, title="💰 Sell Product"):
 @tree.command(name="dealer", description="Open the dealer dashboard — full overview, market, leaderboard, server stats.")
 async def dealer_command(interaction: discord.Interaction):
     user = interaction.user
+    if await gate_slash(interaction, "dealer"):
+        return
     embed = _build_dealer_overview_embed(user.id, user.display_name)
     view = DealerDashboardView(user.id, tab="overview")
     await interaction.response.send_message(embed=embed, view=view)
@@ -13896,6 +14204,8 @@ async def buyvenue_command(
     venue_type: discord.app_commands.Choice[str],
 ):
     user = interaction.user
+    if await gate_slash(interaction, "venues"):
+        return
     v_type = venue_type.value
     if v_type not in VENUE_TYPES:
         await interaction.response.send_message("Invalid venue type.", ephemeral=True)
@@ -16001,6 +16311,9 @@ async def _run_heist(interaction, channel_id, heist_msg, crew, crew_specialists,
                 track_quest_progress(m.id, "coins_earned", per_member)
                 add_tournament_score(m.id, coins_earned=per_member, games_won=1)
                 await trigger_balance_check(m.id, channel=interaction.channel)
+                # City rank: a successful heist unlocks "Made" (crews/territory/venues)
+                await check_event(m.id, "heist_success", channel=interaction.channel)
+                await check_rank_up(m.id, interaction.channel)
             except Exception:
                 pass
 
@@ -17548,6 +17861,8 @@ def _re_slot(message_rest: str) -> int | None:
 
 async def _handle_renovate(message: discord.Message, rest: str):
     """Prefix-only: _renovate <slot> — +25% rent per level, max 3."""
+    if await gate_prefix(message, "realestate"):
+        return
     slot = _re_slot(rest)
     if slot is None:
         await message.channel.send("Usage: `_renovate <slot>` — slot number from `/realestate portfolio`.")
@@ -17589,6 +17904,8 @@ async def _handle_renovate(message: discord.Message, rest: str):
 
 async def _handle_airbnb(message: discord.Message, rest: str):
     """Prefix-only: _airbnb <slot> — toggle short-term rental mode."""
+    if await gate_prefix(message, "realestate"):
+        return
     slot = _re_slot(rest)
     if slot is None:
         await message.channel.send(
@@ -17676,6 +17993,8 @@ def _apply_tenant_to_rent(prop: dict, pending: int) -> tuple:
 
 async def _handle_tenants(message: discord.Message):
     """Prefix-only: _tenants — see who's living in your properties."""
+    if await gate_prefix(message, "realestate"):
+        return
     uid = message.author.id
     data = _load_re()
     props = data.get("users", {}).get(str(uid), [])
@@ -17705,6 +18024,8 @@ async def _handle_tenants(message: discord.Message):
 
 async def _handle_evict(message: discord.Message, rest: str):
     """Prefix-only: _evict <slot> — evict the tenant; a new one moves in on next collection."""
+    if await gate_prefix(message, "realestate"):
+        return
     slot = _re_slot(rest)
     if slot is None:
         await message.channel.send("Usage: `_evict <slot>` — slot from `/realestate portfolio`.")
@@ -17741,6 +18062,8 @@ async def _handle_evict(message: discord.Message, rest: str):
 
 async def _handle_manager(message: discord.Message, rest: str):
     """Prefix-only: _manager <slot> — hire/fire a property manager (auto-collects, 12% cut)."""
+    if await gate_prefix(message, "realestate"):
+        return
     slot = _re_slot(rest)
     if slot is None:
         await message.channel.send(
@@ -17923,6 +18246,8 @@ def _re_resolve_auctions(data: dict) -> int:
 
 async def _handle_mortgage(message: discord.Message, rest: str):
     """Prefix-only: _mortgage <slot> — borrow 50% LTV against a property. No arg = status."""
+    if await gate_prefix(message, "realestate"):
+        return
     uid = message.author.id
     data = _load_re()
     props = data.get("users", {}).get(str(uid), [])
@@ -17973,6 +18298,8 @@ async def _handle_mortgage(message: discord.Message, rest: str):
 
 async def _handle_payloan(message: discord.Message, rest: str):
     """Prefix-only: _payloan <slot> — pay off a mortgage."""
+    if await gate_prefix(message, "realestate"):
+        return
     uid = message.author.id
     data = _load_re()
     props = data.get("users", {}).get(str(uid), [])
@@ -18001,6 +18328,8 @@ async def _handle_payloan(message: discord.Message, rest: str):
 
 async def _handle_foreclosures(message: discord.Message):
     """Prefix-only: _foreclosures — browse seized-property auctions."""
+    if await gate_prefix(message, "realestate"):
+        return
     data = _load_re()
     fc = {k: v for k, v in _re_foreclosures(data).items() if time.time() < v.get("ends_at", 0)}
     if not fc:
@@ -18030,6 +18359,8 @@ async def _handle_foreclosures(message: discord.Message):
 
 async def _handle_fbid(message: discord.Message, rest: str):
     """Prefix-only: _fbid <id> <amount> — bid on a foreclosure."""
+    if await gate_prefix(message, "realestate"):
+        return
     uid = message.author.id
     tok = (rest or "").split()
     if len(tok) < 2:
@@ -18105,6 +18436,8 @@ async def realestate_command(
     elif action.value == "portfolio":
         await _re_portfolio(interaction)
     elif action.value == "buy":
+        if await gate_slash(interaction, "realestate"):
+            return
         await _re_buy(interaction, data, property_type)
     elif action.value == "sell":
         await _re_sell(interaction, data, slot)
@@ -18758,6 +19091,8 @@ async def stocks_command(
     elif action.value == "portfolio":
         await _stocks_portfolio(interaction, data)
     elif action.value == "buy":
+        if await gate_slash(interaction, "stocks"):
+            return
         await _stocks_buy(interaction, data, ticker, shares)
     elif action.value == "sell":
         await _stocks_sell(interaction, data, ticker, shares)
@@ -20683,6 +21018,8 @@ async def _handle_crew(message: discord.Message):
 
 async def _handle_createcrew(message: discord.Message, rest: str):
     """Prefix-only: _createcrew <TAG> <name>"""
+    if await gate_prefix(message, "crews"):
+        return
     uid = message.author.id
     data = _load_crews()
     if _crew_of(uid, data)[1]:
@@ -20754,6 +21091,8 @@ async def _handle_crewinvite(message: discord.Message):
 
 
 async def _handle_joincrew(message: discord.Message, rest: str):
+    if await gate_prefix(message, "crews"):
+        return
     uid = message.author.id
     data = _load_crews()
     if _crew_of(uid, data)[1]:
@@ -21245,6 +21584,8 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "crewpromote", "disbandcrew", "crewdeposit", "crewwithdraw", "crews", "crewwars",
     # Pets
     "petbattle", "petfight",
+    # City ranks
+    "rank", "myrank", "city", "ranks", "cityranks", "ladder",
 }
 
 
@@ -21533,6 +21874,8 @@ class LuxuryShopView(discord.ui.View):
 
 async def _handle_luxury(message: discord.Message):
     """Prefix-only: _luxury — the ultra-luxury shop + your collection."""
+    if await gate_prefix(message, "luxury"):
+        return
     uid = message.author.id
     owned = set(luxury_owned(uid))
     lines = []
@@ -21640,6 +21983,8 @@ class HighRollerView(discord.ui.View):
 
 async def _handle_highroller(message: discord.Message, rest: str):
     """Prefix-only: _highroller <bet> — whale-stakes gambling."""
+    if await gate_prefix(message, "highroller"):
+        return
     uid = message.author.id
     tok = (rest or "").split()
     bet = None
@@ -22177,6 +22522,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("petbattle", "petfight", "pvpet"):
         await _handle_petbattle(message, rest)
+        return True
+    if cmd_name in ("rank", "myrank", "city"):
+        await _handle_rank(message)
+        return True
+    if cmd_name in ("ranks", "cityranks", "ladder"):
+        await _handle_ranks(message)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
