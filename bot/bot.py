@@ -14149,6 +14149,37 @@ def _user_venues(user_id: int) -> list:
     return _load_nightlife()["users"].get(str(user_id), [])
 
 
+def _resolve_venue(venues: list, v_type: str, slot: int | None):
+    """Resolve which venue (within the full venues list) a command targets.
+    Returns (index, venue, error_message). When the user owns more than one
+    venue of a type, `slot` (the #N from /venues) disambiguates. error_message
+    is non-None when resolution fails and should be shown to the user."""
+    # Slot given: it indexes the FULL venue list (matching /venues numbering)
+    if slot is not None:
+        if not (1 <= slot <= len(venues)):
+            return None, None, f"❌ You don't have a venue in slot #{slot}. Check `/venues` for your slot numbers."
+        v = venues[slot - 1]
+        if v["type"] != v_type:
+            vinfo = VENUE_TYPES.get(v["type"], {}).get("name", v["type"])
+            return None, None, (
+                f"❌ Slot #{slot} is a **{vinfo}**, not the venue type you picked. "
+                f"Check `/venues` and pick the matching slot."
+            )
+        return slot - 1, v, None
+    # No slot: find all venues of this type
+    matches = [(i, v) for i, v in enumerate(venues) if v["type"] == v_type]
+    if not matches:
+        return None, None, None  # caller handles "you don't own one"
+    if len(matches) == 1:
+        i, v = matches[0]
+        return i, v, None
+    # Multiple of this type — ask the user to specify a slot
+    slot_list = ", ".join(f"#{i+1} ({v['name']})" for i, v in matches)
+    return None, None, (
+        f"❓ You own **{len(matches)}** of those. Add the slot number to pick one: {slot_list}.\n"
+        f"_Example: add `slot:` and the number from `/venues`._"
+    )
+
 def _venue_cost(user_id: int, venue_type: str) -> int:
     info = VENUE_TYPES[venue_type]
     base = info["cost"]
@@ -14271,7 +14302,7 @@ async def venues_command(interaction: discord.Interaction, user: discord.Member 
 
     total_hourly = 0
     total_pending = 0
-    for venue in venues:
+    for i, venue in enumerate(venues, start=1):
         info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?","max_staff":0})
         hourly = _venue_income_per_hour(venue)
         pending = _venue_pending_income(venue)
@@ -14283,7 +14314,7 @@ async def venues_command(interaction: discord.Interaction, user: discord.Member 
         else:
             status = "✅ Open"
         embed.add_field(
-            name=f"{info['emoji']} {venue['name']}",
+            name=f"#{i} {info['emoji']} {venue['name']}",
             value=(
                 f"Status: {status}\n"
                 f"Income: **{hourly:,}**/hr\n"
@@ -14368,7 +14399,7 @@ async def collectvenue_command(interaction: discord.Interaction):
 
 # ── /hirestaff ───────────────────────────────────────────────────────────────
 @tree.command(name="hirestaff", description="Hire a staff role at one of your venues.")
-@discord.app_commands.describe(venue_type="Which venue type to staff", role="Staff role")
+@discord.app_commands.describe(venue_type="Which venue type to staff", role="Staff role", slot="If you own more than one of this type, the #N from /venues")
 @discord.app_commands.choices(
     venue_type=[
         discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
@@ -14386,6 +14417,7 @@ async def hirestaff_command(
     interaction: discord.Interaction,
     venue_type: discord.app_commands.Choice[str],
     role: discord.app_commands.Choice[str],
+    slot: int = None,
 ):
     user = interaction.user
     v_type = venue_type.value
@@ -14403,13 +14435,38 @@ async def hirestaff_command(
 
     data = _load_nightlife()
     venues = data["users"].get(str(user.id), [])
-    # Find first venue of this type with room
     info = VENUE_TYPES.get(v_type, {})
-    biz = None
-    for v in venues:
-        if v["type"] == v_type and len(v.get("staff", [])) < info.get("max_staff", 0):
-            biz = v
-            break
+    max_staff = info.get("max_staff", 0)
+
+    if slot is not None:
+        # Target the specific venue in that slot
+        idx, biz, err = _resolve_venue(venues, v_type, slot)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        if biz and len(biz.get("staff", [])) >= max_staff:
+            await interaction.response.send_message(
+                f"❌ **{biz['name']}** is already at max staff ({max_staff}/{max_staff}).", ephemeral=True
+            )
+            return
+    else:
+        # No slot: among venues of this type, prefer one with an open staff slot
+        matches = [(i, v) for i, v in enumerate(venues) if v["type"] == v_type]
+        if len(matches) > 1:
+            # Multiple of this type — if more than one has room, ask which
+            with_room = [(i, v) for i, v in matches if len(v.get("staff", [])) < max_staff]
+            if len(with_room) > 1:
+                slot_list = ", ".join(f"#{i+1} ({v['name']})" for i, v in with_room)
+                await interaction.response.send_message(
+                    f"❓ You own **{len(matches)}** of those with room. Add a slot to pick one: {slot_list}.",
+                    ephemeral=True,
+                )
+                return
+        biz = None
+        for v in venues:
+            if v["type"] == v_type and len(v.get("staff", [])) < max_staff:
+                biz = v
+                break
 
     if not biz:
         await interaction.response.send_message(
@@ -14428,7 +14485,7 @@ async def hirestaff_command(
 
 # ── /stockliquor ─────────────────────────────────────────────────────────────
 @tree.command(name="stockliquor", description="Stock liquor at one of your venues for bonus revenue.")
-@discord.app_commands.describe(venue_type="Which venue type", liquor="Which liquor", bottles="How many bottles")
+@discord.app_commands.describe(venue_type="Which venue type", liquor="Which liquor", bottles="How many bottles", slot="If you own more than one of this type, the #N from /venues")
 @discord.app_commands.choices(
     venue_type=[
         discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
@@ -14447,6 +14504,7 @@ async def stockliquor_command(
     venue_type: discord.app_commands.Choice[str],
     liquor: discord.app_commands.Choice[str],
     bottles: int,
+    slot: int = None,
 ):
     user = interaction.user
     v_type = venue_type.value
@@ -14472,7 +14530,10 @@ async def stockliquor_command(
 
     data = _load_nightlife()
     venues = data["users"].get(str(user.id), [])
-    biz = next((v for v in venues if v["type"] == v_type), None)
+    idx, biz, err = _resolve_venue(venues, v_type, slot)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
     if not biz:
         await interaction.response.send_message(
             f"❌ You don't own a {venue_info.get('name', v_type)}.", ephemeral=True
