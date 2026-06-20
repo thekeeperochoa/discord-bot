@@ -13008,6 +13008,9 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
     if not attacker:
         await message.channel.send("You're not in the game yet. Start dealing with `/dealer` first.")
         return
+    # Apply heat decay first — otherwise the raid reads stale heat (e.g. a player
+    # whose heat should have cooled to 0 hours ago still gets intercepted at 100).
+    _decay_heat(attacker)
     if _dealer_in_jail(attacker):
         await message.channel.send(
             f"🚔 You're locked up — out <t:{int(attacker['jail_until'])}:R>. Can't raid from a cell."
@@ -15088,7 +15091,11 @@ async def handle_autoreact(message: discord.Message):
         if not isinstance(replied_to, discord.Message):
             log.info("autoreact: replied_to not a Message (%s)", type(replied_to))
             return
-        booster_id = str(replied_to.author.id)
+        # If the replied-to message is one of our Drip webhook reposts, the webhook
+        # is the "author" — resolve back to the real user so booster signatures
+        # still fire on replies to a booster's restyled message.
+        mapped = _webhook_original_author(replied_to)
+        booster_id = str(mapped) if mapped is not None else str(replied_to.author.id)
     except Exception as e:
         log.warning("autoreact: failed to resolve reply: %s", e)
         return
@@ -15120,6 +15127,463 @@ async def handle_autoreact(message: discord.Message):
             await asyncio.sleep(0.25)
         except Exception as e:
             log.warning("autoreact: add_reaction failed for %r: %s", emoji, e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💧 THE DRIP SHOP — buy effects that change how YOUR OWN messages appear.
+# Self-only by design (no targeting others = no harassment vector). Two tiers:
+#   • Decoration: bot reacts/decorates around your real message.
+#   • Webhook restyle: your message is reposted via webhook with a transformed
+#     look (accent filter / custom persona name+avatar). Only ever your own text.
+# Booster signatures STILL WORK on webhook reposts: we map each webhook message
+# back to its original author so replies to it trigger the signature reactions.
+# ─────────────────────────────────────────────────────────────────────────────
+DRIP_FILE = MEMORY_DIR / "drip.json"
+
+# How many recent webhook reposts to remember for signature reply-mapping.
+_WEBHOOK_AUTHOR_MAP = {}      # webhook_message_id -> original_author_id (in-memory, recent)
+_WEBHOOK_MAP_MAX = 500
+_webhook_cache = {}           # channel_id -> discord.Webhook (avoid refetching)
+
+# Accent text filters (applied to YOUR OWN text only)
+def _accent_uwu(t: str) -> str:
+    t = re.sub(r"[rl]", "w", t); t = re.sub(r"[RL]", "W", t)
+    t = re.sub(r"n([aeiou])", r"ny\1", t); t = re.sub(r"N([aeiou])", r"Ny\1", t)
+    t = t.replace("ove", "uv")
+    return t + random.choice([" uwu", " owo", " >w<", " :3", ""])
+
+def _accent_pirate(t: str) -> str:
+    repl = {" you": " ye", " You": " Ye", " my": " me", " is": " be", " are": " be",
+            " hello": " ahoy", " Hello": " Ahoy", " friend": " matey", " yes": " aye"}
+    for a, b in repl.items():
+        t = t.replace(a, b)
+    return t + random.choice([" arrr!", ", savvy?", " yarrr.", ""])
+
+def _accent_caps(t: str) -> str:
+    return t.upper()
+
+def _accent_tiny(t: str) -> str:
+    # smallcaps-ish vibe via fullwidth-ish lower (kept simple/ascii-safe)
+    return t.lower()
+
+def _accent_shakespeare(t: str) -> str:
+    repl = {" you": " thou", " You": " Thou", " your": " thy", " are": " art",
+            " my": " mine", " yes": " verily", " hello": " hark", " Hello": " Hark"}
+    for a, b in repl.items():
+        t = t.replace(a, b)
+    return t + random.choice([", forsooth.", " 'tis so.", " m'lord.", ""])
+
+def _accent_corporate(t: str) -> str:
+    return t + random.choice([
+        " — circling back on this.", " (per my last message).",
+        " Let's take this offline.", " moving forward.", ""])
+
+ACCENTS = {
+    "uwu":         {"emoji": "🥺", "name": "UwU Speak",     "fn": _accent_uwu},
+    "pirate":      {"emoji": "🏴‍☠️", "name": "Pirate",        "fn": _accent_pirate},
+    "caps":        {"emoji": "📢", "name": "ALL CAPS",      "fn": _accent_caps},
+    "shakespeare": {"emoji": "🎭", "name": "Shakespeare",   "fn": _accent_shakespeare},
+    "corporate":   {"emoji": "💼", "name": "Corporate",     "fn": _accent_corporate},
+}
+
+# Drip items: key -> (emoji, name, type, price, duration_hours, desc)
+# types: accent | persona | aura | entrance | title
+DRIP_ITEMS = {
+    "accent":   {"emoji": "🗣️", "name": "Accent",        "type": "accent",   "price": 8_000,  "hours": 6,
+                 "desc": "Your messages get reposted in a fun voice (uwu, pirate, caps, etc)."},
+    "persona":  {"emoji": "🎭", "name": "Custom Persona", "type": "persona",  "price": 15_000, "hours": 12,
+                 "desc": "Your messages appear under a custom name + avatar you set."},
+    "aura":     {"emoji": "✨", "name": "Signature Aura", "type": "aura",     "price": 5_000,  "hours": 8,
+                 "desc": "The bot auto-reacts your chosen emojis to everything you post."},
+    "entrance": {"emoji": "🚪", "name": "Grand Entrance",  "type": "entrance", "price": 4_000,  "hours": 24,
+                 "desc": "When you break a silence, the bot announces your arrival."},
+    "title":    {"emoji": "🏷️", "name": "Title Tag",       "type": "title",    "price": 6_000,  "hours": 12,
+                 "desc": "A custom tag the bot stamps as a reply on your messages."},
+}
+
+BANNED_PERSONA = ("admin", "mod", "moderator", "staff", "owner", "system", "discord",
+                  "jordan belfort", "everyone", "here")
+
+
+def _load_drip() -> dict:
+    if DRIP_FILE.exists():
+        try:
+            with open(DRIP_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": {}}
+
+
+def _save_drip(data: dict):
+    try:
+        with open(DRIP_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save drip failed: %s", e)
+
+
+def _drip_active(user_id: int) -> dict:
+    """Return the user's active (non-expired) drip effects: type -> effect dict."""
+    data = _load_drip()
+    rec = data.get("users", {}).get(str(user_id), {})
+    now = time.time()
+    out = {}
+    changed = False
+    for etype, eff in list(rec.items()):
+        if not isinstance(eff, dict):
+            continue
+        if eff.get("until", 0) > now:
+            out[etype] = eff
+        else:
+            changed = True
+    return out
+
+
+def _drip_set(user_id: int, etype: str, payload: dict, hours: float):
+    data = _load_drip()
+    rec = data.setdefault("users", {}).setdefault(str(user_id), {})
+    payload = dict(payload)
+    payload["until"] = time.time() + hours * 3600
+    rec[etype] = payload
+    _save_drip(data)
+
+
+def _clean_persona_name(raw: str) -> str | None:
+    name = re.sub(r"[`@#]", "", (raw or "")).strip()[:32]
+    if len(name) < 2:
+        return None
+    low = name.lower()
+    if any(b in low for b in BANNED_PERSONA):
+        return None
+    # Basic slur/NSFW guard for publicly-broadcast names
+    _bad = ("nigg", "fagg", "faggot", "retard", "rape", "kike", "spic", "chink", "tranny")
+    if any(b in low.replace(" ", "") for b in _bad):
+        return None
+    return name
+
+
+async def _get_webhook(channel) -> "discord.Webhook | None":
+    """Get or create a reusable webhook for a channel (for drip reposts)."""
+    cid = channel.id
+    wh = _webhook_cache.get(cid)
+    if wh is not None:
+        return wh
+    try:
+        # Thread support: webhooks live on the parent channel
+        target = channel
+        thread = None
+        if isinstance(channel, discord.Thread):
+            target = channel.parent
+            thread = channel
+        hooks = await target.webhooks()
+        wh = next((h for h in hooks if h.name == "Drip" and h.user == client.user), None)
+        if wh is None:
+            wh = await target.create_webhook(name="Drip")
+        _webhook_cache[cid] = wh
+        return wh
+    except discord.Forbidden:
+        log.warning("drip: missing Manage Webhooks in #%s", getattr(channel, "name", channel.id))
+        return None
+    except Exception as e:
+        log.warning("drip: webhook fetch failed: %s", e)
+        return None
+
+
+def _remember_webhook_author(webhook_msg_id: int, author_id: int):
+    _WEBHOOK_AUTHOR_MAP[str(webhook_msg_id)] = author_id
+    if len(_WEBHOOK_AUTHOR_MAP) > _WEBHOOK_MAP_MAX:
+        # drop oldest ~20%
+        for k in list(_WEBHOOK_AUTHOR_MAP.keys())[: _WEBHOOK_MAP_MAX // 5]:
+            _WEBHOOK_AUTHOR_MAP.pop(k, None)
+
+
+async def handle_drip_repost(message: discord.Message) -> bool:
+    """If the author has an active accent/persona effect, delete their message and
+    repost it via webhook with the transformed look. Returns True if reposted
+    (caller should stop further processing of the original message)."""
+    if not message.guild or not message.content:
+        return False
+    # Ignore commands — let them run normally
+    if message.content.strip().startswith(("_", "/", "!", ".")):
+        return False
+    active = _drip_active(message.author.id)
+    accent = active.get("accent")
+    persona = active.get("persona")
+    if not accent and not persona:
+        return False
+
+    # Build the reposted appearance
+    content = message.content
+    if accent:
+        fn = ACCENTS.get(accent.get("style", ""), {}).get("fn")
+        if fn:
+            try:
+                content = fn(content)
+            except Exception:
+                content = message.content
+    if len(content) > 1900:
+        content = content[:1900]
+
+    # Identity: persona name/avatar if set, else the user's own name/avatar
+    if persona:
+        username = persona.get("name") or message.author.display_name
+        avatar_url = persona.get("avatar") or (message.author.display_avatar.url if message.author.display_avatar else None)
+    else:
+        username = message.author.display_name
+        avatar_url = message.author.display_avatar.url if message.author.display_avatar else None
+
+    wh = await _get_webhook(message.channel)
+    if wh is None:
+        return False  # can't repost (no perms) — leave original message be
+
+    # Preserve reply context if the original was replying to something
+    send_kwargs = dict(
+        content=content,
+        username=username[:80],
+        avatar_url=avatar_url,
+        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+        wait=True,
+    )
+    if isinstance(message.channel, discord.Thread):
+        send_kwargs["thread"] = message.channel
+
+    try:
+        sent = await wh.send(**send_kwargs)
+    except Exception as e:
+        log.warning("drip: webhook send failed: %s", e)
+        return False
+
+    # Map webhook message -> original author so booster signatures still fire on replies
+    try:
+        if sent is not None:
+            _remember_webhook_author(sent.id, message.author.id)
+    except Exception:
+        pass
+
+    # Delete the user's original message (best-effort)
+    try:
+        await message.delete()
+    except discord.Forbidden:
+        log.warning("drip: missing Manage Messages to delete original in #%s", getattr(message.channel, "name", ""))
+    except Exception:
+        pass
+    return True
+
+
+async def handle_drip_decorations(message: discord.Message):
+    """Apply non-repost drip effects to the user's OWN message: aura reactions,
+    grand entrance, title tag. Safe to call on the original message."""
+    if not message.guild or not message.content:
+        return
+    if message.content.strip().startswith(("_", "/", "!", ".")):
+        return
+    active = _drip_active(message.author.id)
+    if not active:
+        return
+
+    # ✨ Aura — react the user's chosen emojis to their own message
+    aura = active.get("aura")
+    if aura and aura.get("emojis"):
+        for e in aura["emojis"][:4]:
+            try:
+                await message.add_reaction(e)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+    # 🏷️ Title Tag — stamp a reply tag
+    title = active.get("title")
+    if title and title.get("text"):
+        try:
+            await message.reply(f"🏷️ _{title['text'][:60]}_", mention_author=False)
+        except Exception:
+            pass
+
+    # 🚪 Grand Entrance — only if the channel was quiet for a while
+    entrance = active.get("entrance")
+    if entrance:
+        try:
+            cid = str(message.channel.id)
+            last = last_channel_activity.get(cid, 0)
+            # "broke a silence" = >20 min since last activity recorded before this msg
+            if entrance.get("_last_fire", 0) + 600 < time.time():
+                # (last_channel_activity is updated each message; we approximate quiet)
+                phrase = entrance.get("text") or f"👑 {message.author.display_name} has entered the chat."
+                await message.channel.send(phrase[:120])
+                # persist the fire time
+                data = _load_drip()
+                rec = data.get("users", {}).get(str(message.author.id), {})
+                if "entrance" in rec:
+                    rec["entrance"]["_last_fire"] = time.time()
+                    _save_drip(data)
+        except Exception:
+            pass
+
+
+def _webhook_original_author(message: discord.Message) -> int | None:
+    """If a message is one of our drip webhook reposts, return the original author id."""
+    try:
+        if message.webhook_id and str(message.id) in _WEBHOOK_AUTHOR_MAP:
+            return _WEBHOOK_AUTHOR_MAP[str(message.id)]
+    except Exception:
+        pass
+    return None
+
+
+
+# ── Drip Shop commands (all prefix-only; effects are self-only) ──────────────
+async def _send_drip_shop(message: discord.Message):
+    """Prefix-only: _drip — the Drip Shop + your active effects."""
+    uid = message.author.id
+    active = _drip_active(uid)
+    lines = []
+    for key, it in DRIP_ITEMS.items():
+        owned = ""
+        if it["type"] in active:
+            rem = int(active[it["type"]]["until"] - time.time())
+            owned = f" · ✅ active {fmt_cooldown(rem)}"
+        lines.append(f"{it['emoji']} **{it['name']}** — `{it['price']:,}` ({it['hours']}h){owned}\n   _{it['desc']}_")
+    embed = discord.Embed(
+        title="💧 THE DRIP SHOP",
+        description=(
+            "Customize how **your own** messages hit the timeline. Effects are timed.\n\n"
+            + "\n".join(lines)
+        ),
+        color=0x00F0FF,
+    )
+    embed.set_footer(text="Buy: _accent <style> · _persona <name> · _aura <emojis> · _titletag <text> · _entrance <text>")
+    await message.channel.send(embed=embed)
+
+
+def _charge_drip(uid: int, key: str) -> tuple[bool, str]:
+    it = DRIP_ITEMS[key]
+    if economy.balance(uid) < it["price"]:
+        return False, f"❌ **{it['name']}** costs **{it['price']:,}**. You have **{economy.balance(uid):,}**."
+    economy.add(uid, -it["price"], f"drip:{key}")
+    try:
+        track_economy_event("spent", it["price"])
+    except Exception:
+        pass
+    return True, ""
+
+
+async def _handle_accent(message: discord.Message, rest: str):
+    """Prefix-only: _accent <style> — repost your messages in a fun voice."""
+    uid = message.author.id
+    style = (rest or "").strip().lower().split()[0] if rest.strip() else ""
+    if style not in ACCENTS:
+        opts = " · ".join(f"`{k}` {v['emoji']}" for k, v in ACCENTS.items())
+        await message.channel.send(f"Pick an accent: {opts}\nExample: `_accent pirate`")
+        return
+    ok, err = _charge_drip(uid, "accent")
+    if not ok:
+        await message.channel.send(err)
+        return
+    _drip_set(uid, "accent", {"style": style}, DRIP_ITEMS["accent"]["hours"])
+    a = ACCENTS[style]
+    await message.channel.send(
+        f"{a['emoji']} **{a['name']}** accent active for {DRIP_ITEMS['accent']['hours']}h. "
+        f"Your messages will be reposted in this voice. _(Needs Manage Webhooks + Manage Messages in the channel.)_"
+    )
+
+
+async def _handle_persona(message: discord.Message, rest: str):
+    """Prefix-only: _persona <name> [avatar_url] — your messages appear as a custom identity."""
+    uid = message.author.id
+    parts = (rest or "").strip().split()
+    if not parts:
+        await message.channel.send(
+            "Usage: `_persona <name>` (optionally add an image URL for the avatar).\n"
+            "Example: `_persona The Ghost https://i.imgur.com/xyz.png`\n"
+            "_`_persona off` to remove._"
+        )
+        return
+    if parts[0].lower() == "off":
+        data = _load_drip()
+        rec = data.get("users", {}).get(str(uid), {})
+        if "persona" in rec:
+            del rec["persona"]
+            _save_drip(data)
+        await message.channel.send("🎭 Persona removed. Back to your normal self.")
+        return
+    # Last token may be an avatar URL
+    avatar = None
+    if parts[-1].startswith("http"):
+        avatar = parts[-1]
+        name_raw = " ".join(parts[:-1])
+    else:
+        name_raw = " ".join(parts)
+    name = _clean_persona_name(name_raw)
+    if not name:
+        await message.channel.send("❌ That name isn't allowed (too short, impersonates staff, or blocked words).")
+        return
+    ok, err = _charge_drip(uid, "persona")
+    if not ok:
+        await message.channel.send(err)
+        return
+    _drip_set(uid, "persona", {"name": name, "avatar": avatar}, DRIP_ITEMS["persona"]["hours"])
+    await message.channel.send(
+        f"🎭 Persona **{name}** active for {DRIP_ITEMS['persona']['hours']}h. "
+        f"Your messages now post under this identity. _(Needs Manage Webhooks + Manage Messages.)_"
+    )
+
+
+async def _handle_aura(message: discord.Message, rest: str):
+    """Prefix-only: _aura <emojis> — bot auto-reacts these to your own messages."""
+    uid = message.author.id
+    emojis = _parse_emojis(rest or "")
+    # validate custom emojis are usable in this guild
+    valid = []
+    for e in emojis[:4]:
+        if e.startswith("<"):
+            m = re.match(r"<a?:\w+:(\d+)>", e)
+            if m and message.guild and any(ge.id == int(m.group(1)) for ge in message.guild.emojis):
+                valid.append(e)
+        else:
+            valid.append(e)
+    if not valid:
+        await message.channel.send("Give me 1-4 emojis to use. Custom emojis must be from this server. Example: `_aura 🔥💎`")
+        return
+    ok, err = _charge_drip(uid, "aura")
+    if not ok:
+        await message.channel.send(err)
+        return
+    _drip_set(uid, "aura", {"emojis": valid}, DRIP_ITEMS["aura"]["hours"])
+    await message.channel.send(f"✨ Aura active for {DRIP_ITEMS['aura']['hours']}h — {''.join(valid)} on everything you post.")
+
+
+async def _handle_titletag(message: discord.Message, rest: str):
+    """Prefix-only: _titletag <text> — bot stamps a tag reply on your messages."""
+    uid = message.author.id
+    text = (rest or "").strip()[:60]
+    if not text:
+        await message.channel.send("Usage: `_titletag <text>` — e.g. `_titletag certified menace`")
+        return
+    ok, err = _charge_drip(uid, "title")
+    if not ok:
+        await message.channel.send(err)
+        return
+    _drip_set(uid, "title", {"text": text}, DRIP_ITEMS["title"]["hours"])
+    await message.channel.send(f"🏷️ Title **{text}** active for {DRIP_ITEMS['title']['hours']}h.")
+
+
+async def _handle_entrance(message: discord.Message, rest: str):
+    """Prefix-only: _entrance <text> — bot announces you when you break a silence."""
+    uid = message.author.id
+    text = (rest or "").strip()[:120]
+    ok, err = _charge_drip(uid, "entrance")
+    if not ok:
+        await message.channel.send(err)
+        return
+    payload = {"_last_fire": 0}
+    if text:
+        payload["text"] = text
+    _drip_set(uid, "entrance", payload, DRIP_ITEMS["entrance"]["hours"])
+    preview = text or f"👑 {message.author.display_name} has entered the chat."
+    await message.channel.send(f"🚪 Grand Entrance active for {DRIP_ITEMS['entrance']['hours']}h.\nPreview: {preview}")
+
+
 
 
 # ── /signature — boosters set their own reaction emoji ───────────────────────
@@ -21647,6 +22111,8 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "petbattle", "petfight",
     # City ranks
     "rank", "myrank", "city", "ranks", "cityranks", "ladder",
+    # Drip Shop
+    "drip", "dripshop", "accent", "persona", "aura", "titletag", "title", "entrance",
 }
 
 
@@ -22590,6 +23056,24 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("ranks", "cityranks", "ladder"):
         await _handle_ranks(message)
         return True
+    if cmd_name in ("drip", "dripshop"):
+        await _send_drip_shop(message)
+        return True
+    if cmd_name == "accent":
+        await _handle_accent(message, rest)
+        return True
+    if cmd_name == "persona":
+        await _handle_persona(message, rest)
+        return True
+    if cmd_name == "aura":
+        await _handle_aura(message, rest)
+        return True
+    if cmd_name in ("titletag", "title"):
+        await _handle_titletag(message, rest)
+        return True
+    if cmd_name == "entrance":
+        await _handle_entrance(message, rest)
+        return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
         return True
@@ -23001,6 +23485,28 @@ async def on_message(message: discord.Message):
         await handle_autoreact(message)
     except Exception as e:
         log.warning("autoreact failed: %s", e)
+
+    # ── 💧 Drip Shop: restyle the author's own message via webhook (accent/persona) ──
+    # Must run before XP/coin processing since it may delete + repost the message.
+    # We grant chat XP first so users don't lose it by opting into a cosmetic.
+    try:
+        now_ts0 = time.time()
+        last0 = _xp_last_message.get(message.author.id, 0)
+        if now_ts0 - last0 >= XP_MESSAGE_COOLDOWN and message.content.strip():
+            _xp_last_message[message.author.id] = now_ts0
+            await grant_xp(message.author.id, XP_PER_MESSAGE, channel=message.channel)
+    except Exception as e:
+        log.warning("drip pre-xp failed: %s", e)
+    try:
+        if await handle_drip_repost(message):
+            return  # original message was replaced by a webhook repost; stop here
+    except Exception as e:
+        log.warning("drip repost failed: %s", e)
+    # Non-repost drip decorations (aura reactions, entrance, title tag)
+    try:
+        await handle_drip_decorations(message)
+    except Exception as e:
+        log.warning("drip decorations failed: %s", e)
 
     # ── Voice message transcription (all channels) ────────────────────────────
     try:
