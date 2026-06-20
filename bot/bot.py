@@ -24,8 +24,21 @@ import time
 import re
 import base64
 from datetime import datetime, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    EASTERN = ZoneInfo("America/New_York")  # handles EST/EDT (daylight saving) automatically
+except Exception:
+    EASTERN = timezone(timedelta(hours=-5))  # fallback: fixed EST if zoneinfo unavailable
 from pathlib import Path
 from collections import defaultdict, deque
+
+
+def now_est() -> datetime:
+    """Current time in US Eastern (EST/EDT). The bot runs on Eastern time so the
+    player-facing 'day' (daily reset, streaks, weekly resets, stats) rolls over at
+    Eastern midnight, not UTC midnight."""
+    return datetime.now(EASTERN)
+
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -195,7 +208,7 @@ class DailyLog:
         return RECAP_DIR / f"{channel_id}_{date_str}.jsonl"
 
     def append(self, channel_id: str, author: str, content: str):
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_str = now_est().strftime("%Y-%m-%d")
         p = self._path(channel_id, date_str)
         line = json.dumps({"author": author, "content": content, "ts": time.time()})
         with open(p, "a") as f:
@@ -216,12 +229,12 @@ class DailyLog:
 
     def cleanup_old(self, days_to_keep: int = 7):
         """Delete log files older than N days."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
+        cutoff = now_est() - timedelta(days=days_to_keep)
         for f in RECAP_DIR.glob("*.jsonl"):
             try:
                 # Parse date from filename
                 date_part = f.stem.split("_")[-1]
-                file_date = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                file_date = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=EASTERN)
                 if file_date < cutoff:
                     f.unlink()
             except Exception:
@@ -1135,7 +1148,7 @@ def compute_join_risk(member) -> tuple[int, list]:
     """Score a joining member 0-100 on spam/alt risk. Returns (score, reasons)."""
     score = 0
     reasons = []
-    now = datetime.now(timezone.utc)
+    now = now_est()
 
     # Account age — the strongest signal
     try:
@@ -1179,7 +1192,7 @@ def account_too_young_for_invite(member, cfg) -> bool:
     """T3: True if account is younger than the contest minimum (invite won't count)."""
     try:
         min_days = cfg.get("antispam_min_account_age_days", 7)
-        age_days = (datetime.now(timezone.utc) - member.created_at).days
+        age_days = (now_est() - member.created_at).days
         return age_days < min_days
     except Exception:
         return False
@@ -1232,7 +1245,7 @@ async def antispam_on_join(member, cfg=None, invite_code=None):
             )
             await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         if score >= 40:
-            age_days = (datetime.now(timezone.utc) - member.created_at).days
+            age_days = (now_est() - member.created_at).days
             color = 0xff3b5c if score >= 70 else 0xffcf2b
             embed = discord.Embed(
                 title=f"⚠️ Suspicious join · risk {score}/100",
@@ -1263,7 +1276,7 @@ async def antispam_check_message(message, cfg=None) -> bool:
     # Only scrutinize newer members (established users get a pass)
     try:
         joined = member.joined_at
-        if joined and (datetime.now(timezone.utc) - joined).days > 7:
+        if joined and (now_est() - joined).days > 7:
             return False
     except Exception:
         pass
@@ -1361,12 +1374,12 @@ def _save_stats(data: dict):
 
 
 def _stats_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return now_est().strftime("%Y-%m-%d")
 
 
 def _stats_trim_old(stats: dict):
     """Drop data older than STATS_KEEP_DAYS."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=STATS_KEEP_DAYS)).strftime("%Y-%m-%d")
+    cutoff = (now_est() - timedelta(days=STATS_KEEP_DAYS)).strftime("%Y-%m-%d")
     for cmd in list(stats.get("command_uses_today", {}).keys()):
         stats["command_uses_today"][cmd] = {
             d: v for d, v in stats["command_uses_today"][cmd].items() if d >= cutoff
@@ -1831,8 +1844,8 @@ async def trigger_balance_check(user_id: int, channel=None):
 async def trigger_daily_claim(user_id: int, channel=None):
     """Track daily streaks. Returns nothing — just side-effects."""
     counters = _get_counters(user_id)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = now_est().strftime("%Y-%m-%d")
+    yesterday = (now_est() - timedelta(days=1)).strftime("%Y-%m-%d")
     last_claim = counters.get("last_daily_date", "")
     if last_claim == today:
         return  # already counted today
@@ -2118,7 +2131,7 @@ def _load_tournament() -> dict:
         except Exception:
             pass
     return {
-        "season_start": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "season_start": now_est().strftime("%Y-%m-%d"),
         "scores": {},      # user_id -> {coins_earned, games_won, commands_used}
         "history": [],
     }
@@ -2152,7 +2165,7 @@ async def tournament_scheduler():
         await asyncio.sleep(600)  # check every 10 min
         cfg = load_config()
         target_hour = cfg.get("daily_recap_hour_utc", 4)
-        now = datetime.now(timezone.utc)
+        now = now_est()
         # Reset on Monday at the configured hour
         if now.weekday() != 0 or now.hour != target_hour:
             continue
@@ -3088,7 +3101,7 @@ def is_direct_trigger(message: discord.Message, cfg: dict) -> bool:
 
 
 def get_time_context() -> str:
-    now = datetime.now(timezone.utc)
+    now = now_est()
     hour = now.hour
     if 0 <= hour < 5:
         return f"(It is currently {hour}:{now.minute:02d} UTC — late night / early morning)"
@@ -3170,7 +3183,7 @@ async def daily_recap_scheduler():
         if not recap_channel_id:
             continue
         target_hour = cfg.get("daily_recap_hour_utc", 4)
-        now = datetime.now(timezone.utc)
+        now = now_est()
 
         # Only fire within the configured hour, and only once per day (persistent)
         if now.hour != target_hour:
@@ -3434,7 +3447,7 @@ async def gather_user_messages(interaction: discord.Interaction, user: discord.M
     except Exception as e:
         log.warning("Channel history fetch failed: %s", e)
 
-    today = datetime.now(timezone.utc)
+    today = now_est()
     target_name = user.display_name
     seen = set(user_messages)
     for days_back in range(7):
@@ -3742,7 +3755,7 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
         log.warning("Channel history fetch failed: %s", e)
 
     # Also scour daily logs (cross-channel) as backup
-    today = datetime.now(timezone.utc)
+    today = now_est()
     target_name = user.display_name
     seen = set(user_messages)
     for days_back in range(7):
@@ -4668,7 +4681,7 @@ async def daily_command(interaction: discord.Interaction):
     # Makes EVERY day feel rewarding, not just the 7/14/30/100 milestones.
     counters = _get_counters(user.id)
     cur_streak = counters.get("daily_streak", 0)
-    next_streak = cur_streak + 1 if counters.get("last_daily_date", "") == (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d") else 1
+    next_streak = cur_streak + 1 if counters.get("last_daily_date", "") == (now_est() - timedelta(days=1)).strftime("%Y-%m-%d") else 1
     streak_bonus = min(next_streak * 50, 1500)  # +50/day, caps at 1500
     final_reward = int(reward * (1 + bonus_pct / 100)) + passive + streak_bonus
     new_bal = economy.add(user.id, final_reward, "daily")
@@ -6684,7 +6697,7 @@ async def lottery_drawing_scheduler():
         await asyncio.sleep(300)  # check every 5 min
         cfg = load_config()
         target_hour = cfg.get("daily_recap_hour_utc", 4)
-        now = datetime.now(timezone.utc)
+        now = now_est()
         if now.hour != target_hour:
             continue
         today_str = now.strftime("%Y-%m-%d")
@@ -9723,7 +9736,7 @@ async def lieordie_command(interaction: discord.Interaction, target: discord.Mem
         log.warning("lieordie history fetch failed: %s", e)
 
     # Also pull from daily logs (last 7 days, all channels)
-    today = datetime.now(timezone.utc)
+    today = now_est()
     target_name = target.display_name
     seen = set(user_messages)
     for days_back in range(7):
@@ -10409,7 +10422,7 @@ async def on_reaction_add(reaction: discord.Reaction, user):
         return
 
     counters = _get_counters(msg.author.id)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_est().strftime("%Y-%m-%d")
     daily_key = f"reactions_today_{today}"
     msg_key = f"reaction_msg_{msg.id}"
 
@@ -10469,8 +10482,8 @@ def _get_user_quests(user_id: int) -> dict:
     """Get quests, generating new ones if needed."""
     quests = _load_quests()
     uid = str(user_id)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    week = datetime.now(timezone.utc).strftime("%Y-W%U")
+    today = now_est().strftime("%Y-%m-%d")
+    week = now_est().strftime("%Y-W%U")
 
     if uid not in quests:
         quests[uid] = {}
@@ -12197,7 +12210,7 @@ def _user_territory_bonus(user_id: int, data: dict) -> float:
 # ── Crew territory wars: weekly war points ──
 def _crew_war_week() -> str:
     """ISO-ish week key, matching the weekly pattern used elsewhere."""
-    return datetime.now(timezone.utc).strftime("%Y-W%U")
+    return now_est().strftime("%Y-W%U")
 
 
 def _crew_add_war_points(user_id, points: int):
@@ -12271,7 +12284,7 @@ def _save_dealer(data: dict):
 def _get_market_prices() -> dict:
     """Returns today's market prices for all substances. Refreshes daily."""
     data = _load_dealer()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_est().strftime("%Y-%m-%d")
     if data.get("market_date") != today:
         new_prices = {}
         for key, info in SUBSTANCES.items():
@@ -13303,7 +13316,7 @@ async def stash_command(interaction: discord.Interaction, user: discord.Member =
 @tree.command(name="streetprice", description="See today's buy/sell market prices.")
 async def streetprice_command(interaction: discord.Interaction):
     prices = _get_market_prices()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_est().strftime("%Y-%m-%d")
 
     lines = []
     for sub_key, info in SUBSTANCES.items():
@@ -13572,7 +13585,7 @@ def _build_dealer_overview_embed(user_id: int, display_name: str) -> discord.Emb
 def _build_dealer_market_embed() -> discord.Embed:
     """Market tab — neon street prices with trend indicators."""
     prices = _get_market_prices()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_est().strftime("%Y-%m-%d")
 
     rows = []
     for sub_key, info in SUBSTANCES.items():
@@ -18485,7 +18498,7 @@ def _save_re(data: dict):
 
 
 def _re_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return now_est().strftime("%Y-%m-%d")
 
 
 def _re_update_market(data: dict):
@@ -19689,7 +19702,7 @@ async def stocks_scheduler():
             _stocks_init_if_needed(data)
             _stocks_tick(data)
             # Dividend check — once per week on configured day/hour
-            now = datetime.now(timezone.utc)
+            now = now_est()
             if now.weekday() == STOCKS_DIVIDEND_DAY and now.hour == STOCKS_DIVIDEND_HOUR_UTC:
                 last_div = data.get("last_dividend", 0)
                 # Don't pay twice in same day
@@ -19980,7 +19993,7 @@ async def _stocks_sell(interaction, data, ticker, shares):
 def _fmt_user_age(joined: datetime) -> str:
     if not joined:
         return "?"
-    now = datetime.now(timezone.utc)
+    now = now_est()
     delta = now - joined
     years = delta.days // 365
     months = (delta.days % 365) // 30
@@ -20100,7 +20113,7 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
 
     # Timeout status
     timed_out_until = getattr(target, "timed_out_until", None)
-    is_timed_out = bool(timed_out_until and timed_out_until > datetime.now(timezone.utc))
+    is_timed_out = bool(timed_out_until and timed_out_until > now_est())
 
     # Pending membership screening
     is_pending = bool(getattr(target, "pending", False))
@@ -20211,8 +20224,8 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
 
     net_worth = balance + int(biz_value) + re_total + stocks_total
 
-    age_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
-    server_days = (datetime.now(timezone.utc) - joined_at).days if joined_at else 0
+    age_days = (now_est() - created_at).days if created_at else 0
+    server_days = (now_est() - joined_at).days if joined_at else 0
 
     # ── FRAME BUILDER ───────────────────────────────────────────────────────
     INNER = 30  # inner width — fits Discord mobile
@@ -23765,7 +23778,7 @@ async def on_message(message: discord.Message):
 
     # Manual recap trigger (admin only — anyone can use, but it'll recap today's messages so far)
     if message.content.strip() == "!recap":
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = now_est().strftime("%Y-%m-%d")
         logs = daily_log.read_day(channel_id, today)
         if len(logs) < 5:
             await message.reply("Not enough messages yet today for a recap.")
