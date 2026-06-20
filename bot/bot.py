@@ -15143,6 +15143,389 @@ async def handle_autoreact(message: discord.Message):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🛠️ CUSTOM COMMANDS — buy your own personal `_trigger` that fires a flex you
+# designed. Highly customizable, dead simple to use:
+#     _makecommand <trigger> <whatever you want it to say>
+# Supports placeholders: {user} {mention} {server} {count} {random:a|b|c}
+# Multi-line via literal "\n". Self-owned; only the buyer can edit/delete theirs.
+# ─────────────────────────────────────────────────────────────────────────────
+CUSTOMCMD_FILE = MEMORY_DIR / "customcmds.json"
+CUSTOMCMD_PRICE = 25_000          # one-time price to create a command
+CUSTOMCMD_MAX_PER_USER = 3        # how many a single person can own
+CUSTOMCMD_COOLDOWN = 5            # seconds between uses (anti-spam)
+CUSTOMCMD_MAX_LEN = 500
+
+# trigger names that can never be claimed (collide with real commands / unsafe)
+CUSTOMCMD_RESERVED = set()  # filled lazily from PREFIX_COMMANDS + prefix-only set
+
+_customcmd_cooldowns = {}  # (trigger) -> last used ts
+
+
+def _load_customcmds() -> dict:
+    if CUSTOMCMD_FILE.exists():
+        try:
+            with open(CUSTOMCMD_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # commands: trigger -> {owner, text, uses, created}
+    return {"commands": {}}
+
+
+def _save_customcmds(data: dict):
+    try:
+        with open(CUSTOMCMD_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save customcmds failed: %s", e)
+
+
+def _customcmd_reserved_names() -> set:
+    """All names a custom command may NOT use (so they can't shadow built-ins)."""
+    names = set()
+    try:
+        names |= set(PREFIX_COMMANDS.keys())
+    except Exception:
+        pass
+    try:
+        names |= set(ASK_PREFIX_ONLY_COMMANDS)
+    except Exception:
+        pass
+    # hard-block dangerous/owner names
+    names |= {"give", "grant", "mint", "makecommand", "editcommand", "delcommand",
+              "deletecommand", "mycommands", "commandlist", "customcommands"}
+    return names
+
+
+def _clean_trigger(raw: str) -> str | None:
+    t = re.sub(r"[^a-zA-Z0-9_]", "", (raw or "")).lower().strip()
+    if not (2 <= len(t) <= 20):
+        return None
+    return t
+
+
+def _render_customcmd(text: str, message: discord.Message, uses: int) -> str:
+    """Expand placeholders in a custom command's text."""
+    out = text.replace("\\n", "\n")
+    out = out.replace("{user}", message.author.display_name)
+    out = out.replace("{mention}", message.author.mention)
+    out = out.replace("{server}", message.guild.name if message.guild else "the server")
+    out = out.replace("{count}", str(uses))
+    # {random:a|b|c} -> pick one
+    def _rand(m):
+        opts = [o for o in m.group(1).split("|") if o]
+        return random.choice(opts) if opts else ""
+    out = re.sub(r"\{random:([^}]*)\}", _rand, out)
+    return out[:1900]
+
+
+async def _handle_makecommand(message: discord.Message, rest: str):
+    """Prefix-only: _makecommand <trigger> <text...>"""
+    uid = message.author.id
+    parts = (rest or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.channel.send(
+            "🛠️ **Make your own command!**\n"
+            f"`_makecommand <trigger> <what it says>` — costs **{CUSTOMCMD_PRICE:,}** (up to {CUSTOMCMD_MAX_PER_USER}).\n\n"
+            "**Placeholders you can use:**\n"
+            "`{user}` your name · `{mention}` pings you · `{server}` server name · `{count}` times used\n"
+            "`{random:a|b|c}` picks one at random · `\\n` makes a new line\n\n"
+            "**Example:** `_makecommand boss {user} runs this city. 👑 Bow down.`\n"
+            "Then anyone types `_boss` to fire it. _`_mycommands` to manage yours._"
+        )
+        return
+    trigger = _clean_trigger(parts[0])
+    text = parts[1].strip()[:CUSTOMCMD_MAX_LEN]
+    if not trigger:
+        await message.channel.send("❌ Trigger must be 2-20 letters/numbers (no spaces or symbols). Example: `_makecommand boss ...`")
+        return
+    if trigger in _customcmd_reserved_names():
+        await message.channel.send(f"❌ `_{trigger}` is a built-in command name. Pick a different trigger.")
+        return
+    if not text:
+        await message.channel.send("❌ Your command needs something to say.")
+        return
+    # Output safety: block slurs in the stored text
+    low = text.lower().replace(" ", "")
+    if any(b in low for b in ("nigg", "faggot", "retard", "kike", "chink", "tranny", "rape")):
+        await message.channel.send("❌ That text isn't allowed.")
+        return
+
+    data = _load_customcmds()
+    cmds = data.setdefault("commands", {})
+    # Editing your own existing trigger is free
+    existing = cmds.get(trigger)
+    if existing and existing.get("owner") == str(uid):
+        existing["text"] = text
+        _save_customcmds(data)
+        await message.channel.send(f"✏️ Updated your command `_{trigger}`.")
+        return
+    if existing:
+        await message.channel.send(f"❌ `_{trigger}` is already taken by someone else. Pick another.")
+        return
+    owned = [t for t, c in cmds.items() if c.get("owner") == str(uid)]
+    if len(owned) >= CUSTOMCMD_MAX_PER_USER:
+        await message.channel.send(
+            f"❌ You already own {CUSTOMCMD_MAX_PER_USER} commands ({', '.join('_'+t for t in owned)}). "
+            f"Delete one with `_delcommand <trigger>` first."
+        )
+        return
+    if economy.balance(uid) < CUSTOMCMD_PRICE:
+        await message.channel.send(f"❌ Creating a command costs **{CUSTOMCMD_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -CUSTOMCMD_PRICE, "custom command")
+    try:
+        track_economy_event("spent", CUSTOMCMD_PRICE)
+    except Exception:
+        pass
+    cmds[trigger] = {"owner": str(uid), "text": text, "uses": 0, "created": int(time.time())}
+    _save_customcmds(data)
+    preview = _render_customcmd(text, message, 0)
+    await message.channel.send(
+        f"✅ **Command created!** Anyone can now type `_{trigger}`:\n\n{preview}"
+    )
+
+
+async def _handle_delcommand(message: discord.Message, rest: str):
+    """Prefix-only: _delcommand <trigger>"""
+    uid = message.author.id
+    trigger = _clean_trigger((rest or "").split()[0]) if rest.strip() else None
+    if not trigger:
+        await message.channel.send("Usage: `_delcommand <trigger>`")
+        return
+    data = _load_customcmds()
+    cmds = data.get("commands", {})
+    c = cmds.get(trigger)
+    if not c:
+        await message.channel.send(f"❌ No command `_{trigger}`.")
+        return
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if c.get("owner") != str(uid) and not is_admin:
+        await message.channel.send("❌ You can only delete your own commands.")
+        return
+    del cmds[trigger]
+    _save_customcmds(data)
+    await message.channel.send(f"🗑️ Deleted `_{trigger}`.")
+
+
+async def _handle_mycommands(message: discord.Message):
+    """Prefix-only: _mycommands — list your custom commands."""
+    uid = message.author.id
+    data = _load_customcmds()
+    mine = [(t, c) for t, c in data.get("commands", {}).items() if c.get("owner") == str(uid)]
+    if not mine:
+        await message.channel.send(
+            f"You haven't made any commands yet. `_makecommand <trigger> <text>` to create one ({CUSTOMCMD_PRICE:,} coins)."
+        )
+        return
+    lines = [f"`_{t}` — used {c.get('uses',0)}x" for t, c in mine]
+    embed = discord.Embed(
+        title="🛠️ Your Custom Commands",
+        description="\n".join(lines) + f"\n\n_{len(mine)}/{CUSTOMCMD_MAX_PER_USER} used · edit by remaking · `_delcommand <trigger>` to remove_",
+        color=0x00F0FF,
+    )
+    await message.channel.send(embed=embed)
+
+
+async def _try_custom_command(message: discord.Message, cmd_name: str) -> bool:
+    """If cmd_name is a registered custom command, fire it. Returns True if handled."""
+    data = _load_customcmds()
+    c = data.get("commands", {}).get(cmd_name)
+    if not c:
+        return False
+    # anti-spam cooldown (per trigger, global)
+    now = time.time()
+    if now - _customcmd_cooldowns.get(cmd_name, 0) < CUSTOMCMD_COOLDOWN:
+        return True  # silently swallow to avoid spam
+    _customcmd_cooldowns[cmd_name] = now
+    c["uses"] = c.get("uses", 0) + 1
+    _save_customcmds(data)
+    try:
+        rendered = _render_customcmd(c.get("text", ""), message, c["uses"])
+        await message.channel.send(
+            rendered,
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+        )
+    except Exception as e:
+        log.warning("custom command fire failed: %s", e)
+    return True
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎯 CATCHPHRASE HIJACK — buy a word; when anyone says it, the bot reacts with
+# YOUR tag (an emoji you chose). Light, capped, and rate-limited so it can't spam.
+# Common words are blocked so you can't claim "the". Self-owned.
+# ─────────────────────────────────────────────────────────────────────────────
+CATCHPHRASE_FILE = MEMORY_DIR / "catchphrase.json"
+CATCHPHRASE_PRICE = 12_000
+CATCHPHRASE_COOLDOWN = 30          # seconds per phrase before it can fire again
+CATCHPHRASE_MAX_PER_USER = 2
+
+# words too common to be claimable
+CATCHPHRASE_BLOCKLIST = {
+    "the", "a", "an", "and", "or", "but", "i", "you", "me", "we", "it", "is",
+    "to", "of", "in", "on", "for", "lol", "lmao", "yes", "no", "ok", "okay",
+    "yeah", "yo", "hi", "hey", "what", "why", "how", "this", "that", "im", "u",
+}
+
+_catchphrase_cooldowns = {}  # phrase -> last fired ts
+_catchphrase_index_cache = {"ts": 0, "map": {}}  # cached word->emoji index
+
+
+def _load_catchphrase() -> dict:
+    if CATCHPHRASE_FILE.exists():
+        try:
+            with open(CATCHPHRASE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # phrases: word -> {owner, emoji, hits}
+    return {"phrases": {}}
+
+
+def _save_catchphrase(data: dict):
+    try:
+        with open(CATCHPHRASE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save catchphrase failed: %s", e)
+    _catchphrase_index_cache["ts"] = 0  # invalidate cache
+
+
+async def _handle_catchphrase(message: discord.Message, rest: str):
+    """Prefix-only: _catchphrase <word> <emoji>  (or `_catchphrase list` / `off <word>`)"""
+    uid = message.author.id
+    parts = (rest or "").split()
+    if not parts:
+        await message.channel.send(
+            "🎯 **Catchphrase Hijack** — claim a word so the bot reacts with YOUR emoji whenever anyone says it.\n"
+            f"`_catchphrase <word> <emoji>` — costs **{CATCHPHRASE_PRICE:,}** (up to {CATCHPHRASE_MAX_PER_USER}).\n"
+            "Example: `_catchphrase moon 🚀`\n"
+            "_`_catchphrase list` to see yours · `_catchphrase off <word>` to remove._"
+        )
+        return
+
+    sub = parts[0].lower()
+    data = _load_catchphrase()
+    phrases = data.setdefault("phrases", {})
+
+    if sub == "list":
+        mine = [(w, c) for w, c in phrases.items() if c.get("owner") == str(uid)]
+        if not mine:
+            await message.channel.send("You haven't claimed any catchphrases.")
+            return
+        lines = [f"{c['emoji']} **{w}** — reacted {c.get('hits',0)}x" for w, c in mine]
+        await message.channel.send("🎯 **Your catchphrases:**\n" + "\n".join(lines))
+        return
+
+    if sub == "off":
+        if len(parts) < 2:
+            await message.channel.send("Usage: `_catchphrase off <word>`")
+            return
+        word = re.sub(r"[^a-z0-9]", "", parts[1].lower())
+        c = phrases.get(word)
+        if not c or (c.get("owner") != str(uid) and not (isinstance(message.author, discord.Member) and _is_admin(message.author))):
+            await message.channel.send("❌ You don't own that catchphrase.")
+            return
+        del phrases[word]
+        _save_catchphrase(data)
+        await message.channel.send(f"🎯 Removed catchphrase **{word}**.")
+        return
+
+    # Claim: <word> <emoji>
+    if len(parts) < 2:
+        await message.channel.send("Usage: `_catchphrase <word> <emoji>` — e.g. `_catchphrase moon 🚀`")
+        return
+    word = re.sub(r"[^a-z0-9]", "", parts[0].lower())
+    emoji = parts[1]
+    if not (2 <= len(word) <= 20):
+        await message.channel.send("❌ Word must be 2-20 letters/numbers.")
+        return
+    if word in CATCHPHRASE_BLOCKLIST:
+        await message.channel.send(f"❌ **{word}** is too common to claim. Pick something more distinctive.")
+        return
+    # validate emoji (unicode, or custom emoji from THIS server)
+    valid_emoji = None
+    m = re.match(r"<a?:\w+:(\d+)>", emoji)
+    if m:
+        if message.guild and any(e.id == int(m.group(1)) for e in message.guild.emojis):
+            valid_emoji = emoji
+    elif not emoji.startswith("<"):
+        valid_emoji = emoji  # assume unicode
+    if not valid_emoji:
+        await message.channel.send("❌ Give me a valid emoji (custom emojis must be from this server).")
+        return
+
+    existing = phrases.get(word)
+    if existing and existing.get("owner") != str(uid):
+        await message.channel.send(f"❌ **{word}** is already claimed by someone else.")
+        return
+    if not existing:
+        owned = [w for w, c in phrases.items() if c.get("owner") == str(uid)]
+        if len(owned) >= CATCHPHRASE_MAX_PER_USER:
+            await message.channel.send(f"❌ You already own {CATCHPHRASE_MAX_PER_USER} catchphrases. Remove one with `_catchphrase off <word>`.")
+            return
+        if economy.balance(uid) < CATCHPHRASE_PRICE:
+            await message.channel.send(f"❌ Claiming a catchphrase costs **{CATCHPHRASE_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+            return
+        economy.add(uid, -CATCHPHRASE_PRICE, "catchphrase")
+        try:
+            track_economy_event("spent", CATCHPHRASE_PRICE)
+        except Exception:
+            pass
+    phrases[word] = {"owner": str(uid), "emoji": valid_emoji, "hits": existing.get("hits", 0) if existing else 0}
+    _save_catchphrase(data)
+    await message.channel.send(f"🎯 Locked in! Whenever anyone says **{word}**, the bot drops {valid_emoji}.")
+
+
+def _catchphrase_index() -> dict:
+    """Cached word->record map, refreshed every 60s."""
+    now = time.time()
+    if now - _catchphrase_index_cache["ts"] > 60:
+        data = _load_catchphrase()
+        _catchphrase_index_cache["map"] = data.get("phrases", {})
+        _catchphrase_index_cache["ts"] = now
+    return _catchphrase_index_cache["map"]
+
+
+async def handle_catchphrase_scan(message: discord.Message):
+    """Scan a message for any claimed catchphrase and react with its emoji."""
+    if not message.guild or not message.content:
+        return
+    if message.content.startswith(("_", "/", "!", ".")):
+        return
+    index = _catchphrase_index()
+    if not index:
+        return
+    words = set(re.findall(r"[a-z0-9]+", message.content.lower()))
+    if not words:
+        return
+    fired = 0
+    now = time.time()
+    for word in words:
+        rec = index.get(word)
+        if not rec:
+            continue
+        if now - _catchphrase_cooldowns.get(word, 0) < CATCHPHRASE_COOLDOWN:
+            continue
+        try:
+            await message.add_reaction(rec["emoji"])
+            _catchphrase_cooldowns[word] = now
+            # bump hit counter (best-effort, not every fire to limit writes)
+            data = _load_catchphrase()
+            if word in data.get("phrases", {}):
+                data["phrases"][word]["hits"] = data["phrases"][word].get("hits", 0) + 1
+                _save_catchphrase(data)
+            fired += 1
+        except Exception:
+            pass
+        if fired >= 2:  # cap reactions per message
+            break
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 💧 THE DRIP SHOP — buy effects that change how YOUR OWN messages appear.
 # Self-only by design (no targeting others = no harassment vector). Two tiers:
 #   • Decoration: bot reacts/decorates around your real message.
@@ -22315,6 +22698,11 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "rank", "myrank", "city", "ranks", "cityranks", "ladder",
     # Drip Shop
     "drip", "dripshop", "accent", "persona", "aura", "titletag", "title", "entrance",
+    # Custom Commands + Catchphrase
+    "makecommand", "createcommand", "newcommand", "addcommand",
+    "delcommand", "deletecommand", "removecommand",
+    "mycommands", "commandlist", "customcommands",
+    "catchphrase", "claimword", "hijackword",
 }
 
 
@@ -23307,6 +23695,25 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         await _handle_setcolor(message, rest)
         return True
 
+    # 🛠️ Custom Commands
+    if cmd_name in ("makecommand", "createcommand", "newcommand", "addcommand"):
+        await _handle_makecommand(message, rest)
+        return True
+    if cmd_name in ("delcommand", "deletecommand", "removecommand"):
+        await _handle_delcommand(message, rest)
+        return True
+    if cmd_name in ("mycommands", "commandlist", "customcommands"):
+        await _handle_mycommands(message)
+        return True
+    # 🎯 Catchphrase Hijack
+    if cmd_name in ("catchphrase", "claimword", "hijackword"):
+        await _handle_catchphrase(message, rest)
+        return True
+
+    # Custom user-made commands fire here (after all built-ins, before slash bridge)
+    if await _try_custom_command(message, cmd_name):
+        return True
+
     spec = PREFIX_COMMANDS.get(cmd_name)
     if not spec:
         return False
@@ -23687,6 +24094,12 @@ async def on_message(message: discord.Message):
         await handle_autoreact(message)
     except Exception as e:
         log.warning("autoreact failed: %s", e)
+
+    # ── 🎯 Catchphrase Hijack: react with a claimed word's emoji ──
+    try:
+        await handle_catchphrase_scan(message)
+    except Exception as e:
+        log.warning("catchphrase scan failed: %s", e)
 
     # ── 💧 Drip Shop: restyle the author's own message via webhook (accent/persona) ──
     # Must run before XP/coin processing since it may delete + repost the message.
