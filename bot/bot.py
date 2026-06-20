@@ -15298,6 +15298,83 @@ def _remember_webhook_author(webhook_msg_id: int, author_id: int):
             _WEBHOOK_AUTHOR_MAP.pop(k, None)
 
 
+# ── AI-powered custom accents ────────────────────────────────────────────────
+# When a user picks an accent that isn't a preset, the AI restyles their OWN
+# message text in that voice (Trump, surfer bro, anime villain, etc). Hard
+# constraints: it only changes TONE/CADENCE/VOCABULARY — it never adds new
+# factual claims, and it refuses to produce slurs, hate, sexual content, or
+# threats even in costume. On any failure/timeout it falls back to the original.
+AI_ACCENT_SYSTEM = (
+    "You are a text-style transformer for a Discord bot. You receive a STYLE and a "
+    "MESSAGE. Rewrite the MESSAGE so it sounds like it's spoken in that STYLE — "
+    "matching tone, cadence, slang, and vocabulary only.\n\n"
+    "IRON RULES:\n"
+    "1. Preserve the original meaning. Do NOT add new facts, claims, opinions, "
+    "endorsements, or statements the user didn't make. You're changing HOW it's "
+    "said, never WHAT is said.\n"
+    "2. If the STYLE names a real person, imitate their speaking cadence as light "
+    "parody only. Never put defamatory, hateful, violent, or genuinely damaging "
+    "words in a real person's mouth.\n"
+    "3. NEVER output slurs, hate speech, sexual content, content sexualizing "
+    "minors, harassment of a real individual, or threats — even if the STYLE seems "
+    "to ask for it. If the style itself is hateful (e.g. a bigoted group), or the "
+    "transform would require any of the above, respond with exactly: REFUSE\n"
+    "4. Keep it roughly the same length. Output ONLY the rewritten message — no "
+    "quotes, no preamble, no explanation.\n"
+)
+
+
+async def _ai_restyle(style_prompt: str, text: str) -> str | None:
+    """Return the AI-restyled text, or None to fall back to the original.
+    Returns None on refusal, timeout, empty, or any error."""
+    if not text or not text.strip():
+        return None
+    try:
+        cfg = dict(load_config())
+        cfg["max_tokens"] = 220
+        cfg["temperature"] = 0.8
+        user_msg = f"STYLE: {style_prompt}\n\nMESSAGE: {text}"
+        reply = await asyncio.wait_for(
+            ask_ai(AI_ACCENT_SYSTEM, [{"role": "user", "content": user_msg}], cfg),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        log.info("ai accent timed out, falling back")
+        return None
+    except Exception as e:
+        log.warning("ai accent failed: %s", e)
+        return None
+    if not reply:
+        return None
+    reply = reply.strip().strip('"').strip()
+    # Model self-refused (hateful style or unsafe transform) -> fall back silently
+    if not reply or reply.upper().startswith("REFUSE") or reply.startswith("⚠️"):
+        return None
+    # Final safety net on the OUTPUT, in case the model slipped
+    low = reply.lower().replace(" ", "")
+    _bad = ("nigg", "faggot", "retard", "kike", "chink", "tranny", "rape")
+    if any(b in low for b in _bad):
+        return None
+    if len(reply) > 1900:
+        reply = reply[:1900]
+    return reply
+
+
+# Styles we won't even send to the model — obvious hate/abuse personas.
+_BLOCKED_ACCENT_STYLES = (
+    "nazi", "hitler", "kkk", "klan", "white power", "groyper", "isis", "terrorist",
+    "school shooter", "shooter", "rapist", "pedophile", "pedo", "groomer",
+    "slave owner", "slaveowner",
+)
+
+
+def _accent_style_allowed(style_prompt: str) -> bool:
+    low = (style_prompt or "").lower()
+    return not any(b in low for b in _BLOCKED_ACCENT_STYLES)
+
+
+
+
 async def handle_drip_repost(message: discord.Message) -> bool:
     """If the author has an active accent/persona effect, delete their message and
     repost it via webhook with the transformed look. Returns True if reposted
@@ -15316,12 +15393,18 @@ async def handle_drip_repost(message: discord.Message) -> bool:
     # Build the reposted appearance
     content = message.content
     if accent:
-        fn = ACCENTS.get(accent.get("style", ""), {}).get("fn")
-        if fn:
-            try:
-                content = fn(content)
-            except Exception:
-                content = message.content
+        if accent.get("style") == "_ai":
+            # AI restyle in the user's chosen voice; fall back to original on any issue
+            styled = await _ai_restyle(accent.get("prompt", ""), message.content)
+            if styled:
+                content = styled
+        else:
+            fn = ACCENTS.get(accent.get("style", ""), {}).get("fn")
+            if fn:
+                try:
+                    content = fn(content)
+                except Exception:
+                    content = message.content
     if len(content) > 1900:
         content = content[:1900]
 
@@ -15469,22 +15552,55 @@ def _charge_drip(uid: int, key: str) -> tuple[bool, str]:
 
 
 async def _handle_accent(message: discord.Message, rest: str):
-    """Prefix-only: _accent <style> — repost your messages in a fun voice."""
+    """Prefix-only: _accent <style> — repost your messages in a fun voice.
+    Presets use a fast local filter; anything else is styled by AI."""
     uid = message.author.id
-    style = (rest or "").strip().lower().split()[0] if rest.strip() else ""
-    if style not in ACCENTS:
+    raw = (rest or "").strip()
+    if not raw:
         opts = " · ".join(f"`{k}` {v['emoji']}" for k, v in ACCENTS.items())
-        await message.channel.send(f"Pick an accent: {opts}\nExample: `_accent pirate`")
+        await message.channel.send(
+            f"Pick an accent: {opts}\n"
+            f"…or type **anything** and the AI will do it: `_accent donald trump`, `_accent surfer bro`, `_accent anime villain`.\n"
+            f"_`_accent off` to stop._"
+        )
+        return
+    if raw.lower() in ("off", "none", "stop"):
+        data = _load_drip()
+        rec = data.get("users", {}).get(str(uid), {})
+        if "accent" in rec:
+            del rec["accent"]
+            _save_drip(data)
+        await message.channel.send("🗣️ Accent off. Back to your normal voice.")
+        return
+
+    preset = raw.lower().split()[0]
+    if preset in ACCENTS:
+        # Fast local preset
+        ok, err = _charge_drip(uid, "accent")
+        if not ok:
+            await message.channel.send(err)
+            return
+        _drip_set(uid, "accent", {"style": preset}, DRIP_ITEMS["accent"]["hours"])
+        a = ACCENTS[preset]
+        await message.channel.send(
+            f"{a['emoji']} **{a['name']}** accent active for {DRIP_ITEMS['accent']['hours']}h. "
+            f"Your messages will be reposted in this voice. _(Needs Manage Webhooks + Manage Messages.)_"
+        )
+        return
+
+    # Custom AI style — block obvious hate/abuse personas up front
+    style_prompt = raw[:80]
+    if not _accent_style_allowed(style_prompt):
+        await message.channel.send("❌ That's not a style I'll do. Pick something else.")
         return
     ok, err = _charge_drip(uid, "accent")
     if not ok:
         await message.channel.send(err)
         return
-    _drip_set(uid, "accent", {"style": style}, DRIP_ITEMS["accent"]["hours"])
-    a = ACCENTS[style]
+    _drip_set(uid, "accent", {"style": "_ai", "prompt": style_prompt}, DRIP_ITEMS["accent"]["hours"])
     await message.channel.send(
-        f"{a['emoji']} **{a['name']}** accent active for {DRIP_ITEMS['accent']['hours']}h. "
-        f"Your messages will be reposted in this voice. _(Needs Manage Webhooks + Manage Messages in the channel.)_"
+        f"🤖 **AI accent** active for {DRIP_ITEMS['accent']['hours']}h — your messages get rewritten as **{style_prompt}**.\n"
+        f"_Style only; it won't put words in anyone's mouth. Needs Manage Webhooks + Manage Messages._"
     )
 
 
