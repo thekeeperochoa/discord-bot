@@ -145,6 +145,9 @@ message_counters: dict[str, int] = defaultdict(int)
 chime_thresholds: dict[str, int] = {}
 last_bot_activity: dict[str, float] = {}
 last_channel_activity: dict[str, float] = {}
+# Seconds a channel was quiet immediately BEFORE the current message (for the
+# drip Grand Entrance "breaking a silence" check). Set at the top of on_message.
+_channel_gap_before_msg: dict[str, float] = {}
 # True if the most recent message in a channel was sent by the bot itself.
 # Used to stop the bot from chiming in right after it just spoke (talking to itself).
 last_speaker_was_bot: dict[str, bool] = {}
@@ -15919,19 +15922,30 @@ async def handle_drip_decorations(message: discord.Message):
 
 
 async def _apply_drip_entrance(message: discord.Message, active: dict):
-    """🚪 Grand Entrance — announce the user when they break a silence."""
+    """🚪 Grand Entrance — announce the user ONLY when they genuinely break a
+    silence: the channel must have been quiet for a while before they spoke, AND
+    they personally haven't triggered an entrance very recently (anti-repeat)."""
     entrance = active.get("entrance")
     if not entrance:
         return
+    ENTRANCE_SILENCE_REQUIRED = 1800   # channel quiet 30+ min before this message
+    ENTRANCE_USER_COOLDOWN = 3600      # same user can't re-announce within an hour
     try:
-        if entrance.get("_last_fire", 0) + 600 < time.time():
-            phrase = entrance.get("text") or f"👑 {message.author.display_name} has entered the chat."
-            await message.channel.send(phrase[:120])
-            data = _load_drip()
-            rec = data.get("users", {}).get(str(message.author.id), {})
-            if "entrance" in rec:
-                rec["entrance"]["_last_fire"] = time.time()
-                _save_drip(data)
+        channel_id = str(message.channel.id)
+        gap = _channel_gap_before_msg.get(channel_id, 0)
+        # Only fire if the room was actually quiet before they spoke
+        if gap < ENTRANCE_SILENCE_REQUIRED:
+            return
+        # And not if this user just had an entrance recently
+        if entrance.get("_last_fire", 0) + ENTRANCE_USER_COOLDOWN > time.time():
+            return
+        phrase = entrance.get("text") or f"👑 {message.author.display_name} has entered the chat."
+        await message.channel.send(phrase[:120])
+        data = _load_drip()
+        rec = data.get("users", {}).get(str(message.author.id), {})
+        if "entrance" in rec:
+            rec["entrance"]["_last_fire"] = time.time()
+            _save_drip(data)
     except Exception:
         pass
 
@@ -15972,15 +15986,36 @@ async def _send_drip_shop(message: discord.Message, rest: str = ""):
             rem = int(active[it["type"]]["until"] - time.time())
             owned = f" · ✅ active {fmt_cooldown(rem)}"
         lines.append(f"{it['emoji']} **{it['name']}** — `{it['price']:,}` ({it['hours']}h){owned}\n   _{it['desc']}_")
+
+    # Permanent / server-wide buys (own pricing, not timed message effects)
+    try:
+        cc_data = _load_customcmds()
+        cc_owned = sum(1 for c in cc_data.get("commands", {}).values() if c.get("owner") == str(uid))
+    except Exception:
+        cc_owned = 0
+    try:
+        cp_data = _load_catchphrase()
+        cp_owned = sum(1 for c in cp_data.get("phrases", {}).values() if c.get("owner") == str(uid))
+    except Exception:
+        cp_owned = 0
+    perma = [
+        f"🛠️ **Custom Command** — `{CUSTOMCMD_PRICE:,}` _(own {cc_owned}/{CUSTOMCMD_MAX_PER_USER})_\n"
+        f"   _Make your own `_trigger` that fires text you design. `_makecommand <trigger> <text>`_",
+        f"🎯 **Catchphrase Hijack** — `{CATCHPHRASE_PRICE:,}` _(own {cp_owned}/{CATCHPHRASE_MAX_PER_USER})_\n"
+        f"   _Claim a word; the bot reacts with your emoji when anyone says it. `_catchphrase <word> <emoji>`_",
+    ]
+
     embed = discord.Embed(
         title="💧 THE DRIP SHOP",
         description=(
             "Customize how **your own** messages hit the timeline. Effects are timed.\n\n"
             + "\n".join(lines)
+            + "\n\n__**🏙️ Leave Your Mark** (permanent)__\n"
+            + "\n".join(perma)
         ),
         color=0x00F0FF,
     )
-    embed.set_footer(text="Buy: _accent · _persona · _aura · _titletag · _entrance · Turn it all off: _drip off")
+    embed.set_footer(text="Timed: _accent · _persona · _aura · _titletag · _entrance · Permanent: _makecommand · _catchphrase · Off: _drip off")
     await message.channel.send(embed=embed)
 
 
@@ -24076,6 +24111,10 @@ async def on_message(message: discord.Message):
     cfg = load_config()
     memory.update_maxlen(cfg["max_memory_messages"])
     channel_id = str(message.channel.id)
+    # Capture how long the channel was quiet BEFORE this message, so effects like
+    # the drip Grand Entrance can tell whether someone is "breaking a silence."
+    _prev_channel_activity = last_channel_activity.get(channel_id, 0)
+    _channel_gap_before_msg[channel_id] = time.time() - _prev_channel_activity if _prev_channel_activity else 999999
     last_channel_activity[channel_id] = time.time()
     # Capture whether the bot was the last to speak BEFORE we mark the human,
     # then record that a human is now the most recent speaker.
