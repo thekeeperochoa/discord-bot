@@ -16919,7 +16919,68 @@ async def signatures_command(interaction: discord.Interaction):
 # - Public welcome in welcome_channel (if set)
 # - DM onboarding guide with starter coins (skip if user has DMs closed)
 # - Tracks new joiners in stats activity feed
+# - Records each public welcome message so it can be auto-deleted if the member
+#   leaves the server (keeps the welcome channel clean of greetings for people
+#   who are no longer here).
 # ─────────────────────────────────────────────────────────────────────────────
+
+WELCOME_MSG_FILE = MEMORY_DIR / "welcome_messages.json"
+_WELCOME_MSG_MAX = 1000  # cap stored entries to avoid unbounded growth
+
+
+def _load_welcome_messages() -> dict:
+    if WELCOME_MSG_FILE.exists():
+        try:
+            with open(WELCOME_MSG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}  # member_id(str) -> {"channel_id": int, "message_id": int}
+
+
+def _save_welcome_messages(data: dict):
+    try:
+        with open(WELCOME_MSG_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.warning("save welcome messages failed: %s", e)
+
+
+def _remember_welcome_message(member_id: int, channel_id: int, message_id: int):
+    data = _load_welcome_messages()
+    data[str(member_id)] = {"channel_id": channel_id, "message_id": message_id}
+    # Trim oldest entries if we've grown too large (dict preserves insertion order)
+    if len(data) > _WELCOME_MSG_MAX:
+        for k in list(data.keys())[: len(data) - _WELCOME_MSG_MAX]:
+            data.pop(k, None)
+    _save_welcome_messages(data)
+
+
+async def _delete_welcome_message(member_id: int):
+    """Delete the stored public welcome message for a member, if any."""
+    data = _load_welcome_messages()
+    rec = data.pop(str(member_id), None)
+    if not rec:
+        return
+    _save_welcome_messages(data)  # remove the record regardless of delete success
+    try:
+        ch = client.get_channel(int(rec["channel_id"]))
+        if ch is None:
+            try:
+                ch = await client.fetch_channel(int(rec["channel_id"]))
+            except Exception:
+                ch = None
+        if ch is not None:
+            msg = await ch.fetch_message(int(rec["message_id"]))
+            await msg.delete()
+            log.info("deleted welcome message for departed member %s", member_id)
+    except discord.NotFound:
+        pass  # message already gone
+    except discord.Forbidden:
+        log.warning("missing permission to delete welcome message for %s", member_id)
+    except Exception as e:
+        log.warning("failed to delete welcome message for %s: %s", member_id, e)
+
 
 WELCOME_DM_TEMPLATE = """\
 **Yo {name} — welcome to {guild}** 🎉
@@ -17095,12 +17156,17 @@ async def handle_member_join(member: discord.Member):
                 embed.set_thumbnail(url=member.display_avatar.url)
                 embed.set_footer(text=f"Member #{member.guild.member_count}")
                 # Ping must be in message CONTENT (embed mentions don't notify)
-                await ch.send(
+                sent_welcome = await ch.send(
                     content=f"🎉 {member.mention} welcome to the city!",
                     embed=embed,
                     view=OnboardingView(member.id),
                     allowed_mentions=discord.AllowedMentions(users=[member]),
                 )
+                # Remember this welcome message so we can delete it if they leave
+                try:
+                    _remember_welcome_message(member.id, ch.id, sent_welcome.id)
+                except Exception as e:
+                    log.warning("failed to record welcome message: %s", e)
             else:
                 log.warning("welcome channel %s not found", welcome_channel_id)
         except Exception as e:
@@ -17150,6 +17216,17 @@ async def on_member_join(member: discord.Member):
         await handle_member_join(member)
     except Exception as e:
         log.warning("on_member_join failed: %s", e)
+
+
+@client.event
+async def on_member_remove(member: discord.Member):
+    """When a member leaves (or is kicked/banned), delete their public welcome
+    message so the welcome channel doesn't keep greetings for people who aren't
+    here anymore."""
+    try:
+        await _delete_welcome_message(member.id)
+    except Exception as e:
+        log.warning("on_member_remove welcome cleanup failed: %s", e)
 
 
 @client.event
