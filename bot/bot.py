@@ -14814,6 +14814,19 @@ def _format_channel_name(base: str, style: str) -> str:
         "ornate":        deco("❀ ", script, " ❀"),
         "battle":        deco("⚔️ ", small),
 
+        # ── Terminal / hacker / tech styles ──
+        # Make channels look like a command line / code editor.
+        "terminal":      deco("█ ", mono, " ▌"),          # block-cursor terminal
+        "prompt":        deco("❯ ", mono),                # zsh-style ❯ prompt
+        "command":       f"$ {mono(base_pretty.replace(' ', '-'))}",   # $ cmd
+        "root":          f"[root@dgen ~]# {mono(base_pretty.replace(' ', '-'))}",  # root shell
+        "shell":         f"~/{mono(base_pretty.replace(' ', '-'))} $",  # path prompt
+        "code":          deco("</> ", mono),              # code tag
+        "binary":        deco("01 ", mono, " 10"),        # binary bookends
+        "console":       f">_ {mono(base_pretty.replace(' ', '-'))}",  # console caret
+        "hacker":        deco("⛛ ", mono, " ⛛"),          # glitchy mono
+        "circuit":       deco("⌁ ", mono),                # circuit/tech mark
+
         # Plain
         "lowercase":     base_clean.lower(),
         "uppercase":     upper(base_pretty),
@@ -14831,33 +14844,33 @@ def _format_channel_name(base: str, style: str) -> str:
 )
 @discord.app_commands.choices(
     style=[
-        # Top 25 picks — Discord caps choices at 25
+        # Discord caps choices at 25 — curated mix (all 50+ styles work via /stylepreview)
+        discord.app_commands.Choice(name="❯ 𝚖𝚊𝚒𝚗  (prompt / terminal)", value="prompt"),
+        discord.app_commands.Choice(name=">_ 𝚖𝚊𝚒𝚗  (console)", value="console"),
+        discord.app_commands.Choice(name="$ 𝚖𝚊𝚒𝚗  (command)", value="command"),
+        discord.app_commands.Choice(name="[root@dgen ~]# 𝚖𝚊𝚒𝚗  (root shell)", value="root"),
+        discord.app_commands.Choice(name="█ 𝚖𝚊𝚒𝚗 ▌  (terminal block)", value="terminal"),
+        discord.app_commands.Choice(name="</> 𝚖𝚊𝚒𝚗  (code)", value="code"),
         discord.app_commands.Choice(name="★ ᴍᴀɪɴ  (star)", value="star"),
-        discord.app_commands.Choice(name="★彡 ᴍᴀɪɴ  (star-arrow)", value="star-arrow"),
-        discord.app_commands.Choice(name="・ᴍᴀɪɴ  (dot)", value="dot"),
-        discord.app_commands.Choice(name="❖ ᴍᴀɪɴ  (diamond)", value="diamond"),
         discord.app_commands.Choice(name="🔥・ᴍᴀɪɴ  (flame)", value="flame"),
         discord.app_commands.Choice(name="⚡・ᴍᴀɪɴ  (lightning)", value="lightning"),
         discord.app_commands.Choice(name="💀・ᴍᴀɪɴ  (skull)", value="skull"),
         discord.app_commands.Choice(name="👑・ᴍᴀɪɴ  (crown)", value="crown"),
-        discord.app_commands.Choice(name="♡ ᴍᴀɪɴ  (heart)", value="heart"),
         discord.app_commands.Choice(name="☾ ᴍᴀɪɴ  (moon)", value="moon"),
         discord.app_commands.Choice(name="✦°. ᴍᴀɪɴ .°✦  (sparkles)", value="fourstars"),
-        discord.app_commands.Choice(name="┃ ᴍᴀɪɴ  (pipe)", value="pipe"),
         discord.app_commands.Choice(name="➤ ᴍᴀɪɴ  (arrow)", value="arrow"),
         discord.app_commands.Choice(name="「ᴍᴀɪɴ」  (brackets)", value="brackets"),
         discord.app_commands.Choice(name="《ᴍᴀɪɴ》  (angle-brackets)", value="angle-brackets"),
-        discord.app_commands.Choice(name="✧ ᴍᴀɪɴ ✧  (stars-around)", value="stars-around"),
+        discord.app_commands.Choice(name="◤ 𝚖𝚊𝚒𝚗 ◥  (cyber)", value="cyber"),
+        discord.app_commands.Choice(name="🩸 𝔪𝔞𝔦𝔫  (vampire)", value="vampire"),
         # Pure fonts
         discord.app_commands.Choice(name="ᴍᴀɪɴ  (small-caps)", value="small-caps"),
         discord.app_commands.Choice(name="𝗺𝗮𝗶𝗻  (bold)", value="bold"),
         discord.app_commands.Choice(name="𝘮𝘢𝘪𝘯  (italic)", value="italic"),
         discord.app_commands.Choice(name="𝓂𝒶𝒾𝓃  (script)", value="script"),
-        discord.app_commands.Choice(name="𝕞𝕒𝕚𝕟  (double-struck)", value="double-struck"),
         discord.app_commands.Choice(name="𝚖𝚊𝚒𝚗  (monospace)", value="monospace"),
         discord.app_commands.Choice(name="𝔪𝔞𝔦𝔫  (fraktur)", value="fraktur"),
-        discord.app_commands.Choice(name="ⓜⓐⓘⓝ  (circled)", value="circled"),
-        discord.app_commands.Choice(name="ｍａｉｎ  (fullwidth)", value="fullwidth"),
+        discord.app_commands.Choice(name="ａｉｎ  (fullwidth)", value="fullwidth"),
     ]
 )
 async def renamechannels_command(
@@ -14986,6 +14999,9 @@ async def stylepreview_command(interaction: discord.Interaction):
         # Themed
         "vampire", "royal", "matrix", "y2k", "vaporwave",
         "gamer", "cyber", "minimal", "ornate", "battle",
+        # Terminal / hacker / tech
+        "terminal", "prompt", "command", "root", "shell",
+        "code", "binary", "console", "hacker", "circuit",
         # Plain
         "lowercase", "uppercase", "plain",
     ]
