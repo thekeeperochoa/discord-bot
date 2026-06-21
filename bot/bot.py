@@ -1976,8 +1976,8 @@ def add_xp(user_id: int, amount: int) -> tuple[int, int, bool]:
 
 async def grant_xp(user_id: int, amount: int, channel=None):
     """Grant XP and announce level-up if it happens."""
-    # Apply XP boost item
-    amount = amount * xp_multiplier(user_id)
+    # Apply XP boost item, then server-wide hype train if active
+    amount = amount * xp_multiplier(user_id) * hype_train_multiplier()
     new_xp, new_level, leveled = add_xp(user_id, amount)
     if leveled and channel:
         # Award level-up bonus + apply level-based perks
@@ -4687,6 +4687,10 @@ async def daily_command(interaction: discord.Interaction):
     next_streak = cur_streak + 1 if counters.get("last_daily_date", "") == (now_est() - timedelta(days=1)).strftime("%Y-%m-%d") else 1
     streak_bonus = min(next_streak * 50, 1500)  # +50/day, caps at 1500
     final_reward = int(reward * (1 + bonus_pct / 100)) + passive + streak_bonus
+    # Server-wide Hype Train doubles the take
+    _hype_mult = hype_train_multiplier()
+    if _hype_mult > 1:
+        final_reward *= _hype_mult
     new_bal = economy.add(user.id, final_reward, "daily")
     track_economy_event("earned", final_reward)
     track_activity("daily", user.id, user.display_name, f"claimed daily {final_reward:,}")
@@ -4808,6 +4812,9 @@ async def work_command(interaction: discord.Interaction):
     await asyncio.sleep(1.2)
     await edit(f"{emoji} *Almost done at {job}...*")
     await asyncio.sleep(1.0)
+    _hm = hype_train_multiplier()
+    if _hm > 1:
+        reward *= _hm
     new_bal = economy.add(user.id, reward, "work")
     track_economy_event("earned", reward)
     track_activity("work", user.id, user.display_name, f"worked, earned {reward:,}")
@@ -15146,6 +15153,85 @@ async def handle_autoreact(message: discord.Message):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🌆 SERVER-WIDE EFFECTS — big-money buys that bend the whole server for a while.
+# Hype Train (server 2x earnings window) and Server Theme (your color/emoji tints
+# the bot's embeds). Stored centrally with expiry; everything auto-reverts.
+# ─────────────────────────────────────────────────────────────────────────────
+SERVERFX_FILE = MEMORY_DIR / "serverfx.json"
+
+HYPETRAIN_PRICE = 150_000        # buy a server-wide 2x earnings window
+HYPETRAIN_DURATION = 1800        # 30 minutes
+HYPETRAIN_MULT = 2
+
+THEME_PRICE = 100_000            # set the bot's embed color + a theme emoji for a day
+THEME_DURATION = 86_400          # 24 hours
+
+
+def _load_serverfx() -> dict:
+    if SERVERFX_FILE.exists():
+        try:
+            with open(SERVERFX_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"hype": {}, "theme": {}}
+
+
+def _save_serverfx(data: dict):
+    try:
+        with open(SERVERFX_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("save serverfx failed: %s", e)
+
+
+def hype_train_active() -> dict | None:
+    """Return the active hype train record, or None."""
+    data = _load_serverfx()
+    h = data.get("hype", {})
+    if h and h.get("until", 0) > time.time():
+        return h
+    return None
+
+
+def hype_train_multiplier() -> int:
+    """Server-wide earnings multiplier from an active hype train (1 if none)."""
+    return HYPETRAIN_MULT if hype_train_active() else 1
+
+
+def active_theme() -> dict | None:
+    """Return the active server theme record, or None."""
+    data = _load_serverfx()
+    t = data.get("theme", {})
+    if t and t.get("until", 0) > time.time():
+        return t
+    return None
+
+
+def theme_color(default: int = 0x5865F2) -> int:
+    """The current themed embed color, or a provided default."""
+    t = active_theme()
+    if t and isinstance(t.get("color"), int):
+        return t["color"]
+    return default
+
+
+def theme_emoji(default: str = "") -> str:
+    t = active_theme()
+    return t.get("emoji", default) if t else default
+
+
+def _parse_hex_color(s: str) -> int | None:
+    s = (s or "").strip().lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{6}", s):
+        try:
+            return int(s, 16)
+        except Exception:
+            return None
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🛠️ CUSTOM COMMANDS — buy your own personal `_trigger` that fires a flex you
 # designed. Highly customizable, dead simple to use:
 #     _makecommand <trigger> <whatever you want it to say>
@@ -16005,6 +16091,20 @@ async def _send_drip_shop(message: discord.Message, rest: str = ""):
         f"   _Claim a word; the bot reacts with your emoji when anyone says it. `_catchphrase <word> <emoji>`_",
     ]
 
+    # Server-wide / big-money buys
+    server_buys = [
+        f"🚂 **Hype Train** — `{HYPETRAIN_PRICE:,}` _(server-wide, {HYPETRAIN_DURATION//60}min)_\n"
+        f"   _Give the whole server **{HYPETRAIN_MULT}x earnings**, credited to you. `_hypetrain`_",
+        f"💰 **Coin Rain** — `{COINRAIN_PRICE:,}` _({COINRAIN_DURATION//60}min)_\n"
+        f"   _Your messages randomly drop coins for everyone to grab. `_coinrain`_",
+        f"🎨 **Server Theme** — `{THEME_PRICE:,}` _(24h)_\n"
+        f"   _Set the bot's embed color + a theme emoji server-wide. `_theme #hex 🔥`_",
+        f"🏢 **Channel Sponsor** — `{SPONSOR_PRICE:,}` _(7d, allowed channels only)_\n"
+        f"   _Put your tag in a channel's topic. `_sponsor <tag>`_",
+        f"✏️ **Rename Rights** — `{RENAME_PRICE:,}` _(24h, allowed channels only)_\n"
+        f"   _Rename a channel. `_renamechannel <name>`_",
+    ]
+
     embed = discord.Embed(
         title="💧 THE DRIP SHOP",
         description=(
@@ -16012,10 +16112,12 @@ async def _send_drip_shop(message: discord.Message, rest: str = ""):
             + "\n".join(lines)
             + "\n\n__**🏙️ Leave Your Mark** (permanent)__\n"
             + "\n".join(perma)
+            + "\n\n__**🌆 Bend the Server** (big money)__\n"
+            + "\n".join(server_buys)
         ),
-        color=0x00F0FF,
+        color=theme_color(0x00F0FF),
     )
-    embed.set_footer(text="Timed: _accent · _persona · _aura · _titletag · _entrance · Permanent: _makecommand · _catchphrase · Off: _drip off")
+    embed.set_footer(text="Timed: _accent _persona _aura _titletag _entrance · Server: _hypetrain _coinrain _theme _sponsor _renamechannel · Off: _drip off")
     await message.channel.send(embed=embed)
 
 
@@ -16186,6 +16288,453 @@ async def _handle_titletag(message: discord.Message, rest: str):
         return
     _drip_set(uid, "title", {"text": text}, DRIP_ITEMS["title"]["hours"])
     await message.channel.send(f"🏷️ Title **{text}** active for {DRIP_ITEMS['title']['hours']}h.")
+
+
+# ── 🎉 Hype Train + 🎨 Server Theme commands ─────────────────────────────────
+async def _handle_hypetrain(message: discord.Message):
+    """Prefix-only: _hypetrain — buy a server-wide 2x earnings window."""
+    uid = message.author.id
+    existing = hype_train_active()
+    if existing:
+        rem = int(existing["until"] - time.time())
+        who = existing.get("name", "someone")
+        await message.channel.send(
+            f"🚂 A **Hype Train** is already rolling (started by **{who}**) — "
+            f"**{HYPETRAIN_MULT}x earnings** for everyone, {fmt_cooldown(rem)} left. Ride it!"
+        )
+        return
+    if economy.balance(uid) < HYPETRAIN_PRICE:
+        await message.channel.send(
+            f"❌ The Hype Train costs **{HYPETRAIN_PRICE:,}**. You have **{economy.balance(uid):,}**."
+        )
+        return
+    economy.add(uid, -HYPETRAIN_PRICE, "hype train")
+    try:
+        track_economy_event("spent", HYPETRAIN_PRICE)
+    except Exception:
+        pass
+    data = _load_serverfx()
+    data["hype"] = {
+        "by": str(uid),
+        "name": message.author.display_name,
+        "until": time.time() + HYPETRAIN_DURATION,
+        "started": int(time.time()),
+    }
+    _save_serverfx(data)
+    embed = discord.Embed(
+        title="🚂🎉 ALL ABOARD — THE HYPE TRAIN HAS LEFT THE STATION",
+        description=(
+            f"**{message.author.display_name}** just bought the whole server a round.\n\n"
+            f"💰 **{HYPETRAIN_MULT}x EARNINGS** for EVERYONE for the next **{HYPETRAIN_DURATION // 60} minutes**!\n"
+            f"`/daily` `/work` `/crime` and chat XP all pay double. Go get it. 🏃💨"
+        ),
+        color=0xFFD700,
+    )
+    embed.set_footer(text="Bought the Hype Train? Flex it. Everyone's eating because of you.")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_theme(message: discord.Message, rest: str):
+    """Prefix-only: _theme <#hexcolor> [emoji] — tint the bot's embeds for a day."""
+    uid = message.author.id
+    parts = (rest or "").strip().split()
+    if not parts:
+        cur = active_theme()
+        cur_line = ""
+        if cur:
+            rem = int(cur["until"] - time.time())
+            cur_line = f"\n\n🎨 Current theme by **{cur.get('name','?')}**: color set, {cur.get('emoji','')} — {fmt_cooldown(rem)} left."
+        await message.channel.send(
+            f"🎨 **Server Theme** — set the bot's embed color + a theme emoji for **24h**. "
+            f"Costs **{THEME_PRICE:,}**.\n"
+            f"Usage: `_theme #FF2BD6 🔥` (hex color, optional emoji).{cur_line}"
+        )
+        return
+    color = _parse_hex_color(parts[0])
+    if color is None:
+        await message.channel.send("❌ Give me a hex color like `#FF2BD6`. Example: `_theme #FF2BD6 🔥`")
+        return
+    emoji = ""
+    if len(parts) > 1:
+        cand = parts[1]
+        m = re.match(r"<a?:\w+:(\d+)>", cand)
+        if m:
+            if message.guild and any(e.id == int(m.group(1)) for e in message.guild.emojis):
+                emoji = cand
+        elif not cand.startswith("<"):
+            emoji = cand[:8]
+    existing = active_theme()
+    if existing:
+        rem = int(existing["until"] - time.time())
+        await message.channel.send(
+            f"❌ **{existing.get('name','Someone')}** already set today's theme ({fmt_cooldown(rem)} left). "
+            f"Only one theme at a time — wait for it to expire."
+        )
+        return
+    if economy.balance(uid) < THEME_PRICE:
+        await message.channel.send(f"❌ A Server Theme costs **{THEME_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -THEME_PRICE, "server theme")
+    try:
+        track_economy_event("spent", THEME_PRICE)
+    except Exception:
+        pass
+    data = _load_serverfx()
+    data["theme"] = {
+        "by": str(uid),
+        "name": message.author.display_name,
+        "color": color,
+        "emoji": emoji,
+        "until": time.time() + THEME_DURATION,
+    }
+    _save_serverfx(data)
+    embed = discord.Embed(
+        title=f"{emoji} THE SERVER'S GOT A NEW LOOK {emoji}".strip(),
+        description=(
+            f"**{message.author.display_name}** painted the town.\n\n"
+            f"For the next **24 hours**, the bot's embeds fly these colors"
+            f"{' and rep ' + emoji if emoji else ''}. Everyone sees your taste. 🎨"
+        ),
+        color=color,
+    )
+    await message.channel.send(embed=embed)
+
+
+
+
+# ── 💰 Personal Coin Rain ────────────────────────────────────────────────────
+# A timed effect: while active, the buyer's messages have a chance to spawn a
+# coin drop everyone can grab. The buyer SPONSORS it (their presence = an event).
+COINRAIN_PRICE = 40_000
+COINRAIN_DURATION = 3600          # 1 hour active
+COINRAIN_CHANCE = 0.12            # per qualifying message
+COINRAIN_COOLDOWN = 90            # min seconds between a user's drops
+COINRAIN_MIN = 100
+COINRAIN_MAX = 800
+
+_coinrain_last = {}               # uid -> last spawn ts
+
+
+async def _handle_coinrain(message: discord.Message):
+    """Prefix-only: _coinrain — buy a window where your messages drop coins for all."""
+    uid = message.author.id
+    active = _drip_active(uid)
+    if "coinrain" in active:
+        rem = int(active["coinrain"]["until"] - time.time())
+        await message.channel.send(f"💰 Your Coin Rain is already pouring — {fmt_cooldown(rem)} left.")
+        return
+    if economy.balance(uid) < COINRAIN_PRICE:
+        await message.channel.send(f"❌ Coin Rain costs **{COINRAIN_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+    economy.add(uid, -COINRAIN_PRICE, "coin rain")
+    try:
+        track_economy_event("spent", COINRAIN_PRICE)
+    except Exception:
+        pass
+    _drip_set(uid, "coinrain", {}, COINRAIN_DURATION / 3600)
+    await message.channel.send(
+        f"💸 **{message.author.display_name}** made it RAIN! For the next "
+        f"**{COINRAIN_DURATION // 60} min**, your messages randomly drop coins for everyone to grab. ☔💰"
+    )
+
+
+async def handle_coin_rain(message: discord.Message):
+    """If the author has an active coin-rain effect, maybe spawn a coin drop."""
+    if not message.guild or not message.content:
+        return
+    if message.content.startswith(("_", "/", "!", ".")):
+        return
+    active = _drip_active(message.author.id)
+    if "coinrain" not in active:
+        return
+    uid = message.author.id
+    now = time.time()
+    if now - _coinrain_last.get(uid, 0) < COINRAIN_COOLDOWN:
+        return
+    if random.random() > COINRAIN_CHANCE:
+        return
+    _coinrain_last[uid] = now
+    amount = random.randint(COINRAIN_MIN, COINRAIN_MAX)
+    emoji = "💸"
+    embed = discord.Embed(
+        title=f"💸 {message.author.display_name} is making it rain!",
+        description=f"**{amount:,} coins** hit the floor!\nReact with {emoji} to grab them.",
+        color=theme_color(0xF1C40F),
+    )
+    embed.set_footer(text=f"First to react wins • Expires in {COINDROP_GRAB_TIMEOUT}s")
+    try:
+        drop_msg = await message.channel.send(embed=embed)
+        await drop_msg.add_reaction(emoji)
+        _active_drops[drop_msg.id] = {
+            "channel_id": message.channel.id,
+            "amount": amount,
+            "emoji": emoji,
+            "is_rare": False,
+            "expires_at": time.time() + COINDROP_GRAB_TIMEOUT,
+            "claimed": False,
+        }
+        asyncio.create_task(_expire_coin_drop(drop_msg.id, drop_msg))
+    except Exception as e:
+        log.warning("coin rain spawn failed: %s", e)
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏢 CHANNEL SPONSOR + ✏️ RENAME RIGHTS — buys that touch real Discord channels.
+# SAFETY ARCHITECTURE (this is why these are safe to sell):
+#   1. ALLOWLIST: admins explicitly mark which channels are touchable
+#      (`_allowchannel`). The bot will NEVER touch a channel not on the list, so
+#      #rules / #announcements etc. are untouchable unless an admin opts them in.
+#   2. AUTO-REVERT: every change stores the ORIGINAL value + an expiry; a
+#      scheduler restores it. Nothing is permanent.
+#   3. TEXT FILTER: names/topics run through a slur/impersonation filter.
+#   4. PERMISSION GUARD: if the bot lacks Manage Channels, it refuses + no charge.
+#   5. LOGGING: every change is logged.
+# Data lives in serverfx.json under "channel_allow", "sponsors", "renames".
+# ─────────────────────────────────────────────────────────────────────────────
+SPONSOR_PRICE = 60_000           # put your tag in a channel's topic
+SPONSOR_DURATION = 604_800       # 7 days
+RENAME_PRICE = 80_000            # rename a channel
+RENAME_DURATION = 86_400         # 24 hours
+
+_CHANNEL_TEXT_BAD = ("nigg", "faggot", "retard", "kike", "chink", "tranny", "rape",
+                     "admin", "mod", "owner", "staff", "rules", "announcement")
+
+
+def _channel_text_ok(s: str) -> bool:
+    low = (s or "").lower().replace(" ", "")
+    return not any(b in low for b in _CHANNEL_TEXT_BAD)
+
+
+def _channel_allowlist() -> list:
+    return _load_serverfx().get("channel_allow", [])
+
+
+def _channel_is_allowed(channel_id) -> bool:
+    return str(channel_id) in _channel_allowlist()
+
+
+def _bot_can_manage_channels(channel) -> bool:
+    try:
+        guild = getattr(channel, "guild", None)
+        me = guild.me if guild else None
+        if me is None:
+            return False
+        return channel.permissions_for(me).manage_channels
+    except Exception:
+        return False
+
+
+async def _handle_allowchannel(message: discord.Message, rest: str):
+    """Admin-only: _allowchannel [#channel] — mark a channel as sponsorable/renamable."""
+    if not (isinstance(message.author, discord.Member) and _is_admin(message.author)):
+        await message.channel.send("❌ Only admins can manage the channel allowlist.")
+        return
+    target = message.channel_mentions[0] if message.channel_mentions else message.channel
+    data = _load_serverfx()
+    allow = data.setdefault("channel_allow", [])
+    if str(target.id) in allow:
+        await message.channel.send(f"✅ {target.mention} is already on the allowlist.")
+        return
+    allow.append(str(target.id))
+    _save_serverfx(data)
+    await message.channel.send(
+        f"✅ {target.mention} is now **sponsorable & renamable**. Members can spend coins to "
+        f"sponsor its topic or rename it (always auto-reverts). `_disallowchannel` to remove."
+    )
+
+
+async def _handle_disallowchannel(message: discord.Message, rest: str):
+    """Admin-only: _disallowchannel [#channel] — remove a channel from the allowlist."""
+    if not (isinstance(message.author, discord.Member) and _is_admin(message.author)):
+        await message.channel.send("❌ Only admins can manage the channel allowlist.")
+        return
+    target = message.channel_mentions[0] if message.channel_mentions else message.channel
+    data = _load_serverfx()
+    allow = data.setdefault("channel_allow", [])
+    if str(target.id) not in allow:
+        await message.channel.send(f"{target.mention} isn't on the allowlist.")
+        return
+    allow.remove(str(target.id))
+    _save_serverfx(data)
+    await message.channel.send(f"🚫 {target.mention} removed from the allowlist. It can no longer be sponsored or renamed.")
+
+
+async def _handle_allowedchannels(message: discord.Message):
+    """List which channels are sponsorable/renamable."""
+    allow = _channel_allowlist()
+    if not allow:
+        admin_hint = " An admin can add one with `_allowchannel #channel`." if (
+            isinstance(message.author, discord.Member) and _is_admin(message.author)) else ""
+        await message.channel.send(f"No channels are sponsorable or renamable yet.{admin_hint}")
+        return
+    names = []
+    for cid in allow:
+        ch = message.guild.get_channel(int(cid)) if message.guild else None
+        names.append(ch.mention if ch else f"`{cid}`")
+    await message.channel.send("🏢 **Sponsorable / renamable channels:** " + ", ".join(names))
+
+
+async def _handle_sponsor(message: discord.Message, rest: str):
+    """Prefix-only: _sponsor <your tag> — put your tag in THIS channel's topic for 7 days."""
+    uid = message.author.id
+    channel = message.channel
+    if not _channel_is_allowed(channel.id):
+        await message.channel.send(
+            "❌ This channel isn't sponsorable. An admin decides which channels can be sponsored "
+            "(`_allowedchannels` to see the list)."
+        )
+        return
+    tag = (rest or "").strip()[:80]
+    if not tag:
+        await message.channel.send(f"Usage: `_sponsor <your tag>` — puts your text in this channel's topic for 7 days. Costs **{SPONSOR_PRICE:,}**.")
+        return
+    if not _channel_text_ok(tag):
+        await message.channel.send("❌ That sponsor text isn't allowed.")
+        return
+    if not _bot_can_manage_channels(channel):
+        await message.channel.send("⚠️ I can't edit this channel — I'm missing **Manage Channels** here. _(You weren't charged.)_")
+        return
+    data = _load_serverfx()
+    sponsors = data.setdefault("sponsors", {})
+    if str(channel.id) in sponsors and sponsors[str(channel.id)].get("until", 0) > time.time():
+        cur = sponsors[str(channel.id)]
+        rem = int(cur["until"] - time.time())
+        await message.channel.send(f"❌ This channel is already sponsored by **{cur.get('name','someone')}** ({fmt_cooldown(rem)} left).")
+        return
+    if economy.balance(uid) < SPONSOR_PRICE:
+        await message.channel.send(f"❌ Sponsoring a channel costs **{SPONSOR_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+
+    original_topic = getattr(channel, "topic", "") or ""
+    new_topic = f"🏴 Sponsored by {tag} · {original_topic}"[:1024]
+    try:
+        await channel.edit(topic=new_topic, reason=f"Drip channel sponsor by {message.author} ({uid})")
+    except discord.Forbidden:
+        await message.channel.send("⚠️ I don't have permission to edit this channel's topic. _(You weren't charged.)_")
+        return
+    except Exception as e:
+        log.warning("sponsor edit failed: %s", e)
+        await message.channel.send("⚠️ Couldn't update the topic right now. _(You weren't charged.)_")
+        return
+    economy.add(uid, -SPONSOR_PRICE, "channel sponsor")
+    try:
+        track_economy_event("spent", SPONSOR_PRICE)
+    except Exception:
+        pass
+    sponsors[str(channel.id)] = {
+        "by": str(uid), "name": message.author.display_name,
+        "original_topic": original_topic, "until": time.time() + SPONSOR_DURATION,
+    }
+    _save_serverfx(data)
+    log.info("channel %s sponsored by %s (%s)", channel.id, message.author, uid)
+    await message.channel.send(
+        f"🏴 **{message.author.display_name}** now sponsors this channel — their tag's in the topic for **7 days**. Reverts automatically."
+    )
+
+
+async def _handle_renamechannel(message: discord.Message, rest: str):
+    """Prefix-only: _renamechannel <new name> — rename THIS channel for 24h."""
+    uid = message.author.id
+    channel = message.channel
+    if not _channel_is_allowed(channel.id):
+        await message.channel.send(
+            "❌ This channel can't be renamed. An admin decides which channels are renamable "
+            "(`_allowedchannels` to see the list)."
+        )
+        return
+    raw = (rest or "").strip()
+    if not raw:
+        await message.channel.send(f"Usage: `_renamechannel <new name>` — renames this channel for 24h. Costs **{RENAME_PRICE:,}**.")
+        return
+    # Discord channel name rules: lowercase, hyphens, <=100 chars
+    new_name = re.sub(r"[^a-z0-9\- ]", "", raw.lower()).strip().replace(" ", "-")[:100]
+    if len(new_name) < 2:
+        await message.channel.send("❌ Name must be at least 2 valid characters (letters/numbers/hyphens).")
+        return
+    if not _channel_text_ok(new_name):
+        await message.channel.send("❌ That name isn't allowed.")
+        return
+    if not _bot_can_manage_channels(channel):
+        await message.channel.send("⚠️ I can't rename this channel — I'm missing **Manage Channels** here. _(You weren't charged.)_")
+        return
+    data = _load_serverfx()
+    renames = data.setdefault("renames", {})
+    if str(channel.id) in renames and renames[str(channel.id)].get("until", 0) > time.time():
+        cur = renames[str(channel.id)]
+        rem = int(cur["until"] - time.time())
+        await message.channel.send(f"❌ This channel was already renamed by **{cur.get('name','someone')}** ({fmt_cooldown(rem)} left).")
+        return
+    if economy.balance(uid) < RENAME_PRICE:
+        await message.channel.send(f"❌ Renaming a channel costs **{RENAME_PRICE:,}**. You have **{economy.balance(uid):,}**.")
+        return
+
+    original_name = channel.name
+    try:
+        await channel.edit(name=new_name, reason=f"Drip channel rename by {message.author} ({uid})")
+    except discord.Forbidden:
+        await message.channel.send("⚠️ I don't have permission to rename this channel. _(You weren't charged.)_")
+        return
+    except Exception as e:
+        log.warning("rename failed: %s", e)
+        await message.channel.send("⚠️ Couldn't rename right now. _(You weren't charged.)_")
+        return
+    economy.add(uid, -RENAME_PRICE, "channel rename")
+    try:
+        track_economy_event("spent", RENAME_PRICE)
+    except Exception:
+        pass
+    renames[str(channel.id)] = {
+        "by": str(uid), "name": message.author.display_name,
+        "original_name": original_name, "until": time.time() + RENAME_DURATION,
+    }
+    _save_serverfx(data)
+    log.info("channel %s renamed to '%s' by %s (%s)", channel.id, new_name, message.author, uid)
+    await message.channel.send(
+        f"✏️ **{message.author.display_name}** renamed this channel to **#{new_name}** for **24h**. Reverts automatically."
+    )
+
+
+async def channel_revert_scheduler():
+    """Every 5 min: revert expired channel sponsors (topic) and renames (name)."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            data = _load_serverfx()
+            now = time.time()
+            changed = False
+            # Sponsors -> restore original topic
+            for cid, rec in list(data.get("sponsors", {}).items()):
+                if rec.get("until", 0) <= now:
+                    ch = client.get_channel(int(cid))
+                    if ch is not None:
+                        try:
+                            await ch.edit(topic=rec.get("original_topic", "") or "", reason="Drip sponsor expired — reverting")
+                            log.info("reverted sponsor on channel %s", cid)
+                        except Exception as e:
+                            log.warning("sponsor revert failed for %s: %s", cid, e)
+                    del data["sponsors"][cid]
+                    changed = True
+            # Renames -> restore original name
+            for cid, rec in list(data.get("renames", {}).items()):
+                if rec.get("until", 0) <= now:
+                    ch = client.get_channel(int(cid))
+                    if ch is not None:
+                        try:
+                            await ch.edit(name=rec.get("original_name", ch.name), reason="Drip rename expired — reverting")
+                            log.info("reverted rename on channel %s", cid)
+                        except Exception as e:
+                            log.warning("rename revert failed for %s: %s", cid, e)
+                    del data["renames"][cid]
+                    changed = True
+            if changed:
+                _save_serverfx(data)
+        except Exception as e:
+            log.warning("channel_revert_scheduler error: %s", e)
+        await asyncio.sleep(300)
+
+
 
 
 async def _handle_entrance(message: discord.Message, rest: str):
@@ -21175,6 +21724,7 @@ async def on_ready():
     client.loop.create_task(tournament_scheduler())
     client.loop.create_task(random_event_scheduler())
     client.loop.create_task(business_events_scheduler())
+    client.loop.create_task(channel_revert_scheduler())
     client.loop.create_task(loan_shark_scheduler())
     client.loop.create_task(pet_starving_scheduler())
     client.loop.create_task(nightlife_events_scheduler())
@@ -22738,6 +23288,11 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "delcommand", "deletecommand", "removecommand",
     "mycommands", "commandlist", "customcommands",
     "catchphrase", "claimword", "hijackword",
+    # Server-wide effects (batch 3)
+    "hypetrain", "hype", "theme", "servertheme", "coinrain", "makeitrain", "rain",
+    "allowchannel", "allowsponsor", "disallowchannel", "removesponsorable",
+    "allowedchannels", "sponsorablechannels", "sponsor", "sponsorchannel",
+    "renamechannel", "rename",
 }
 
 
@@ -23699,6 +24254,31 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name == "entrance":
         await _handle_entrance(message, rest)
         return True
+    if cmd_name in ("hypetrain", "hype", "hypetrain"):
+        await _handle_hypetrain(message)
+        return True
+    if cmd_name in ("theme", "servertheme"):
+        await _handle_theme(message, rest)
+        return True
+    if cmd_name in ("coinrain", "makeitrain", "rain"):
+        await _handle_coinrain(message)
+        return True
+    # 🏢 Channel Sponsor + ✏️ Rename Rights (+ admin allowlist)
+    if cmd_name in ("allowchannel", "allowsponsor"):
+        await _handle_allowchannel(message, rest)
+        return True
+    if cmd_name in ("disallowchannel", "removesponsorable"):
+        await _handle_disallowchannel(message, rest)
+        return True
+    if cmd_name in ("allowedchannels", "sponsorablechannels"):
+        await _handle_allowedchannels(message)
+        return True
+    if cmd_name in ("sponsor", "sponsorchannel"):
+        await _handle_sponsor(message, rest)
+        return True
+    if cmd_name in ("renamechannel", "rename"):
+        await _handle_renamechannel(message, rest)
+        return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
         return True
@@ -24139,6 +24719,12 @@ async def on_message(message: discord.Message):
         await handle_catchphrase_scan(message)
     except Exception as e:
         log.warning("catchphrase scan failed: %s", e)
+
+    # ── 💰 Personal Coin Rain: buyer's messages may drop coins for all ──
+    try:
+        await handle_coin_rain(message)
+    except Exception as e:
+        log.warning("coin rain failed: %s", e)
 
     # ── 💧 Drip Shop: restyle the author's own message via webhook (accent/persona) ──
     # Must run before XP/coin processing since it may delete + repost the message.
