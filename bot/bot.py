@@ -14728,8 +14728,24 @@ def to_small_caps(text: str) -> str:
 
 
 def _strip_channel_decoration(name: str) -> str:
-    """Strip decoration to alphanumeric base."""
+    """Strip decoration to alphanumeric base. Critically, channels may ALREADY be
+    in a fancy Unicode font (fullwidth, small-caps, bold, etc.) from a previous
+    rename — so we first normalize those characters back to plain ASCII, otherwise
+    they'd all be stripped and every channel would collapse to the same fallback."""
     import re
+    import unicodedata
+    # 1. Reverse the small-caps / phonetic mapping (NFKC doesn't fold these)
+    SMALL_CAPS_REVERSE = {
+        "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ғ": "f", "ɢ": "g",
+        "ʜ": "h", "ɪ": "i", "ᴊ": "j", "ᴋ": "k", "ʟ": "l", "ᴍ": "m", "ɴ": "n",
+        "ᴏ": "o", "ᴘ": "p", "ǫ": "q", "ʀ": "r", "ᴛ": "t", "ᴜ": "u",
+        "ᴠ": "v", "ᴡ": "w", "ʏ": "y", "ᴢ": "z",
+    }
+    name = "".join(SMALL_CAPS_REVERSE.get(c, c) for c in (name or ""))
+    # 2. NFKC folds fullwidth, bold, italic, monospace, double-struck, circled,
+    #    fraktur, script, etc. back to their ASCII equivalents
+    name = unicodedata.normalize("NFKC", name)
+    # 3. Now strip anything that still isn't a normal name character
     cleaned = re.sub(r"[^a-zA-Z0-9 _-]", " ", name)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = cleaned.replace(" ", "-").strip("-")
