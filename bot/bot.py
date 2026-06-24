@@ -5628,6 +5628,56 @@ def _render_hand(hand: list, hide_first: bool = False) -> str:
 
 # Track active blackjack games per user
 active_blackjack: dict[int, dict] = {}
+BLACKJACK_FILE = MEMORY_DIR / "blackjack_games.json"
+
+
+def _save_blackjack():
+    """Persist in-progress games so a bot restart (e.g. a redeploy) doesn't wipe
+    them and strand players' bets. Card tuples are stored as lists in JSON."""
+    try:
+        serializable = {}
+        for uid, game in active_blackjack.items():
+            serializable[str(uid)] = {
+                "deck": [list(c) for c in game["deck"]],
+                "player": [list(c) for c in game["player"]],
+                "dealer": [list(c) for c in game["dealer"]],
+                "bet": game.get("bet", 0),
+            }
+        with open(BLACKJACK_FILE, "w") as f:
+            json.dump(serializable, f)
+    except Exception as e:
+        log.warning("save blackjack failed: %s", e)
+
+
+def _refund_interrupted_blackjack():
+    """On startup: any game persisted from before the restart has a DEAD button
+    view (discord.py views don't survive restarts), so the player can never
+    finish it. Refund their bet and clear the game so no one loses coins to a
+    redeploy. Called once in on_ready."""
+    if not BLACKJACK_FILE.exists():
+        return
+    try:
+        with open(BLACKJACK_FILE) as f:
+            saved = json.load(f)
+    except Exception:
+        saved = {}
+    refunded = 0
+    for uid, game in saved.items():
+        bet = game.get("bet", 0)
+        if bet > 0:
+            try:
+                economy.add(int(uid), bet, "blackjack interrupted refund")
+                refunded += 1
+            except Exception:
+                pass
+    if refunded:
+        log.info("refunded %d blackjack game(s) interrupted by restart", refunded)
+    # Clear the file and in-memory state — those games are over
+    try:
+        BLACKJACK_FILE.unlink()
+    except Exception:
+        pass
+    active_blackjack.clear()
 
 
 class BlackjackView(discord.ui.View):
@@ -5663,6 +5713,7 @@ class BlackjackView(discord.ui.View):
         if player_total > 21:
             # Bust
             del active_blackjack[self.user_id]
+            _save_blackjack()
             economy.record_loss(self.user_id)
             new_bal = economy.balance(self.user_id)
             self.disable_all()
@@ -5680,6 +5731,7 @@ class BlackjackView(discord.ui.View):
             return
 
         # Continue
+        _save_blackjack()
         await interaction.response.edit_message(
             content=(
                 f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
@@ -5702,6 +5754,7 @@ class BlackjackView(discord.ui.View):
         player_total = _hand_value(game["player"])
         dealer_total = _hand_value(game["dealer"])
         del active_blackjack[self.user_id]
+        _save_blackjack()
 
         # Resolve
         outcome = ""
@@ -5748,6 +5801,7 @@ class BlackjackView(discord.ui.View):
         if self.user_id in active_blackjack:
             economy.add(self.user_id, self.bet, "blackjack timeout refund")
             del active_blackjack[self.user_id]
+            _save_blackjack()
 
 
 @tree.command(name="blackjack", description="Play blackjack against the dealer.")
@@ -5774,7 +5828,8 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
     random.shuffle(deck)
     player = [deck.pop(), deck.pop()]
     dealer = [deck.pop(), deck.pop()]
-    active_blackjack[user.id] = {"deck": deck, "player": player, "dealer": dealer}
+    active_blackjack[user.id] = {"deck": deck, "player": player, "dealer": dealer, "bet": bet}
+    _save_blackjack()
 
     player_total = _hand_value(player)
 
@@ -5786,6 +5841,7 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
         economy.add(user.id, winnings, "blackjack natural")
         economy.record_win(user.id)
         del active_blackjack[user.id]
+        _save_blackjack()
         new_bal = economy.balance(user.id)
         await interaction.response.send_message(
             f"🃏 **BLACKJACK!**\n\n"
@@ -21834,6 +21890,11 @@ async def on_ready():
     client.loop.create_task(random_event_scheduler())
     client.loop.create_task(business_events_scheduler())
     client.loop.create_task(channel_revert_scheduler())
+    # Refund any blackjack games interrupted by a restart (dead button views)
+    try:
+        _refund_interrupted_blackjack()
+    except Exception as e:
+        log.warning("blackjack startup refund failed: %s", e)
     client.loop.create_task(loan_shark_scheduler())
     client.loop.create_task(pet_starving_scheduler())
     client.loop.create_task(nightlife_events_scheduler())
