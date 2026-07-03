@@ -7,7 +7,7 @@
   "respond_to_bots": false,
   "trigger_mode": "mention_or_reply",
   "trigger_keywords": ["jb", "jordan", "jordan belfort"],
-  "allowed_channels": ["1522611232396415118"],
+  "allowed_channels": ["1522654940550664273"],
   "blocked_users": [],
   "chime_in_enabled": true,
   "chime_in_min": 40,
