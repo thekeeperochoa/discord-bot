@@ -17003,6 +17003,109 @@ async def signatures_command(interaction: discord.Interaction):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ✅ READY CHECK — `.r` / `.l`
+# Pings the ready role with a gif embed and a Join button. 25-second window
+# (live countdown via Discord timestamp), joiners listed in a second embed,
+# button disabled at 0. 5-minute per-channel cooldown to prevent spam.
+# ─────────────────────────────────────────────────────────────────────────────
+READY_ROLE_ID = 1312186593154564178
+READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-(16).gif"
+READY_WINDOW = 25          # seconds people can join
+READY_COOLDOWN = 300       # 5 min per channel
+READY_EMBED_COLOR = 0x000000  # black
+
+_ready_cooldowns: dict[int, float] = {}   # channel_id -> last run ts
+
+
+class ReadyCheckView(discord.ui.View):
+    def __init__(self, deadline: float):
+        super().__init__(timeout=READY_WINDOW + 2)
+        self.deadline = deadline
+        self.joiners: list[int] = []       # user ids in join order
+        self.message: discord.Message | None = None
+
+    def _joiners_embed(self, closed: bool = False) -> discord.Embed:
+        if self.joiners:
+            lines = "\n".join(f"{i+1}. <@{uid}>" for i, uid in enumerate(self.joiners))
+        else:
+            lines = "_Nobody yet..._"
+        title = "🔒 Joined (closed)" if closed else "👥 Joined"
+        e = discord.Embed(title=title, description=lines, color=READY_EMBED_COLOR)
+        e.set_footer(text=f"{len(self.joiners)} joined")
+        return e
+
+    def _embeds(self, closed: bool = False) -> list:
+        img = discord.Embed(color=READY_EMBED_COLOR)
+        img.set_image(url=READY_GIF_URL)
+        return [img, self._joiners_embed(closed=closed)]
+
+    @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Server-side deadline check (belt + suspenders alongside the view timeout)
+        if time.time() >= self.deadline:
+            await interaction.response.send_message("⏰ Too late — this one's closed.", ephemeral=True)
+            return
+        if interaction.user.id in self.joiners:
+            await interaction.response.send_message("You're already in. 👌", ephemeral=True)
+            return
+        self.joiners.append(interaction.user.id)
+        try:
+            await interaction.response.edit_message(embeds=self._embeds())
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
+    async def on_timeout(self):
+        # Window over: disable the button and mark the list closed
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(embeds=self._embeds(closed=True), view=self)
+            except Exception:
+                pass
+
+
+async def _handle_ready_check(message: discord.Message):
+    """Handle `.r` / `.l` — post the ready check."""
+    if not message.guild:
+        return
+    ch_id = message.channel.id
+    now = time.time()
+    last = _ready_cooldowns.get(ch_id, 0)
+    remaining = READY_COOLDOWN - (now - last)
+    if remaining > 0:
+        try:
+            await message.channel.send(
+                f"⏰ Ready check is on cooldown here — try again in **{fmt_cooldown(int(remaining))}**.",
+                delete_after=8,
+            )
+        except Exception:
+            pass
+        return
+    _ready_cooldowns[ch_id] = now
+
+    deadline = now + READY_WINDOW
+    role = message.guild.get_role(READY_ROLE_ID)
+    role_mention = role.mention if role else f"<@&{READY_ROLE_ID}>"
+    view = ReadyCheckView(deadline)
+    try:
+        sent = await message.channel.send(
+            content=f"**Ready for {role_mention}** · closes <t:{int(deadline)}:R>",
+            embeds=view._embeds(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions(roles=[role] if role else True, users=False, everyone=False),
+        )
+        view.message = sent
+    except Exception as e:
+        log.warning("ready check send failed: %s", e)
+        _ready_cooldowns.pop(ch_id, None)  # don't burn the cooldown on a failure
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 👋 WELCOME + ONBOARDING SYSTEM
 # - Public welcome in welcome_channel (if set)
 # - DM onboarding guide with starter coins (skip if user has DMs closed)
@@ -24950,6 +25053,13 @@ async def on_message(message: discord.Message):
 
     # ── _prefix commands → invoke slash commands ─────────────────────────────
     content_stripped = message.content.strip()
+    # ✅ Ready check: `.r` / `.l`
+    if content_stripped.lower() in (".r", ".l"):
+        try:
+            await _handle_ready_check(message)
+        except Exception as e:
+            log.warning("ready check failed: %s", e)
+        return
     if content_stripped.startswith("_") and len(content_stripped) > 1:
         handled = await handle_prefix_command(message, content_stripped[1:])
         if handled:
