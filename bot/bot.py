@@ -17010,6 +17010,7 @@ async def signatures_command(interaction: discord.Interaction):
 # ─────────────────────────────────────────────────────────────────────────────
 READY_ROLE_ID = 1312186593154564178
 READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-(16).gif"
+READY_CLOSED_GIF_URL = "https://i.postimg.cc/ZR1WPMmn/5-(3)-(1).gif"
 READY_WINDOW = 25          # seconds people can join
 READY_COOLDOWN = 300       # 5 min per channel
 READY_EMBED_COLOR = 0x000000  # black
@@ -17018,9 +17019,10 @@ _ready_cooldowns: dict[int, float] = {}   # channel_id -> last run ts
 
 
 class ReadyCheckView(discord.ui.View):
-    def __init__(self, deadline: float):
+    def __init__(self, deadline: float, role_mention: str = ""):
         super().__init__(timeout=READY_WINDOW + 2)
         self.deadline = deadline
+        self.role_mention = role_mention
         self.joiners: list[int] = []       # user ids in join order
         self.message: discord.Message | None = None
 
@@ -17058,12 +17060,26 @@ class ReadyCheckView(discord.ui.View):
                 pass
 
     async def on_timeout(self):
-        # Window over: disable the button and mark the list closed
+        # Window over: disable the button, FREEZE the countdown text (the live
+        # <t:R> timestamp would keep ticking into "closed X minutes ago"), and
+        # mark the list closed.
         for child in self.children:
             child.disabled = True
         if self.message is not None:
             try:
-                await self.message.edit(embeds=self._embeds(closed=True), view=self)
+                await self.message.edit(
+                    content=f"**Ready for {self.role_mention}** · 🔒 **CLOSED**",
+                    embeds=self._embeds(closed=True),
+                    view=self,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+            # Post the closing gif as a fresh embed under the ready check
+            try:
+                closed_embed = discord.Embed(color=READY_EMBED_COLOR)
+                closed_embed.set_image(url=READY_CLOSED_GIF_URL)
+                await self.message.channel.send(embed=closed_embed)
             except Exception:
                 pass
 
@@ -17090,7 +17106,7 @@ async def _handle_ready_check(message: discord.Message):
     deadline = now + READY_WINDOW
     role = message.guild.get_role(READY_ROLE_ID)
     role_mention = role.mention if role else f"<@&{READY_ROLE_ID}>"
-    view = ReadyCheckView(deadline)
+    view = ReadyCheckView(deadline, role_mention)
     try:
         sent = await message.channel.send(
             content=f"**Ready for {role_mention}** · closes <t:{int(deadline)}:R>",
