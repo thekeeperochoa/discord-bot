@@ -17004,14 +17004,14 @@ async def signatures_command(interaction: discord.Interaction):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ✅ READY CHECK — `.r` / `.l`
-# Pings the ready role with a gif embed and a Join button. 25-second window
-# (live countdown via Discord timestamp), joiners listed in a second embed,
-# button disabled at 0. 5-minute per-channel cooldown to prevent spam.
+# Pings the ready role with a gif embed, a Join button, and a Count button.
+# NO TIMER — the room stays open until someone presses Count (starter or admin),
+# which locks joins, marks the list closed, and posts the closing gif.
+# 5-minute per-channel cooldown to prevent spam.
 # ─────────────────────────────────────────────────────────────────────────────
 READY_ROLE_ID = 1312186593154564178
 READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-(16).gif"
 READY_CLOSED_GIF_URL = "https://i.postimg.cc/ZR1WPMmn/5-(3)-(1).gif"
-READY_WINDOW = 25          # seconds people can join
 READY_COOLDOWN = 300       # 5 min per channel
 READY_EMBED_COLOR = 0x000000  # black
 
@@ -17019,10 +17019,11 @@ _ready_cooldowns: dict[int, float] = {}   # channel_id -> last run ts
 
 
 class ReadyCheckView(discord.ui.View):
-    def __init__(self, deadline: float, role_mention: str = ""):
-        super().__init__(timeout=READY_WINDOW + 2)
-        self.deadline = deadline
+    def __init__(self, starter_id: int, role_mention: str = ""):
+        super().__init__(timeout=None)     # no timer — open until Count is pressed
+        self.starter_id = starter_id
         self.role_mention = role_mention
+        self.locked = False
         self.joiners: list[int] = []       # user ids in join order
         self.message: discord.Message | None = None
 
@@ -17043,9 +17044,8 @@ class ReadyCheckView(discord.ui.View):
 
     @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Server-side deadline check (belt + suspenders alongside the view timeout)
-        if time.time() >= self.deadline:
-            await interaction.response.send_message("⏰ Too late — this one's closed.", ephemeral=True)
+        if self.locked:
+            await interaction.response.send_message("🔒 This one's closed.", ephemeral=True)
             return
         if interaction.user.id in self.joiners:
             await interaction.response.send_message("You're already in. 👌", ephemeral=True)
@@ -17059,29 +17059,38 @@ class ReadyCheckView(discord.ui.View):
             except Exception:
                 pass
 
-    async def on_timeout(self):
-        # Window over: disable the button, FREEZE the countdown text (the live
-        # <t:R> timestamp would keep ticking into "closed X minutes ago"), and
-        # mark the list closed.
+    @discord.ui.button(label="Count", emoji="🔢", style=discord.ButtonStyle.secondary)
+    async def count_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only the starter (or an admin) can close the room — otherwise anyone
+        # could insta-lock someone else's ready check.
+        is_admin = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if interaction.user.id != self.starter_id and not is_admin:
+            await interaction.response.send_message(
+                "Only whoever started this (or an admin) can call the count.", ephemeral=True
+            )
+            return
+        if self.locked:
+            await interaction.response.send_message("Already counted. 🔒", ephemeral=True)
+            return
+        self.locked = True
         for child in self.children:
             child.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(
-                    content=f"**Ready for {self.role_mention}** · 🔒 **CLOSED**",
-                    embeds=self._embeds(closed=True),
-                    view=self,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except Exception:
-                pass
-            # Post the closing gif as a fresh embed under the ready check
-            try:
-                closed_embed = discord.Embed(color=READY_EMBED_COLOR)
-                closed_embed.set_image(url=READY_CLOSED_GIF_URL)
-                await self.message.channel.send(embed=closed_embed)
-            except Exception:
-                pass
+        try:
+            await interaction.response.edit_message(
+                content=f"**Ready for {self.role_mention}** · 🔒 **CLOSED**",
+                embeds=self._embeds(closed=True),
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+        # Post the closing gif as a fresh black embed under the ready check
+        try:
+            closed_embed = discord.Embed(color=READY_EMBED_COLOR)
+            closed_embed.set_image(url=READY_CLOSED_GIF_URL)
+            await interaction.channel.send(embed=closed_embed)
+        except Exception:
+            pass
 
 
 async def _handle_ready_check(message: discord.Message):
@@ -17103,13 +17112,12 @@ async def _handle_ready_check(message: discord.Message):
         return
     _ready_cooldowns[ch_id] = now
 
-    deadline = now + READY_WINDOW
     role = message.guild.get_role(READY_ROLE_ID)
     role_mention = role.mention if role else f"<@&{READY_ROLE_ID}>"
-    view = ReadyCheckView(deadline, role_mention)
+    view = ReadyCheckView(message.author.id, role_mention)
     try:
         sent = await message.channel.send(
-            content=f"**Ready for {role_mention}** · closes <t:{int(deadline)}:R>",
+            content=f"**Ready for {role_mention}**",
             embeds=view._embeds(),
             view=view,
             allowed_mentions=discord.AllowedMentions(roles=[role] if role else True, users=False, everyone=False),
