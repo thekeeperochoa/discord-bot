@@ -12,7 +12,7 @@ Features:
   - Daily recap (auto-posts a summary of the day's chaos)
   - Keyword triggers
 """
-# 123
+
 import discord
 import json
 import os
@@ -17003,6 +17003,149 @@ async def signatures_command(interaction: discord.Interaction):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ☄️ CATASTROPHE — admin/owner-only. Visits a random catastrophic event on a
+# target: wipes 85% of their cash and ALL their businesses, venues, and real
+# estate. The VICTIM gets a dramatic DM (act of god — the admin is never named
+# to them). Every use IS logged (bot log + notifications channel) so the owner
+# has an audit trail — a hidden no-trace wipe power is how servers get griefed.
+# ─────────────────────────────────────────────────────────────────────────────
+CATASTROPHE_WIPE_PCT = 0.85
+
+CATASTROPHE_EVENTS = [
+    ("💸 The Feds Came Knocking",
+     "The IRS ran the numbers and they didn't like what they saw. Assets seized, accounts frozen, everything you built — gone in a raid at dawn."),
+    ("🔥 Everything Burned",
+     "A fire tore through every property you own. The insurance? Lapsed last month. You're standing in the ashes of your entire empire."),
+    ("📉 The Market Crashed",
+     "Overnight, it all went to zero. Your holdings, your businesses, your name on the door — wiped out in a crash nobody saw coming."),
+    ("🎰 You Bet It All",
+     "One bad night at the high-roller table. You put the whole empire on the line and the house took every last chip."),
+    ("🧊 Rug Pulled",
+     "The 'guaranteed' investment your guy swore by? A scam. He's on a beach somewhere with your money and you've got nothing."),
+    ("⚰️ The Cartel Collected",
+     "You owed the wrong people. They came to collect — the businesses, the properties, all of it. Consider the debt settled."),
+    ("🌊 Wiped Out at Sea",
+     "Your offshore accounts, your shell companies, your yacht — a perfect storm swallowed the whole operation. Nothing surfaced."),
+    ("🚔 RICO'd",
+     "A federal racketeering case brought the whole operation down. Every asset tied to your name got seized as evidence. You're clean now — dead broke, but clean."),
+    ("🐀 A Snitch in the Ranks",
+     "Someone flipped. They handed the authorities everything — your books, your properties, your entire network. It's all gone."),
+    ("💀 Bad Business Partner",
+     "Your partner drained the accounts, sold the businesses out from under you, and vanished. You trusted the wrong person and it cost you everything."),
+    ("🌪️ Act of God",
+     "A disaster of biblical proportions leveled everything you owned. There's no insurance policy for wrath like this."),
+    ("👑 Dethroned",
+     "The crown got heavy and someone knocked it off your head. Your rivals carved up your empire and left you with scraps."),
+]
+
+
+def _catastrophe_clear_assets(uid: int) -> dict:
+    """Wipe the user's businesses, venues, and real estate. Returns counts."""
+    counts = {"businesses": 0, "venues": 0, "properties": 0}
+    try:
+        bdata = _load_businesses()
+        counts["businesses"] = len(bdata.get("users", {}).get(str(uid), []))
+        if str(uid) in bdata.get("users", {}):
+            bdata["users"][str(uid)] = []
+            _save_businesses(bdata)
+    except Exception as e:
+        log.warning("catastrophe biz clear failed: %s", e)
+    try:
+        ndata = _load_nightlife()
+        counts["venues"] = len(ndata.get("users", {}).get(str(uid), []))
+        if str(uid) in ndata.get("users", {}):
+            ndata["users"][str(uid)] = []
+            _save_nightlife(ndata)
+    except Exception as e:
+        log.warning("catastrophe venue clear failed: %s", e)
+    try:
+        rdata = _load_re()
+        counts["properties"] = len(rdata.get("users", {}).get(str(uid), []))
+        if str(uid) in rdata.get("users", {}):
+            rdata["users"][str(uid)] = []
+            _save_re(rdata)
+    except Exception as e:
+        log.warning("catastrophe re clear failed: %s", e)
+    return counts
+
+
+async def _handle_catastrophe(message: discord.Message, rest: str):
+    """Prefix-only, ADMIN/OWNER ONLY: _catastrophe @user — visit ruin upon them."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_admin or is_owner):
+        return  # silent to non-admins — don't advertise the command exists
+
+    targets = _ordered_members(message)
+    if not targets:
+        await message.channel.send("Usage: `_catastrophe @user`")
+        return
+    target = targets[0]
+    if target.bot:
+        await message.channel.send("❌ You can't ruin a bot. It has nothing to lose.")
+        return
+
+    uid = target.id
+    cash_before = economy.balance(uid)
+    wipe = int(cash_before * CATASTROPHE_WIPE_PCT)
+    if wipe > 0:
+        economy.add(uid, -wipe, "catastrophe")
+    counts = _catastrophe_clear_assets(uid)
+
+    title, story = random.choice(CATASTROPHE_EVENTS)
+
+    dm_sent = False
+    try:
+        dm_embed = discord.Embed(
+            title=title,
+            description=(
+                f"{story}\n\n"
+                f"💸 **{wipe:,} coins** — gone (85% of your cash).\n"
+                f"🏢 **{counts['businesses']}** businesses · 🌃 **{counts['venues']}** venues · "
+                f"🏘️ **{counts['properties']}** properties — all seized.\n\n"
+                f"_You're starting over. The city doesn't care._"
+            ),
+            color=0x8B0000,
+        )
+        await target.send(embed=dm_embed)
+        dm_sent = True
+    except Exception:
+        dm_sent = False
+
+    await message.channel.send(
+        f"☄️ **{title}** struck **{target.display_name}**.\n"
+        f"Wiped **{wipe:,}** coins + {counts['businesses']} biz / {counts['venues']} venues / "
+        f"{counts['properties']} properties. "
+        f"{'📬 They got the DM.' if dm_sent else '📪 (Their DMs are closed — no DM sent.)'}"
+    )
+
+    log.info("CATASTROPHE by %s (%s) on %s (%s): wiped %d coins + %s",
+             message.author, message.author.id, target, uid, wipe, counts)
+    try:
+        cfg = load_config()
+        notif_id = get_notification_channel_id(cfg)
+        if notif_id:
+            ch = client.get_channel(int(notif_id))
+            if ch is not None:
+                audit = discord.Embed(
+                    title="🛡️ Catastrophe — Audit Log",
+                    description=(
+                        f"**Ran by:** {message.author.mention} (`{message.author.id}`)\n"
+                        f"**Target:** {target.mention} (`{uid}`)\n"
+                        f"**Event:** {title}\n"
+                        f"**Wiped:** {wipe:,} coins · {counts['businesses']} biz · "
+                        f"{counts['venues']} venues · {counts['properties']} properties"
+                    ),
+                    color=0x8B0000,
+                )
+                audit.set_footer(text="Destructive admin action — logged for accountability")
+                await ch.send(embed=audit, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as e:
+        log.warning("catastrophe audit log failed: %s", e)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ✅ READY CHECK — `.r` / `.l`
 # Pings the ready role with a gif embed, a Join button, and a Count button.
 # NO TIMER — the room stays open until someone presses Count (starter or admin),
@@ -23590,6 +23733,8 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "allowchannel", "allowsponsor", "disallowchannel", "removesponsorable",
     "allowedchannels", "sponsorablechannels", "sponsor", "sponsorchannel",
     "renamechannel", "rename",
+    # Admin destructive (gated inside the handler)
+    "catastrophe", "ruin", "wipeout", "actofgod",
 }
 
 
@@ -24575,6 +24720,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("renamechannel", "rename"):
         await _handle_renamechannel(message, rest)
+        return True
+    if cmd_name in ("catastrophe", "ruin", "wipeout", "actofgod"):
+        await _handle_catastrophe(message, rest)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
