@@ -17112,25 +17112,48 @@ async def _handle_webhookaudit(message: discord.Message):
                     discord.WebhookType.channel_follower: "channel follower"}.get(h.type, str(h.type))
             foreign.append(f"⚠️ **{h.name}** → {ch} · by {who} · {kind} · {made}")
 
-    embed = discord.Embed(
-        title="🪝 Webhook Audit",
-        color=0xFF3B5C if foreign else 0x2ECC71,
-    )
+    def _chunk_lines(lines, cap=1024):
+        """Split a list of lines into blocks that each fit in one embed field."""
+        blocks, cur = [], ""
+        for ln in lines:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur)
+                cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    # Build (field_name, field_value) pairs, chunked so nothing gets truncated
+    fields = []
     if foreign:
-        embed.add_field(
-            name=f"⚠️ Not created by the bot ({len(foreign)})",
-            value="\n".join(foreign)[:1024] or "—",
-            inline=False,
-        )
+        blocks = _chunk_lines(foreign)
+        for i, b in enumerate(blocks):
+            suffix = f" — part {i+1}/{len(blocks)}" if len(blocks) > 1 else ""
+            fields.append((f"⚠️ Not created by the bot ({len(foreign)}){suffix}", b))
     if mine:
-        embed.add_field(
-            name=f"🤖 Bot-created / drip webhooks ({len(mine)})",
-            value="\n".join(mine)[:1024] or "—",
-            inline=False,
-        )
-    embed.set_footer(text=f"{len(hooks)} total · review anything flagged ⚠️ — "
-                          "webhook URLs post with no auth")
-    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        blocks = _chunk_lines(mine)
+        for i, b in enumerate(blocks):
+            suffix = f" — part {i+1}/{len(blocks)}" if len(blocks) > 1 else ""
+            fields.append((f"🤖 Bot-created / drip webhooks ({len(mine)}){suffix}", b))
+
+    # Pack fields into embeds respecting Discord's 6000-char total per embed
+    color = 0xFF3B5C if foreign else 0x2ECC71
+    embeds, cur_embed, cur_size = [], None, 0
+    for name, value in fields:
+        block = len(name) + len(value)
+        if cur_embed is None or cur_size + block > 5500 or len(cur_embed.fields) >= 24:
+            cur_embed = discord.Embed(title="🪝 Webhook Audit", color=color)
+            embeds.append(cur_embed)
+            cur_size = 0
+        cur_embed.add_field(name=name, value=value, inline=False)
+        cur_size += block
+
+    embeds[-1].set_footer(text=f"{len(hooks)} total · review anything flagged ⚠️ — "
+                               "webhook URLs post with no auth")
+    for e in embeds:
+        await message.channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _handle_synccat(message: discord.Message, rest: str):
