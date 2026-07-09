@@ -17622,6 +17622,61 @@ async def on_member_remove(member: discord.Member):
         log.warning("on_member_remove welcome cleanup failed: %s", e)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🔥 BURNER CHANNEL — every message self-destructs 5 minutes after being posted.
+# Two layers: (1) per-message timer for precision, (2) a sweeper loop every 60s
+# that catches strays — messages sent while the bot was offline/restarting, or
+# whose timer task died. Pinned messages are immune (safe spot for rules).
+# ─────────────────────────────────────────────────────────────────────────────
+BURNER_CHANNEL_ID = 1524602713374199889
+BURNER_TTL = 300          # seconds a message lives (5 min)
+BURNER_SWEEP_EVERY = 60   # sweeper interval
+
+
+def _burner_schedule(message):
+    """Arm a self-destruct timer on a burner-channel message."""
+    if message.channel.id != BURNER_CHANNEL_ID:
+        return
+
+    async def _fuse():
+        try:
+            await asyncio.sleep(BURNER_TTL)
+            if message.pinned:
+                return
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass  # already gone, or missing Manage Messages
+        except Exception as e:
+            log.warning("burner: timed delete failed: %s", e)
+
+    try:
+        asyncio.create_task(_fuse())
+    except Exception as e:
+        log.warning("burner: schedule failed: %s", e)
+
+
+async def _burner_sweeper():
+    """Backstop loop: purge anything in the burner channel older than BURNER_TTL.
+    Covers messages sent before the last restart, which have no armed timer."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            ch = client.get_channel(BURNER_CHANNEL_ID)
+            if ch is not None:
+                cutoff = discord.utils.utcnow() - timedelta(seconds=BURNER_TTL)
+                async for m in ch.history(limit=100, before=cutoff, oldest_first=True):
+                    if m.pinned:
+                        continue
+                    try:
+                        await m.delete()
+                        await asyncio.sleep(0.6)  # stay polite with rate limits
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+        except Exception as e:
+            log.warning("burner sweeper error: %s", e)
+        await asyncio.sleep(BURNER_SWEEP_EVERY)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🕵️ GHOST LOG — mirror deleted messages from one channel into a mod channel
 # v3: raw delete event + own snapshot cache + audit-log lookup for WHO deleted.
 # Covers everyone including the owner. Drip webhook reposts are snapshotted too,
@@ -22498,6 +22553,8 @@ async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
     log.info("ghostlog v3 armed: watching %s -> posting %s", GHOSTLOG_WATCH_CHANNEL, GHOSTLOG_POST_CHANNEL)
     asyncio.create_task(_ghostlog_backfill())
+    asyncio.create_task(_burner_sweeper())
+    log.info("burner armed: channel %s, ttl %ss", BURNER_CHANNEL_ID, BURNER_TTL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
     try:
@@ -25495,6 +25552,8 @@ async def on_message(message: discord.Message):
     # ── 🕵️ Ghost Log: snapshot EVERY watched-channel message (humans + bots)
     # before any early-returns, so embed/bot deletions can be mirrored too.
     _ghostlog_remember(message)
+    # ── 🔥 Burner channel: arm the 5-minute self-destruct (bots burn too) ──
+    _burner_schedule(message)
     if message.author.bot and message.author != client.user:
         last_channel_activity[str(message.channel.id)] = time.time()
         return
