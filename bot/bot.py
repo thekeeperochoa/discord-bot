@@ -17133,7 +17133,7 @@ async def _handle_catastrophe(message: discord.Message, rest: str):
 # ─────────────────────────────────────────────────────────────────────────────
 READY_ROLE_ID = 1312186593154564178
 READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-(16).gif"
-READY_CLOSED_GIF_URL = "https://i.postimg.cc/ZR1WPMmn/5-(3)-(1).gif"
+READY_CLOSED_GIF_URL = "https://i.postimg.cc/y63HPKfG/download-(30).gif"
 READY_COOLDOWN = 300       # 5 min per channel
 READY_EMBED_COLOR = 0x000000  # black
 
@@ -17172,7 +17172,7 @@ class ReadyCheckView(discord.ui.View):
 
     def _embeds(self, closed: bool = False) -> list:
         img = discord.Embed(color=READY_EMBED_COLOR)
-        img.set_image(url=READY_GIF_URL)
+        img.set_image(url=READY_CLOSED_GIF_URL if closed else READY_GIF_URL)
         return [img, self._joiners_embed(closed=closed), self._almost_embed(closed=closed)]
 
     @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
