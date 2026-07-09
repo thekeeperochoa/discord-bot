@@ -17072,6 +17072,66 @@ def _catastrophe_clear_assets(uid: int) -> dict:
     return counts
 
 
+async def _handle_synccat(message: discord.Message, rest: str):
+    """Prefix-only, ADMIN/OWNER ONLY: _synccat <category id or name>
+    Syncs every channel in the category to the category's permissions.
+    Run with no args inside a categorized channel to sync THAT category."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_admin or is_owner):
+        return  # silent to non-admins
+
+    guild = message.guild
+    if guild is None:
+        return
+
+    rest = (rest or "").strip()
+    category = None
+    if not rest:
+        # no arg: use the category of the channel the command was run in
+        category = getattr(message.channel, "category", None)
+        if category is None:
+            await message.channel.send("Usage: `_synccat <category id or name>` (or run it inside a categorized channel)")
+            return
+    elif rest.isdigit():
+        ch = guild.get_channel(int(rest))
+        if isinstance(ch, discord.CategoryChannel):
+            category = ch
+    else:
+        low = rest.lower()
+        matches = [c for c in guild.categories if c.name.lower() == low]
+        if not matches:
+            matches = [c for c in guild.categories if low in c.name.lower()]
+        if len(matches) > 1:
+            await message.channel.send(
+                "⚠️ Multiple categories match: " + ", ".join(f"`{c.name}`" for c in matches[:5]) + " — use the ID."
+            )
+            return
+        category = matches[0] if matches else None
+
+    if category is None:
+        await message.channel.send(f"❌ No category found for `{rest}`.")
+        return
+
+    synced, skipped, failed = 0, 0, []
+    for ch in category.channels:
+        try:
+            if ch.permissions_synced:
+                skipped += 1
+                continue
+            await ch.edit(sync_permissions=True, reason=f"_synccat by {message.author}")
+            synced += 1
+            await asyncio.sleep(0.5)  # rate-limit courtesy on big categories
+        except Exception as e:
+            failed.append(ch.name)
+            log.warning("synccat: failed on #%s: %s", ch.name, e)
+
+    out = f"🔄 **{category.name}** — synced **{synced}**, already in sync **{skipped}**"
+    if failed:
+        out += f", failed **{len(failed)}**: " + ", ".join(f"`{n}`" for n in failed[:5])
+    await message.channel.send(out)
+
+
 async def _handle_catastrophe(message: discord.Message, rest: str):
     """Prefix-only, ADMIN/OWNER ONLY: _catastrophe @user — visit ruin upon them."""
     is_owner = message.author.id == SECRET_GIVE_OWNER_ID
@@ -25139,6 +25199,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("catastrophe", "ruin", "wipeout", "actofgod"):
         await _handle_catastrophe(message, rest)
+        return True
+    if cmd_name in ("synccat", "syncategory", "synccategory"):
+        await _handle_synccat(message, rest)
         return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
