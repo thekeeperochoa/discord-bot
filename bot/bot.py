@@ -17072,6 +17072,67 @@ def _catastrophe_clear_assets(uid: int) -> dict:
     return counts
 
 
+async def _handle_webhookaudit(message: discord.Message):
+    """Prefix-only, ADMIN/OWNER ONLY: _webhookaudit — list every webhook in the
+    server with creator + channel, flagging any not created by the bot."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_admin or is_owner):
+        return  # silent to non-admins
+
+    guild = message.guild
+    if guild is None:
+        return
+
+    try:
+        hooks = await guild.webhooks()
+    except discord.Forbidden:
+        await message.channel.send("❌ I need the **Manage Webhooks** permission to audit webhooks.")
+        return
+    except Exception as e:
+        log.warning("webhookaudit failed: %s", e)
+        await message.channel.send("⚠️ Couldn't fetch webhooks — check my perms and try again.")
+        return
+
+    if not hooks:
+        await message.channel.send("✅ No webhooks exist in this server.")
+        return
+
+    bot_id = client.user.id
+    mine, foreign = [], []
+    for h in hooks:
+        creator = h.user  # None if the creating user is no longer visible
+        ch = h.channel.mention if h.channel else f"`{h.channel_id}`"
+        made = h.created_at.strftime("%b %d, %Y") if h.created_at else "?"
+        if creator is not None and creator.id == bot_id:
+            mine.append(f"🤖 **{h.name}** → {ch} · {made}")
+        else:
+            who = f"{creator} (`{creator.id}`)" if creator is not None else "❓ unknown creator"
+            kind = {discord.WebhookType.incoming: "incoming",
+                    discord.WebhookType.channel_follower: "channel follower"}.get(h.type, str(h.type))
+            foreign.append(f"⚠️ **{h.name}** → {ch} · by {who} · {kind} · {made}")
+
+    embed = discord.Embed(
+        title="🪝 Webhook Audit",
+        color=0xFF3B5C if foreign else 0x2ECC71,
+    )
+    if foreign:
+        embed.add_field(
+            name=f"⚠️ Not created by the bot ({len(foreign)})",
+            value="\n".join(foreign)[:1024] or "—",
+            inline=False,
+        )
+    if mine:
+        embed.add_field(
+            name=f"🤖 Bot-created / drip webhooks ({len(mine)})",
+            value="\n".join(mine)[:1024] or "—",
+            inline=False,
+        )
+    embed.set_footer(text=f"{len(hooks)} total · review anything flagged ⚠️ — "
+                          "webhook URLs post with no auth")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_synccat(message: discord.Message, rest: str):
     """Prefix-only, ADMIN/OWNER ONLY: _synccat <category id or name>
     Syncs every channel in the category to the category's permissions.
@@ -25202,6 +25263,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("synccat", "syncategory", "synccategory"):
         await _handle_synccat(message, rest)
+        return True
+    if cmd_name in ("webhookaudit", "webhooks", "hookaudit"):
+        await _handle_webhookaudit(message)
         return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
