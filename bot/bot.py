@@ -17643,7 +17643,8 @@ def _ghostlog_remember(message):
     """Snapshot ANY message in the watched channel — humans, bots, embeds, webhooks.
     No exceptions for anyone: owner, admins, mods all get logged the same."""
     try:
-        if message.channel.id != GHOSTLOG_WATCH_CHANNEL:
+        parent_id = getattr(message.channel, "parent_id", None)
+        if message.channel.id != GHOSTLOG_WATCH_CHANNEL and parent_id != GHOSTLOG_WATCH_CHANNEL:
             return
         if message.id in _ghostlog_cache:
             return  # already snapshotted (e.g. drip repost stored the real identity)
@@ -17669,6 +17670,33 @@ def _ghostlog_skip(message_id: int):
     _ghostlog_cache.pop(message_id, None)
     if len(_ghostlog_ignore) > 500:
         _ghostlog_ignore.clear()
+
+
+_ghostlog_backfilled = False
+
+
+async def _ghostlog_backfill(limit: int = 500):
+    """On startup, pre-load recent watch-channel history into the snapshot cache
+    so messages sent BEFORE this boot still get mirrored when deleted. (Messages
+    deleted while the bot was fully offline are gone forever — nothing saw them.)"""
+    global _ghostlog_backfilled
+    if _ghostlog_backfilled:
+        return  # on_ready re-fires on gateway reconnects; only backfill once
+    _ghostlog_backfilled = True
+    try:
+        ch = client.get_channel(GHOSTLOG_WATCH_CHANNEL)
+        if ch is None:
+            ch = await client.fetch_channel(GHOSTLOG_WATCH_CHANNEL)
+        n = 0
+        async for m in ch.history(limit=limit):
+            if m.id not in _ghostlog_cache and m.id not in _ghostlog_ignore:
+                _ghostlog_store(m.id, _ghostlog_snapshot(m))
+                n += 1
+        log.info("ghostlog: backfilled %d historical messages from watch channel", n)
+    except discord.Forbidden:
+        log.warning("ghostlog: backfill failed — bot lacks Read Message History in the watch channel")
+    except Exception as e:
+        log.warning("ghostlog: backfill failed: %s", e)
 
 
 async def _ghostlog_find_deleter(guild, channel_id: int, target_id: int):
@@ -17699,10 +17727,85 @@ async def _ghostlog_find_deleter(guild, channel_id: int, target_id: int):
     return None
 
 
+async def _handle_ghostlogtest(message):
+    """ADMIN/OWNER: _ghostlogtest — verifies every link in the ghostlog chain and
+    reports exactly which step fails, right in the channel."""
+    perms = getattr(message.author, "guild_permissions", None)
+    if not (perms and (perms.administrator or perms.manage_guild)):
+        return
+    report = []
+    # 1. code deployed?
+    report.append("✅ ghostlog code is live in this deploy")
+    # 2. watch channel resolvable?
+    watch = client.get_channel(GHOSTLOG_WATCH_CHANNEL)
+    report.append(f"{'✅' if watch else '❌'} watch channel {GHOSTLOG_WATCH_CHANNEL}: "
+                  f"{'#' + watch.name if watch else 'NOT FOUND — wrong ID or bot lacks View Channel'}")
+    # 3. this channel would be watched?
+    here = message.channel.id
+    parent = getattr(message.channel, "parent_id", None)
+    matches = here == GHOSTLOG_WATCH_CHANNEL or parent == GHOSTLOG_WATCH_CHANNEL
+    report.append(f"{'✅' if matches else '⚠️'} this channel ({here}) "
+                  f"{'IS watched' if matches else 'is NOT the watched channel — deletions here won&#x27;t log'}")
+    # 4. snapshot cache alive?
+    report.append(f"✅ snapshot cache: {len(_ghostlog_cache)} messages held")
+    # 5. audit log perm?
+    audit_ok = False
+    try:
+        if message.guild:
+            async for _ in message.guild.audit_logs(limit=1):
+                break
+            audit_ok = True
+    except discord.Forbidden:
+        pass
+    except Exception:
+        audit_ok = True  # non-perm error; don't false-alarm
+    report.append(f"{'✅' if audit_ok else '❌'} View Audit Log permission "
+                  f"{'OK' if audit_ok else 'MISSING — deleter attribution + bot-msg logging will fail'}")
+    # 6. can we actually post to the log channel? (the real test)
+    try:
+        ch = client.get_channel(GHOSTLOG_POST_CHANNEL) or await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
+        test_embed = discord.Embed(
+            title="🧪 Ghost Log Test",
+            description="If you can read this, the pipeline works. Delete a fresh message "
+                        f"in <#{GHOSTLOG_WATCH_CHANNEL}> to test the real thing.",
+            color=0x00D26A,
+        )
+        await ch.send(
+            content=f"<@&{GHOSTLOG_PING_ROLE}>",
+            embed=test_embed,
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+        )
+        report.append(f"✅ test post SENT to <#{GHOSTLOG_POST_CHANNEL}> — go check it (role ping included)")
+    except discord.Forbidden:
+        report.append(f"❌ FORBIDDEN posting to {GHOSTLOG_POST_CHANNEL} — bot lacks Send Messages/Embed Links there")
+    except discord.NotFound:
+        report.append(f"❌ log channel {GHOSTLOG_POST_CHANNEL} NOT FOUND — wrong ID?")
+    except Exception as e:
+        report.append(f"❌ post failed: `{e}`")
+    try:
+        await message.channel.send("\n".join(report).replace("&#x27;", "'"))
+    except Exception as e:
+        log.warning("ghostlogtest report send failed: %s", e)
+
+
+def _ghostlog_channel_matches(channel_id: int) -> bool:
+    """True if this channel IS the watched channel, or is a thread/forum post
+    whose parent is the watched channel."""
+    if channel_id == GHOSTLOG_WATCH_CHANNEL:
+        return True
+    ch = client.get_channel(channel_id)
+    parent_id = getattr(ch, "parent_id", None)
+    return parent_id == GHOSTLOG_WATCH_CHANNEL
+
+
 @client.event
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     try:
-        if payload.channel_id != GHOSTLOG_WATCH_CHANNEL:
+        # DEBUG: log every delete event we receive so Railway shows what's arriving.
+        # Remove/comment this line once ghostlog is confirmed working.
+        log.info("ghostlog DEBUG: raw delete event — msg=%s channel=%s guild=%s (watching %s)",
+                 payload.message_id, payload.channel_id, payload.guild_id, GHOSTLOG_WATCH_CHANNEL)
+        if not _ghostlog_channel_matches(payload.channel_id):
             return
         if payload.message_id in _ghostlog_ignore:
             _ghostlog_ignore.discard(payload.message_id)
@@ -22341,6 +22444,7 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
     log.info("ghostlog v3 armed: watching %s -> posting %s", GHOSTLOG_WATCH_CHANNEL, GHOSTLOG_POST_CHANNEL)
+    asyncio.create_task(_ghostlog_backfill())
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
     try:
@@ -24929,6 +25033,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("catastrophe", "ruin", "wipeout", "actofgod"):
         await _handle_catastrophe(message, rest)
+        return True
+    if cmd_name == "ghostlogtest":
+        await _handle_ghostlogtest(message)
         return True
     if cmd_name in ("dealerupgrades", "dealerupgrade", "dupgrades", "plugupgrades"):
         await _send_dealer_upgrades(message)
