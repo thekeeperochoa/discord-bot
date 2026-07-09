@@ -17586,6 +17586,72 @@ async def on_member_remove(member: discord.Member):
     except Exception as e:
         log.warning("on_member_remove welcome cleanup failed: %s", e)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🕵️ GHOST LOG — mirror deleted messages from one channel into a mod channel
+# Only fires for messages the bot has cached (i.e. sent while it was online).
+# Attachments can't be recovered after deletion — we log their filenames + URLs
+# (which usually 404 shortly after), plus a link to the original message.
+# ─────────────────────────────────────────────────────────────────────────────
+GHOSTLOG_WATCH_CHANNEL = 1246989137857220740   # watch deletions here
+GHOSTLOG_POST_CHANNEL  = 1271226075992555642   # repost them here
+GHOSTLOG_PING_ROLE     = 1242224627090980945   # ping this role
+
+
+@client.event
+async def on_message_delete(message: discord.Message):
+    try:
+        if message.channel.id != GHOSTLOG_WATCH_CHANNEL:
+            return
+        if message.author.bot:
+            return  # don't mirror the bot's own deletions
+
+        ch = client.get_channel(GHOSTLOG_POST_CHANNEL)
+        if ch is None:
+            try:
+                ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
+            except Exception as e:
+                log.warning("ghostlog: post channel fetch failed: %s", e)
+                return
+
+        content = (message.content or "").strip()
+        if len(content) > 3900:
+            content = content[:3900] + "…"
+
+        embed = discord.Embed(
+            title="🗑️ Message Deleted",
+            description=content or "_(no text — attachment or embed only)_",
+            color=0xFF3B5C,
+            timestamp=message.created_at,
+        )
+        embed.set_author(
+            name=f"{message.author.display_name} ({message.author})",
+            icon_url=message.author.display_avatar.url,
+        )
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Author ID", value=f"`{message.author.id}`", inline=True)
+
+        if message.attachments:
+            files = "\n".join(f"[{a.filename}]({a.url})" for a in message.attachments[:5])
+            embed.add_field(name="📎 Attachments", value=files[:1024], inline=False)
+
+        if message.stickers:
+            embed.add_field(
+                name="🏷️ Stickers",
+                value=", ".join(s.name for s in message.stickers)[:1024],
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Msg ID: {message.id} · sent")
+
+        await ch.send(
+            content=f"<@&{GHOSTLOG_PING_ROLE}>",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(
+                roles=True, users=False, everyone=False
+            ),
+        )
+    except Exception as e:
+        log.warning("ghostlog failed: %s", e)
 
 @client.event
 async def on_invite_create(invite: discord.Invite):
