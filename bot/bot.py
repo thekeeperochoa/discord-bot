@@ -17673,6 +17673,7 @@ def _ghostlog_skip(message_id: int):
 
 
 _ghostlog_backfilled = False
+_ghostlog_audit_primed = False
 
 
 async def _ghostlog_backfill(limit: int = 500):
@@ -17693,6 +17694,21 @@ async def _ghostlog_backfill(limit: int = 500):
                 _ghostlog_store(m.id, _ghostlog_snapshot(m))
                 n += 1
         log.info("ghostlog: backfilled %d historical messages from watch channel", n)
+
+        # Prime the audit-log counter cache: record current delete counts so any
+        # bump AFTER boot is reliably detected (discord increments counters on old
+        # entries instead of creating new ones for repeat deletions).
+        global _ghostlog_audit_primed
+        try:
+            guild = ch.guild
+            async for entry in guild.audit_logs(limit=50, action=discord.AuditLogAction.message_delete):
+                _ghostlog_audit_seen[entry.id] = getattr(entry.extra, "count", 1)
+            _ghostlog_audit_primed = True
+            log.info("ghostlog: audit counter cache primed (%d entries)", len(_ghostlog_audit_seen))
+        except discord.Forbidden:
+            log.warning("ghostlog: can't prime audit cache — bot lacks View Audit Log permission")
+        except Exception as e:
+            log.warning("ghostlog: audit prime failed: %s", e)
     except discord.Forbidden:
         log.warning("ghostlog: backfill failed — bot lacks Read Message History in the watch channel")
     except Exception as e:
@@ -17713,7 +17729,12 @@ async def _ghostlog_find_deleter(guild, channel_id: int, target_id: int):
             count = getattr(entry.extra, "count", 1)
             prev = _ghostlog_audit_seen.get(entry.id)
             age = (discord.utils.utcnow() - entry.created_at).total_seconds()
-            fresh = (prev is None and age <= 300) or (prev is not None and count > prev)
+            if _ghostlog_audit_primed:
+                # cache was primed at boot: any unseen entry or counter bump is fresh
+                fresh = (prev is None) or (count > prev)
+            else:
+                # unprimed fallback: only trust recent entries or witnessed bumps
+                fresh = (prev is None and age <= 300) or (prev is not None and count > prev)
             _ghostlog_audit_seen[entry.id] = count
             if len(_ghostlog_audit_seen) > 300:
                 for k in list(_ghostlog_audit_seen.keys())[:100]:
