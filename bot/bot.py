@@ -21596,12 +21596,14 @@ def _trend_arrow(momentum: float) -> str:
 @discord.app_commands.describe(
     ticker="(For Buy/Sell) Ticker symbol (e.g. DEGEN, WEED)",
     shares="(For Buy/Sell) Number of shares",
+    coins="(For Buy) Coin amount to invest — buys as many shares as that covers",
 )
 async def stocks_command(
     interaction: discord.Interaction,
     action: discord.app_commands.Choice[str],
     ticker: str = None,
     shares: int = None,
+    coins: int = None,
 ):
     data = _load_stocks()
     _stocks_init_if_needed(data)
@@ -21613,7 +21615,7 @@ async def stocks_command(
     elif action.value == "buy":
         if await gate_slash(interaction, "stocks"):
             return
-        await _stocks_buy(interaction, data, ticker, shares)
+        await _stocks_buy(interaction, data, ticker, shares, coins)
     elif action.value == "sell":
         await _stocks_sell(interaction, data, ticker, shares)
 
@@ -21684,7 +21686,7 @@ async def _stocks_portfolio(interaction, data):
     await interaction.response.send_message(embed=embed)
 
 
-async def _stocks_buy(interaction, data, ticker, shares):
+async def _stocks_buy(interaction, data, ticker, shares, coins=None):
     if not ticker:
         await interaction.response.send_message("❌ Specify `ticker:` (e.g. `DEGEN`).", ephemeral=True)
         return
@@ -21695,14 +21697,32 @@ async def _stocks_buy(interaction, data, ticker, shares):
             ephemeral=True,
         )
         return
+    if shares is not None and coins is not None:
+        await interaction.response.send_message(
+            "❌ Pick one: `shares:` (how many) **or** `coins:` (how much to invest) — not both.",
+            ephemeral=True,
+        )
+        return
+    price = _stock_price(ticker, data)
+    if coins is not None:
+        # Coin-amount investing: buy as many whole shares as the budget covers,
+        # fee included, so the total never exceeds what they typed.
+        if coins <= 0:
+            await interaction.response.send_message("❌ `coins:` must be positive.", ephemeral=True)
+            return
+        cost_per_share = price * (1 + STOCKS_BROKERAGE_FEE)
+        shares = int(coins // cost_per_share)
+        if shares <= 0:
+            await interaction.response.send_message(
+                f"❌ **{coins:,}** doesn't cover a single share of **${ticker}** — "
+                f"one share costs **{int(cost_per_share) + 1:,}** with the fee.",
+                ephemeral=True,
+            )
+            return
     if shares is None or shares <= 0:
         await interaction.response.send_message("❌ `shares:` must be positive.", ephemeral=True)
         return
-    if shares > 10000:
-        await interaction.response.send_message("❌ Max 10,000 shares per trade.", ephemeral=True)
-        return
     user = interaction.user
-    price = _stock_price(ticker, data)
     gross = int(price * shares)
     fee = int(gross * STOCKS_BROKERAGE_FEE)
     total = gross + fee
