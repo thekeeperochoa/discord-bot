@@ -16036,6 +16036,8 @@ async def handle_drip_repost(message: discord.Message) -> bool:
     try:
         if sent is not None:
             _remember_webhook_author(sent.id, message.author.id)
+            # Ghost log: track the repost under the REAL author's identity
+            _ghostlog_remember_webhook(sent, message.author)
     except Exception:
         pass
 
@@ -17589,40 +17591,67 @@ async def on_member_remove(member: discord.Member):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 🕵️ GHOST LOG — mirror deleted messages from one channel into a mod channel
-# v2: uses on_raw_message_delete + our own snapshot cache, so it fires even when
-# discord.py's internal cache (default 1000 msgs server-wide) has evicted the
-# message. Bot-initiated deletions (drip repost, secret commands) are excluded
-# via _ghostlog_ignore. Messages deleted while the bot was OFFLINE can never be
-# recovered — nothing was around to snapshot them.
+# v3: raw delete event + own snapshot cache + audit-log lookup for WHO deleted.
+# Covers everyone including the owner. Drip webhook reposts are snapshotted too,
+# so drip users' messages are still mirrored when deleted. Bot-intentional
+# deletions (drip original cleanup, secret commands) are excluded.
+# NOTE: self-deletes create NO audit log entry — absence of an entry means the
+# author deleted their own message. Bot needs the View Audit Log permission.
 # ─────────────────────────────────────────────────────────────────────────────
 GHOSTLOG_WATCH_CHANNEL = 1246989137857220740   # watch deletions here
 GHOSTLOG_POST_CHANNEL  = 1271226075992555642   # repost them here
 GHOSTLOG_PING_ROLE     = 1242224627090980945   # ping this role
 
-_ghostlog_cache: dict = {}      # message_id -> snapshot of watched-channel msgs
+_ghostlog_cache: dict = {}       # message_id -> snapshot of watched-channel msgs
 _GHOSTLOG_CACHE_MAX = 2000
-_ghostlog_ignore = set()        # message IDs the bot deleted on purpose
+_ghostlog_ignore = set()         # message IDs the bot deleted on purpose
+_ghostlog_audit_seen: dict = {}  # audit entry id -> last seen delete count
+
+
+def _ghostlog_snapshot(message, display_author=None):
+    """Build a snapshot dict for a message. display_author overrides shown identity
+    (used for drip webhook reposts, where the real human != the webhook author)."""
+    who = display_author or message.author
+    return {
+        "content": message.content or "",
+        "author_id": who.id,
+        "author_name": f"{who.display_name} ({who})",
+        "avatar": who.display_avatar.url,
+        "audit_target_id": message.author.id,  # id discord's audit log will reference
+        "created": message.created_at,
+        "attachments": [(a.filename, a.url) for a in message.attachments],
+        "stickers": [s.name for s in getattr(message, "stickers", [])],
+        "via_drip": display_author is not None,
+    }
+
+
+def _ghostlog_store(message_id: int, snap: dict):
+    _ghostlog_cache[message_id] = snap
+    if len(_ghostlog_cache) > _GHOSTLOG_CACHE_MAX:
+        for k in list(_ghostlog_cache.keys())[: _GHOSTLOG_CACHE_MAX // 5]:
+            _ghostlog_cache.pop(k, None)
 
 
 def _ghostlog_remember(message):
-    """Snapshot a human message in the watched channel so we can mirror it if deleted."""
+    """Snapshot a human message in the watched channel. No exceptions for anyone —
+    owner, admins, mods all get logged the same as everyone else."""
     try:
         if message.channel.id != GHOSTLOG_WATCH_CHANNEL or message.author.bot:
             return
-        _ghostlog_cache[message.id] = {
-            "content": message.content or "",
-            "author_id": message.author.id,
-            "author_name": f"{message.author.display_name} ({message.author})",
-            "avatar": message.author.display_avatar.url,
-            "created": message.created_at,
-            "attachments": [(a.filename, a.url) for a in message.attachments],
-            "stickers": [s.name for s in getattr(message, "stickers", [])],
-        }
-        if len(_ghostlog_cache) > _GHOSTLOG_CACHE_MAX:
-            for k in list(_ghostlog_cache.keys())[: _GHOSTLOG_CACHE_MAX // 5]:
-                _ghostlog_cache.pop(k, None)
+        _ghostlog_store(message.id, _ghostlog_snapshot(message))
     except Exception as e:
         log.warning("ghostlog remember failed: %s", e)
+
+
+def _ghostlog_remember_webhook(sent, original_author):
+    """Snapshot a drip webhook repost under the REAL author's identity, so drip
+    users' messages still get mirrored when deleted."""
+    try:
+        if sent is None or sent.channel.id != GHOSTLOG_WATCH_CHANNEL:
+            return
+        _ghostlog_store(sent.id, _ghostlog_snapshot(sent, display_author=original_author))
+    except Exception as e:
+        log.warning("ghostlog webhook remember failed: %s", e)
 
 
 def _ghostlog_skip(message_id: int):
@@ -17631,6 +17660,34 @@ def _ghostlog_skip(message_id: int):
     _ghostlog_cache.pop(message_id, None)
     if len(_ghostlog_ignore) > 500:
         _ghostlog_ignore.clear()
+
+
+async def _ghostlog_find_deleter(guild, channel_id: int, target_id: int):
+    """Check the audit log to see WHO deleted the message. Returns the deleter's
+    Member/User, or None if no entry (= the author self-deleted)."""
+    try:
+        await asyncio.sleep(1.2)  # audit log entries lag behind the gateway event
+        async for entry in guild.audit_logs(limit=15, action=discord.AuditLogAction.message_delete):
+            extra_ch = getattr(entry.extra, "channel", None)
+            if extra_ch is None or extra_ch.id != channel_id:
+                continue
+            if entry.target is None or entry.target.id != target_id:
+                continue
+            count = getattr(entry.extra, "count", 1)
+            prev = _ghostlog_audit_seen.get(entry.id)
+            age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+            fresh = (prev is None and age <= 300) or (prev is not None and count > prev)
+            _ghostlog_audit_seen[entry.id] = count
+            if len(_ghostlog_audit_seen) > 300:
+                for k in list(_ghostlog_audit_seen.keys())[:100]:
+                    _ghostlog_audit_seen.pop(k, None)
+            if fresh:
+                return entry.user
+    except discord.Forbidden:
+        log.warning("ghostlog: bot is missing the View Audit Log permission")
+    except Exception as e:
+        log.warning("ghostlog: audit log lookup failed: %s", e)
+    return None
 
 
 @client.event
@@ -17647,15 +17704,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         if snap is None and payload.cached_message is not None:
             m = payload.cached_message
             if not m.author.bot:
-                snap = {
-                    "content": m.content or "",
-                    "author_id": m.author.id,
-                    "author_name": f"{m.author.display_name} ({m.author})",
-                    "avatar": m.author.display_avatar.url,
-                    "created": m.created_at,
-                    "attachments": [(a.filename, a.url) for a in m.attachments],
-                    "stickers": [s.name for s in getattr(m, "stickers", [])],
-                }
+                snap = _ghostlog_snapshot(m)
         if snap is None:
             log.info("ghostlog: uncached delete %s (sent before bot came online?) — skipping", payload.message_id)
             return
@@ -17664,19 +17713,32 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         if ch is None:
             ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
 
+        # WHO deleted it? (audit log; no entry = author deleted their own message)
+        deleter_txt = "🫥 the author (self-delete)"
+        guild = client.get_guild(payload.guild_id) if payload.guild_id else None
+        if guild is not None:
+            deleter = await _ghostlog_find_deleter(guild, payload.channel_id, snap["audit_target_id"])
+            if deleter is not None:
+                deleter_txt = f"🔨 {deleter.mention} (`{deleter}`)"
+
         content = snap["content"].strip()
         if len(content) > 3900:
             content = content[:3900] + "…"
 
+        title = "🗑️ Message Deleted"
+        if snap.get("via_drip"):
+            title += " (drip repost)"
+
         embed = discord.Embed(
-            title="🗑️ Message Deleted",
+            title=title,
             description=content or "_(no text — attachment or embed only)_",
             color=0xFF3B5C,
             timestamp=snap["created"],
         )
         embed.set_author(name=snap["author_name"], icon_url=snap["avatar"])
-        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
         embed.add_field(name="Author", value=f"<@{snap['author_id']}>", inline=True)
+        embed.add_field(name="Deleted by", value=deleter_txt, inline=True)
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
 
         if snap["attachments"]:
             files = "\n".join(f"[{n}]({u})" for n, u in snap["attachments"][:5])
@@ -17692,7 +17754,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
         )
-        log.info("ghostlog: mirrored deletion %s", payload.message_id)
+        log.info("ghostlog: mirrored deletion %s (deleted by: %s)", payload.message_id, deleter_txt)
     except Exception as e:
         log.warning("ghostlog failed: %s", e)
 
@@ -22245,6 +22307,7 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
 @client.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
+    log.info("ghostlog v3 armed: watching %s -> posting %s", GHOSTLOG_WATCH_CHANNEL, GHOSTLOG_POST_CHANNEL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
     try:
