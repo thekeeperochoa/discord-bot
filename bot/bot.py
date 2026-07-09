@@ -16051,6 +16051,7 @@ async def handle_drip_repost(message: discord.Message) -> bool:
 
     # Delete the user's original message (best-effort)
     try:
+        _ghostlog_skip(message.id)   # intentional delete — don't mirror to ghost log
         await message.delete()
     except discord.Forbidden:
         log.warning("drip: missing Manage Messages to delete original in #%s", getattr(message.channel, "name", ""))
@@ -17588,32 +17589,82 @@ async def on_member_remove(member: discord.Member):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 🕵️ GHOST LOG — mirror deleted messages from one channel into a mod channel
-# Only fires for messages the bot has cached (i.e. sent while it was online).
-# Attachments can't be recovered after deletion — we log their filenames + URLs
-# (which usually 404 shortly after), plus a link to the original message.
+# v2: uses on_raw_message_delete + our own snapshot cache, so it fires even when
+# discord.py's internal cache (default 1000 msgs server-wide) has evicted the
+# message. Bot-initiated deletions (drip repost, secret commands) are excluded
+# via _ghostlog_ignore. Messages deleted while the bot was OFFLINE can never be
+# recovered — nothing was around to snapshot them.
 # ─────────────────────────────────────────────────────────────────────────────
 GHOSTLOG_WATCH_CHANNEL = 1246989137857220740   # watch deletions here
 GHOSTLOG_POST_CHANNEL  = 1271226075992555642   # repost them here
 GHOSTLOG_PING_ROLE     = 1242224627090980945   # ping this role
 
+_ghostlog_cache: dict = {}      # message_id -> snapshot of watched-channel msgs
+_GHOSTLOG_CACHE_MAX = 2000
+_ghostlog_ignore = set()        # message IDs the bot deleted on purpose
+
+
+def _ghostlog_remember(message):
+    """Snapshot a human message in the watched channel so we can mirror it if deleted."""
+    try:
+        if message.channel.id != GHOSTLOG_WATCH_CHANNEL or message.author.bot:
+            return
+        _ghostlog_cache[message.id] = {
+            "content": message.content or "",
+            "author_id": message.author.id,
+            "author_name": f"{message.author.display_name} ({message.author})",
+            "avatar": message.author.display_avatar.url,
+            "created": message.created_at,
+            "attachments": [(a.filename, a.url) for a in message.attachments],
+            "stickers": [s.name for s in getattr(message, "stickers", [])],
+        }
+        if len(_ghostlog_cache) > _GHOSTLOG_CACHE_MAX:
+            for k in list(_ghostlog_cache.keys())[: _GHOSTLOG_CACHE_MAX // 5]:
+                _ghostlog_cache.pop(k, None)
+    except Exception as e:
+        log.warning("ghostlog remember failed: %s", e)
+
+
+def _ghostlog_skip(message_id: int):
+    """Mark a message as intentionally deleted by the bot — don't mirror it."""
+    _ghostlog_ignore.add(message_id)
+    _ghostlog_cache.pop(message_id, None)
+    if len(_ghostlog_ignore) > 500:
+        _ghostlog_ignore.clear()
+
 
 @client.event
-async def on_message_delete(message: discord.Message):
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     try:
-        if message.channel.id != GHOSTLOG_WATCH_CHANNEL:
+        if payload.channel_id != GHOSTLOG_WATCH_CHANNEL:
             return
-        if message.author.bot:
-            return  # don't mirror the bot's own deletions
+        if payload.message_id in _ghostlog_ignore:
+            _ghostlog_ignore.discard(payload.message_id)
+            return
+
+        # Prefer our own snapshot; fall back to discord.py's cache if we missed it
+        snap = _ghostlog_cache.pop(payload.message_id, None)
+        if snap is None and payload.cached_message is not None:
+            m = payload.cached_message
+            if not m.author.bot:
+                snap = {
+                    "content": m.content or "",
+                    "author_id": m.author.id,
+                    "author_name": f"{m.author.display_name} ({m.author})",
+                    "avatar": m.author.display_avatar.url,
+                    "created": m.created_at,
+                    "attachments": [(a.filename, a.url) for a in m.attachments],
+                    "stickers": [s.name for s in getattr(m, "stickers", [])],
+                }
+        if snap is None:
+            log.info("ghostlog: uncached delete %s (sent before bot came online?) — skipping", payload.message_id)
+            return
 
         ch = client.get_channel(GHOSTLOG_POST_CHANNEL)
         if ch is None:
-            try:
-                ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
-            except Exception as e:
-                log.warning("ghostlog: post channel fetch failed: %s", e)
-                return
+            ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
 
-        content = (message.content or "").strip()
+        content = snap["content"].strip()
         if len(content) > 3900:
             content = content[:3900] + "…"
 
@@ -17621,35 +17672,27 @@ async def on_message_delete(message: discord.Message):
             title="🗑️ Message Deleted",
             description=content or "_(no text — attachment or embed only)_",
             color=0xFF3B5C,
-            timestamp=message.created_at,
+            timestamp=snap["created"],
         )
-        embed.set_author(
-            name=f"{message.author.display_name} ({message.author})",
-            icon_url=message.author.display_avatar.url,
-        )
-        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-        embed.add_field(name="Author ID", value=f"`{message.author.id}`", inline=True)
+        embed.set_author(name=snap["author_name"], icon_url=snap["avatar"])
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
+        embed.add_field(name="Author", value=f"<@{snap['author_id']}>", inline=True)
 
-        if message.attachments:
-            files = "\n".join(f"[{a.filename}]({a.url})" for a in message.attachments[:5])
+        if snap["attachments"]:
+            files = "\n".join(f"[{n}]({u})" for n, u in snap["attachments"][:5])
             embed.add_field(name="📎 Attachments", value=files[:1024], inline=False)
 
-        if message.stickers:
-            embed.add_field(
-                name="🏷️ Stickers",
-                value=", ".join(s.name for s in message.stickers)[:1024],
-                inline=False,
-            )
+        if snap["stickers"]:
+            embed.add_field(name="🏷️ Stickers", value=", ".join(snap["stickers"])[:1024], inline=False)
 
-        embed.set_footer(text=f"Msg ID: {message.id} · sent")
+        embed.set_footer(text=f"Msg ID: {payload.message_id}")
 
         await ch.send(
             content=f"<@&{GHOSTLOG_PING_ROLE}>",
             embed=embed,
-            allowed_mentions=discord.AllowedMentions(
-                roles=True, users=False, everyone=False
-            ),
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
         )
+        log.info("ghostlog: mirrored deletion %s", payload.message_id)
     except Exception as e:
         log.warning("ghostlog failed: %s", e)
 
@@ -23085,6 +23128,7 @@ async def _handle_secret_give(message: discord.Message, rest: str):
     async def _quiet(txt):
         try:
             m = await message.channel.send(txt)
+            _ghostlog_skip(message.id)  # intentional delete — don't mirror to ghost log
             await message.delete()      # remove the command so it stays secret
             await asyncio.sleep(6)
             await m.delete()            # remove the confirmation after a few seconds
@@ -25211,6 +25255,9 @@ async def on_message(message: discord.Message):
     # then record that a human is now the most recent speaker.
     _bot_spoke_last = last_speaker_was_bot.get(channel_id, False)
     last_speaker_was_bot[channel_id] = False
+
+    # ── 🕵️ Ghost Log: snapshot watched-channel messages in case they get deleted ──
+    _ghostlog_remember(message)
 
     # ── Anti-spam T2: scam-link auto-defense (new members only) ──
     try:
