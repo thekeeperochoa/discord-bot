@@ -17122,30 +17122,6 @@ async def _handle_catastrophe(message: discord.Message, rest: str):
         f"{'📬 They got the DM.' if dm_sent else '📪 (Their DMs are closed — no DM sent.)'}"
     )
 
-    log.info("CATASTROPHE by %s (%s) on %s (%s): wiped %d coins + %s",
-             message.author, message.author.id, target, uid, wipe, counts)
-    try:
-        cfg = load_config()
-        notif_id = get_notification_channel_id(cfg)
-        if notif_id:
-            ch = client.get_channel(int(notif_id))
-            if ch is not None:
-                audit = discord.Embed(
-                    title="🛡️ Catastrophe — Audit Log",
-                    description=(
-                        f"**Ran by:** {message.author.mention} (`{message.author.id}`)\n"
-                        f"**Target:** {target.mention} (`{uid}`)\n"
-                        f"**Event:** {title}\n"
-                        f"**Wiped:** {wipe:,} coins · {counts['businesses']} biz · "
-                        f"{counts['venues']} venues · {counts['properties']} properties"
-                    ),
-                    color=0x8B0000,
-                )
-                audit.set_footer(text="Destructive admin action — logged for accountability")
-                await ch.send(embed=audit, allowed_mentions=discord.AllowedMentions.none())
-    except Exception as e:
-        log.warning("catastrophe audit log failed: %s", e)
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
