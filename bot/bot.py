@@ -17171,6 +17171,7 @@ class ReadyCheckView(discord.ui.View):
         self.role_mention = role_mention
         self.locked = False
         self.joiners: list[int] = []       # user ids in join order
+        self.almost: list[int] = []        # user ids who hit "one sec"
         self.message: discord.Message | None = None
 
     def _joiners_embed(self, closed: bool = False) -> discord.Embed:
@@ -17183,10 +17184,20 @@ class ReadyCheckView(discord.ui.View):
         e.set_footer(text=f"{len(self.joiners)} joined")
         return e
 
+    def _almost_embed(self, closed: bool = False) -> discord.Embed:
+        if self.almost:
+            lines = "\n".join(f"{i+1}. <@{uid}>" for i, uid in enumerate(self.almost))
+        else:
+            lines = "_Nobody stalling..._"
+        title = "🔒 Almost Ready (closed)" if closed else "⏳ Almost Ready"
+        e = discord.Embed(title=title, description=lines, color=READY_EMBED_COLOR)
+        e.set_footer(text=f"{len(self.almost)} almost ready")
+        return e
+
     def _embeds(self, closed: bool = False) -> list:
         img = discord.Embed(color=READY_EMBED_COLOR)
         img.set_image(url=READY_GIF_URL)
-        return [img, self._joiners_embed(closed=closed)]
+        return [img, self._joiners_embed(closed=closed), self._almost_embed(closed=closed)]
 
     @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -17196,7 +17207,28 @@ class ReadyCheckView(discord.ui.View):
         if interaction.user.id in self.joiners:
             await interaction.response.send_message("You're already in. 👌", ephemeral=True)
             return
+        if interaction.user.id in self.almost:
+            self.almost.remove(interaction.user.id)   # promoted: almost -> joined
         self.joiners.append(interaction.user.id)
+        try:
+            await interaction.response.edit_message(embeds=self._embeds())
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
+    @discord.ui.button(label="one sec", emoji="⏳", style=discord.ButtonStyle.secondary)
+    async def one_sec_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.locked:
+            await interaction.response.send_message("🔒 This one's closed.", ephemeral=True)
+            return
+        if interaction.user.id in self.almost:
+            await interaction.response.send_message("Still waiting on you. ⏳", ephemeral=True)
+            return
+        if interaction.user.id in self.joiners:
+            self.joiners.remove(interaction.user.id)  # backed out: joined -> almost
+        self.almost.append(interaction.user.id)
         try:
             await interaction.response.edit_message(embeds=self._embeds())
         except Exception:
