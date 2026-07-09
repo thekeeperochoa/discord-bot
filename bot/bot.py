@@ -17612,6 +17612,11 @@ def _ghostlog_snapshot(message, display_author=None):
     """Build a snapshot dict for a message. display_author overrides shown identity
     (used for drip webhook reposts, where the real human != the webhook author)."""
     who = display_author or message.author
+    embeds = []
+    try:
+        embeds = [e.to_dict() for e in message.embeds[:3]]
+    except Exception:
+        pass
     return {
         "content": message.content or "",
         "author_id": who.id,
@@ -17621,6 +17626,8 @@ def _ghostlog_snapshot(message, display_author=None):
         "created": message.created_at,
         "attachments": [(a.filename, a.url) for a in message.attachments],
         "stickers": [s.name for s in getattr(message, "stickers", [])],
+        "embeds": embeds,
+        "is_bot": bool(getattr(message.author, "bot", False)),
         "via_drip": display_author is not None,
     }
 
@@ -17633,11 +17640,13 @@ def _ghostlog_store(message_id: int, snap: dict):
 
 
 def _ghostlog_remember(message):
-    """Snapshot a human message in the watched channel. No exceptions for anyone —
-    owner, admins, mods all get logged the same as everyone else."""
+    """Snapshot ANY message in the watched channel — humans, bots, embeds, webhooks.
+    No exceptions for anyone: owner, admins, mods all get logged the same."""
     try:
-        if message.channel.id != GHOSTLOG_WATCH_CHANNEL or message.author.bot:
+        if message.channel.id != GHOSTLOG_WATCH_CHANNEL:
             return
+        if message.id in _ghostlog_cache:
+            return  # already snapshotted (e.g. drip repost stored the real identity)
         _ghostlog_store(message.id, _ghostlog_snapshot(message))
     except Exception as e:
         log.warning("ghostlog remember failed: %s", e)
@@ -17702,24 +17711,32 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         # Prefer our own snapshot; fall back to discord.py's cache if we missed it
         snap = _ghostlog_cache.pop(payload.message_id, None)
         if snap is None and payload.cached_message is not None:
-            m = payload.cached_message
-            if not m.author.bot:
-                snap = _ghostlog_snapshot(m)
+            snap = _ghostlog_snapshot(payload.cached_message)
         if snap is None:
             log.info("ghostlog: uncached delete %s (sent before bot came online?) — skipping", payload.message_id)
             return
 
-        ch = client.get_channel(GHOSTLOG_POST_CHANNEL)
-        if ch is None:
-            ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
-
         # WHO deleted it? (audit log; no entry = author deleted their own message)
-        deleter_txt = "🫥 the author (self-delete)"
+        deleter = None
         guild = client.get_guild(payload.guild_id) if payload.guild_id else None
         if guild is not None:
             deleter = await _ghostlog_find_deleter(guild, payload.channel_id, snap["audit_target_id"])
-            if deleter is not None:
-                deleter_txt = f"🔨 {deleter.mention} (`{deleter}`)"
+
+        # Bot-authored messages (embeds, webhook posts): only mirror when a HUMAN
+        # deleted them. The bot constantly cleans up its own temp messages — a
+        # self-delete with no audit entry, or an entry pointing at the bot itself,
+        # is routine housekeeping and would flood the log channel.
+        if snap.get("is_bot") and (deleter is None or deleter.id == client.user.id):
+            log.info("ghostlog: bot self-cleanup %s — skipping", payload.message_id)
+            return
+
+        deleter_txt = "🫥 the author (self-delete)"
+        if deleter is not None:
+            deleter_txt = f"🔨 {deleter.mention} (`{deleter}`)"
+
+        ch = client.get_channel(GHOSTLOG_POST_CHANNEL)
+        if ch is None:
+            ch = await client.fetch_channel(GHOSTLOG_POST_CHANNEL)
 
         content = snap["content"].strip()
         if len(content) > 3900:
@@ -17728,10 +17745,18 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         title = "🗑️ Message Deleted"
         if snap.get("via_drip"):
             title += " (drip repost)"
+        elif snap.get("is_bot"):
+            title += " (bot message)"
+
+        desc = content
+        if not desc and snap.get("embeds"):
+            desc = "_(embed-only message — original embed(s) attached below)_"
+        elif not desc:
+            desc = "_(no text — attachment or sticker only)_"
 
         embed = discord.Embed(
             title=title,
-            description=content or "_(no text — attachment or embed only)_",
+            description=desc,
             color=0xFF3B5C,
             timestamp=snap["created"],
         )
@@ -17749,9 +17774,17 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 
         embed.set_footer(text=f"Msg ID: {payload.message_id}")
 
+        # Re-attach copies of the deleted message's own embeds (up to 3)
+        out_embeds = [embed]
+        for d in snap.get("embeds", [])[:3]:
+            try:
+                out_embeds.append(discord.Embed.from_dict(d))
+            except Exception:
+                pass
+
         await ch.send(
             content=f"<@&{GHOSTLOG_PING_ROLE}>",
-            embed=embed,
+            embeds=out_embeds[:10],
             allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
         )
         log.info("ghostlog: mirrored deletion %s (deleted by: %s)", payload.message_id, deleter_txt)
@@ -25299,6 +25332,9 @@ async def handle_coin_drop_grab(reaction: discord.Reaction, user):
 
 @client.event
 async def on_message(message: discord.Message):
+    # ── 🕵️ Ghost Log: snapshot EVERY watched-channel message (humans + bots)
+    # before any early-returns, so embed/bot deletions can be mirrored too.
+    _ghostlog_remember(message)
     if message.author.bot and message.author != client.user:
         last_channel_activity[str(message.channel.id)] = time.time()
         return
@@ -25318,9 +25354,6 @@ async def on_message(message: discord.Message):
     # then record that a human is now the most recent speaker.
     _bot_spoke_last = last_speaker_was_bot.get(channel_id, False)
     last_speaker_was_bot[channel_id] = False
-
-    # ── 🕵️ Ghost Log: snapshot watched-channel messages in case they get deleted ──
-    _ghostlog_remember(message)
 
     # ── Anti-spam T2: scam-link auto-defense (new members only) ──
     try:
