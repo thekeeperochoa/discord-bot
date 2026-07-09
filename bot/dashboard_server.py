@@ -35,8 +35,23 @@ MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/app/memory"))
 STATS_FILE = MEMORY_DIR / "stats.json"
 ECONOMY_FILE = MEMORY_DIR / "economy.json"
 
-DISCORD_API = "https://discord.com/api"
+# For the Custom Messages tab: the bot token (same one the bot logs in with) lets
+# the dashboard post messages AS THE BOT — so there's no sender attribution — and
+# read the guild's channels/roles/members for the pickers + @ autocomplete.
+BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "") or os.environ.get("BOT_TOKEN", "")
+GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "") or os.environ.get("GUILD_ID", "")
+
+DISCORD_API = "https://discord.com/api/v10"
 OAUTH_SCOPE = "identify"
+
+
+def _bot_headers() -> dict:
+    return {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+
+
+# Small in-process cache for guild metadata (channels/roles/members) so the
+# autocomplete doesn't hammer the Discord API on every keystroke.
+_guild_meta_cache = {"ts": 0.0, "data": None}
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
@@ -243,6 +258,124 @@ def api_stats():
     })
 
 
+
+# ── Custom Messages: guild metadata + send ────────────────────────────────
+@app.route("/api/guild-meta")
+def api_guild_meta():
+    """Channels, roles, and members for the Custom Messages pickers + @ autocomplete.
+    Admin-only. Cached ~60s to avoid hammering the Discord API."""
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 403
+    if not BOT_TOKEN or not GUILD_ID:
+        return jsonify({"error": "Bot token or guild ID not configured on the server."}), 500
+
+    import time as _time
+    now = _time.time()
+    if _guild_meta_cache["data"] is not None and now - _guild_meta_cache["ts"] < 60:
+        return jsonify(_guild_meta_cache["data"])
+
+    try:
+        # Channels
+        ch_resp = requests.get(
+            f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+            headers=_bot_headers(), timeout=15,
+        )
+        ch_resp.raise_for_status()
+        channels = [
+            {"id": c["id"], "name": c.get("name", "?"), "type": c.get("type")}
+            for c in ch_resp.json()
+            # 0 = text, 5 = announcement, 15 = forum — text-capable channels
+            if c.get("type") in (0, 5, 15)
+        ]
+
+        # Roles
+        role_resp = requests.get(
+            f"{DISCORD_API}/guilds/{GUILD_ID}/roles",
+            headers=_bot_headers(), timeout=15,
+        )
+        role_resp.raise_for_status()
+        roles = [
+            {"id": r["id"], "name": r.get("name", "?")}
+            for r in role_resp.json()
+            if r.get("name") != "@everyone"
+        ]
+
+        # Members (first 1000 — Discord caps a single call at 1000)
+        mem_resp = requests.get(
+            f"{DISCORD_API}/guilds/{GUILD_ID}/members?limit=1000",
+            headers=_bot_headers(), timeout=20,
+        )
+        members = []
+        if mem_resp.status_code == 200:
+            for m in mem_resp.json():
+                u = m.get("user", {})
+                if u.get("bot"):
+                    continue
+                members.append({
+                    "id": u.get("id"),
+                    "name": m.get("nick") or u.get("global_name") or u.get("username", "?"),
+                    "username": u.get("username", ""),
+                })
+
+        data = {"channels": channels, "roles": roles, "members": members}
+        _guild_meta_cache["data"] = data
+        _guild_meta_cache["ts"] = now
+        return jsonify(data)
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "?"
+        msg = "Missing GUILD MEMBERS INTENT for member list — enable it in the Developer Portal." if code == 403 else f"Discord API error ({code})."
+        log.warning("guild-meta failed: %s", e)
+        return jsonify({"error": msg}), 502
+    except Exception as e:
+        log.warning("guild-meta failed: %s", e)
+        return jsonify({"error": "Failed to load server data."}), 502
+
+
+@app.route("/api/send-message", methods=["POST"])
+def api_send_message():
+    """Send a message to a channel AS THE BOT (no sender attribution). Admin-only.
+    Mentions in the message content (<@id>, <@&roleid>) are allowed to ping."""
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 403
+    if not BOT_TOKEN:
+        return jsonify({"error": "Bot token not configured on the server."}), 500
+
+    body = request.get_json(silent=True) or {}
+    channel_id = str(body.get("channel_id", "")).strip()
+    message = body.get("message", "")
+
+    if not channel_id.isdigit():
+        return jsonify({"error": "Enter a valid channel ID (numbers only)."}), 400
+    if not isinstance(message, str) or not message.strip():
+        return jsonify({"error": "Message can't be empty."}), 400
+    if len(message) > 2000:
+        return jsonify({"error": "Message is over Discord's 2000-character limit."}), 400
+
+    payload = {
+        "content": message,
+        # Allow user + role pings to actually fire; block @everyone/@here for safety.
+        "allowed_mentions": {"parse": ["users", "roles"]},
+    }
+    try:
+        resp = requests.post(
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            headers=_bot_headers(), json=payload, timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            log.info("dashboard message sent to channel %s by admin %s",
+                     channel_id, session.get("user_id"))
+            return jsonify({"ok": True})
+        if resp.status_code == 403:
+            return jsonify({"error": "The bot can't send to that channel (missing permission)."}), 502
+        if resp.status_code == 404:
+            return jsonify({"error": "Channel not found — check the ID."}), 502
+        return jsonify({"error": f"Discord rejected the message ({resp.status_code})."}), 502
+    except Exception as e:
+        log.warning("send-message failed: %s", e)
+        return jsonify({"error": "Failed to reach Discord."}), 502
+
+
+
 # ── Pages ────────────────────────────────────────────────────────────────
 def _render_denied():
     return f"""
@@ -309,6 +442,26 @@ td { padding: 10px 4px; border-bottom: 1px solid var(--border); }
 .feed-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .loading { color: var(--muted); padding: 40px; text-align: center; }
 .error { color: var(--red); padding: 20px; }
+/* Custom Messages composer */
+.cm-label { display:block; color: var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+.cm-field { position: relative; }
+.cm-input { width:100%; background:#0e0e10; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:11px 12px; font-size:14px; font-family:inherit; resize:vertical; }
+.cm-input:focus { outline:none; border-color:var(--accent); }
+textarea.cm-input { line-height:1.5; }
+.cm-dropdown { position:absolute; left:0; right:0; top:calc(100% + 4px); background:var(--card); border:1px solid var(--border); border-radius:8px; max-height:240px; overflow-y:auto; z-index:50; display:none; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+.cm-dropdown.show { display:block; }
+.cm-mention-dropdown { top:auto; }
+.cm-item { padding:9px 12px; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:8px; }
+.cm-item:hover, .cm-item.active { background:var(--accent); color:#fff; }
+.cm-item .cm-tag { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+.cm-item.active .cm-tag, .cm-item:hover .cm-tag { color:#dfe0ff; }
+.cm-chosen { margin-top:8px; font-size:13px; color:var(--green); min-height:18px; }
+.cm-send { background:var(--accent); color:#fff; border:none; padding:10px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+.cm-send:hover { filter:brightness(1.1); }
+.cm-send:disabled { opacity:.5; cursor:not-allowed; }
+.cm-status { margin-top:12px; font-size:14px; min-height:20px; }
+.cm-status.ok { color:var(--green); }
+.cm-status.err { color:var(--red); }
 </style>
 </head>
 <body>
@@ -331,6 +484,7 @@ td { padding: 10px 4px; border-bottom: 1px solid var(--border); }
     <button class="tab-btn" data-tab="games">Games</button>
     <button class="tab-btn" data-tab="features">Features</button>
     <button class="tab-btn" data-tab="feed">Live Feed</button>
+    <button class="tab-btn" data-tab="messages">Custom Messages</button>
   </nav>
   <div id="tab-overview" class="tab-content active">
     <div class="grid">
@@ -369,6 +523,32 @@ td { padding: 10px 4px; border-bottom: 1px solid var(--border); }
   </div>
   <div id="tab-feed" class="tab-content">
     <div class="card"><h2>📰 Live Activity Feed</h2><div class="subtitle">Last 30 events. Refresh to update.</div><div id="activity-feed"></div></div>
+  </div>
+
+  <div id="tab-messages" class="tab-content">
+    <div class="card" style="max-width:720px;">
+      <h2>✉️ Send a Custom Message</h2>
+      <div class="subtitle">Posts as the bot — no sender shown. Type <strong>@</strong> to mention a role or user (searchable). Markdown works.</div>
+
+      <label class="cm-label">Channel</label>
+      <div class="cm-field">
+        <input id="cm-channel-search" class="cm-input" type="text" placeholder="Search channels or paste a channel ID…" autocomplete="off" />
+        <div id="cm-channel-list" class="cm-dropdown"></div>
+      </div>
+      <input id="cm-channel-id" type="hidden" />
+      <div id="cm-channel-chosen" class="cm-chosen"></div>
+
+      <label class="cm-label" style="margin-top:16px;">Message</label>
+      <div class="cm-field">
+        <textarea id="cm-message" class="cm-input" rows="7" placeholder="Type your message… use @ to mention. **bold**, *italic*, `code`, > quotes all work."></textarea>
+        <div id="cm-mention-list" class="cm-dropdown cm-mention-dropdown"></div>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+        <span id="cm-charcount" class="subtitle" style="margin:0;">0 / 2000</span>
+        <button id="cm-send-btn" class="cm-send">Send Message</button>
+      </div>
+      <div id="cm-status" class="cm-status"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -537,12 +717,197 @@ function chartOpts(forDoughnut) {
     },
   };
 }
+
+// ── Custom Messages tab ──────────────────────────────────────────────────
+let cmMeta = { channels: [], roles: [], members: [] };
+let cmMetaLoaded = false;
+
+async function loadGuildMeta() {
+  if (cmMetaLoaded) return;
+  try {
+    const r = await fetch('/api/guild-meta');
+    const d = await r.json();
+    if (d.error) { setCmStatus(d.error, false); return; }
+    cmMeta = d;
+    cmMetaLoaded = true;
+  } catch (e) { setCmStatus('Could not load server data.', false); }
+}
+
+function setCmStatus(msg, ok) {
+  const el = document.getElementById('cm-status');
+  el.textContent = msg || '';
+  el.className = 'cm-status ' + (msg ? (ok ? 'ok' : 'err') : '');
+}
+
+// ---- Channel picker ----
+function initChannelPicker() {
+  const search = document.getElementById('cm-channel-search');
+  const list = document.getElementById('cm-channel-list');
+  const hidden = document.getElementById('cm-channel-id');
+  const chosen = document.getElementById('cm-channel-chosen');
+
+  function render(filter) {
+    const f = (filter || '').toLowerCase().replace(/^#/, '');
+    let items = cmMeta.channels.filter(c => c.name.toLowerCase().includes(f)).slice(0, 50);
+    if (!items.length) { list.classList.remove('show'); return; }
+    list.innerHTML = items.map(c =>
+      `<div class="cm-item" data-id="${c.id}" data-name="${c.name}">#${c.name} <span class="cm-tag">${c.id}</span></div>`
+    ).join('');
+    list.classList.add('show');
+    list.querySelectorAll('.cm-item').forEach(it => {
+      it.onclick = () => {
+        hidden.value = it.dataset.id;
+        search.value = '#' + it.dataset.name;
+        chosen.textContent = '✓ Sending to #' + it.dataset.name;
+        list.classList.remove('show');
+      };
+    });
+  }
+  search.addEventListener('input', e => {
+    const v = e.target.value.trim();
+    // Allow pasting a raw numeric ID directly
+    if (/^\d{5,}$/.test(v)) { hidden.value = v; chosen.textContent = '✓ Using channel ID ' + v; list.classList.remove('show'); return; }
+    hidden.value = '';
+    chosen.textContent = '';
+    render(v);
+  });
+  search.addEventListener('focus', () => render(search.value));
+  document.addEventListener('click', e => { if (!list.contains(e.target) && e.target !== search) list.classList.remove('show'); });
+}
+
+// ---- @ mention autocomplete in the textarea ----
+function initMentionAutocomplete() {
+  const ta = document.getElementById('cm-message');
+  const menu = document.getElementById('cm-mention-list');
+  const charcount = document.getElementById('cm-charcount');
+  let activeIdx = 0;
+  let matches = [];
+  let triggerPos = -1;
+
+  function updateCount() {
+    const n = ta.value.length;
+    charcount.textContent = n + ' / 2000';
+    charcount.style.color = n > 2000 ? 'var(--red)' : 'var(--muted)';
+  }
+
+  function closeMenu() { menu.classList.remove('show'); matches = []; triggerPos = -1; }
+
+  function currentQuery() {
+    // Find an @ before the caret with no whitespace after it
+    const pos = ta.selectionStart;
+    const text = ta.value.slice(0, pos);
+    const at = text.lastIndexOf('@');
+    if (at === -1) return null;
+    const between = text.slice(at + 1);
+    if (/\s/.test(between)) return null;      // whitespace ends a mention query
+    return { at, query: between };
+  }
+
+  function renderMenu() {
+    const q = currentQuery();
+    if (q === null) { closeMenu(); return; }
+    triggerPos = q.at;
+    const query = q.query.toLowerCase();
+    const roles = cmMeta.roles
+      .filter(r => r.name.toLowerCase().includes(query))
+      .map(r => ({ type: 'role', id: r.id, name: r.name }));
+    const users = cmMeta.members
+      .filter(m => m.name.toLowerCase().includes(query) || (m.username || '').toLowerCase().includes(query))
+      .map(m => ({ type: 'user', id: m.id, name: m.name }));
+    // Roles first, then users, capped
+    matches = roles.concat(users).slice(0, 40);
+    if (!matches.length) { closeMenu(); return; }
+    activeIdx = 0;
+    menu.innerHTML = matches.map((m, i) =>
+      `<div class="cm-item ${i===0?'active':''}" data-i="${i}">` +
+      `${m.type==='role' ? '🏷️' : '👤'} ${m.name} <span class="cm-tag">${m.type}</span></div>`
+    ).join('');
+    menu.classList.add('show');
+    menu.querySelectorAll('.cm-item').forEach(it => {
+      it.onmousedown = (e) => { e.preventDefault(); choose(parseInt(it.dataset.i)); };
+    });
+  }
+
+  function choose(i) {
+    const m = matches[i];
+    if (!m) return;
+    const pos = ta.selectionStart;
+    const before = ta.value.slice(0, triggerPos);
+    const after = ta.value.slice(pos);
+    // Insert the real mention token so Discord actually pings
+    const token = m.type === 'role' ? `<@&${m.id}>` : `<@${m.id}>`;
+    ta.value = before + token + ' ' + after;
+    const newPos = (before + token + ' ').length;
+    ta.setSelectionRange(newPos, newPos);
+    ta.focus();
+    closeMenu();
+    updateCount();
+  }
+
+  ta.addEventListener('input', () => { updateCount(); renderMenu(); });
+  ta.addEventListener('keydown', (e) => {
+    if (!menu.classList.contains('show')) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx+1, matches.length-1); highlight(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx-1, 0); highlight(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); choose(activeIdx); }
+    else if (e.key === 'Escape') { closeMenu(); }
+  });
+  function highlight() {
+    menu.querySelectorAll('.cm-item').forEach((it, i) => it.classList.toggle('active', i === activeIdx));
+    const active = menu.querySelector('.cm-item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+  ta.addEventListener('blur', () => setTimeout(closeMenu, 150));
+  updateCount();
+}
+
+async function sendCustomMessage() {
+  const btn = document.getElementById('cm-send-btn');
+  const channelId = document.getElementById('cm-channel-id').value.trim();
+  const message = document.getElementById('cm-message').value;
+  if (!channelId) { setCmStatus('Pick a channel first.', false); return; }
+  if (!message.trim()) { setCmStatus('Write a message first.', false); return; }
+  if (message.length > 2000) { setCmStatus('Message is over 2000 characters.', false); return; }
+  btn.disabled = true; setCmStatus('Sending…', true);
+  try {
+    const r = await fetch('/api/send-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_id: channelId, message })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      setCmStatus('✓ Sent!', true);
+      document.getElementById('cm-message').value = '';
+      document.getElementById('cm-charcount').textContent = '0 / 2000';
+    } else {
+      setCmStatus(d.error || 'Failed to send.', false);
+    }
+  } catch (e) { setCmStatus('Failed to reach the server.', false); }
+  btn.disabled = false;
+}
+
+let cmInited = false;
+function initCustomMessages() {
+  if (cmInited) return;
+  cmInited = true;
+  initChannelPicker();
+  initMentionAutocomplete();
+  document.getElementById('cm-send-btn').addEventListener('click', sendCustomMessage);
+}
+
+
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    // Custom Messages tab: lazy-init the composer + load server data
+    if (btn.dataset.tab === 'messages') {
+      initCustomMessages();
+      loadGuildMeta();
+    }
   });
 });
 loadStats();
