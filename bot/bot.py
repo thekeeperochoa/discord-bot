@@ -17106,6 +17106,13 @@ def _ad_pick_outcome(venue: dict) -> str:
     return "flop"
 
 
+async def _handle_pp(message: discord.Message):
+    """Prefix: _pp — the classics never die. Random length, mobile-safe."""
+    # 0-20 ='s stays on one line even on phones (worst case ~25 chars)
+    shaft = "=" * random.randint(0, 20)
+    await message.channel.send(f"8{shaft}D")
+
+
 async def _handle_advertise(message: discord.Message, rest: str):
     """Prefix: _advertise [venue name or number] — run an ad campaign on your venue."""
     uid = str(message.author.id)
@@ -25465,6 +25472,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("advertise", "promote", "plaster", "ads"):
         await _handle_advertise(message, rest)
+        return True
+    if cmd_name == "pp":
+        await _handle_pp(message)
         return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
