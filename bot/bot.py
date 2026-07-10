@@ -14284,6 +14284,9 @@ def _venue_income_per_hour(venue: dict) -> int:
     # Celebrity night triple income
     if venue.get("celebrity_until", 0) > time.time():
         boost *= 3
+    # Packed night (ad campaign consolation win) — 1.5x
+    elif venue.get("packed_until", 0) > time.time():
+        boost *= 1.5
     return int(base * boost)
 
 
@@ -17070,6 +17073,175 @@ def _catastrophe_clear_assets(uid: int) -> dict:
     except Exception as e:
         log.warning("catastrophe re clear failed: %s", e)
     return counts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📣 AD CAMPAIGNS — _advertise <venue>: pay 4x hourly income for a 12h campaign.
+# One outcome rolls at a random point in the window (resolved by a sweeper loop
+# so railway restarts can't eat it): celebrity night, packed night, flop,
+# overcrowding fine, or raid. Crowds bring money AND heat.
+# ─────────────────────────────────────────────────────────────────────────────
+AD_CAMPAIGN_HOURS = 12
+AD_FEE_MULT = 4            # fee = 4x venue base hourly income
+AD_COOLDOWN_HOURS = 24
+AD_FINE_MULT = 2           # fine = 2x the ad fee
+
+
+def _ad_pick_outcome(venue: dict) -> str:
+    """Weighted outcome roll. Promoter boosts celebrity, bouncer tames raids."""
+    staff = venue.get("staff", [])
+    w = {"celebrity": 35, "packed": 25, "flop": 20, "fine": 12, "raid": 8}
+    if "promoter" in staff:
+        w["celebrity"] += 10
+        w["flop"] = max(0, w["flop"] - 10)
+    if "bouncer" in staff:
+        w["flop"] += w["raid"] - 4
+        w["raid"] = 4
+    roll = random.uniform(0, sum(w.values()))
+    acc = 0
+    for k, v in w.items():
+        acc += v
+        if roll <= acc:
+            return k
+    return "flop"
+
+
+async def _handle_advertise(message: discord.Message, rest: str):
+    """Prefix: _advertise [venue name or number] — run an ad campaign on your venue."""
+    uid = str(message.author.id)
+    data = _load_nightlife()
+    venues = data.get("users", {}).get(uid, [])
+    if not venues:
+        await message.channel.send("❌ You don't own any venues. `/buyvenue` first.")
+        return
+
+    rest = (rest or "").strip()
+    venue = None
+    if not rest:
+        if len(venues) == 1:
+            venue = venues[0]
+        else:
+            lines = "\n".join(f"`{i+1}.` {VENUE_TYPES.get(v['type'],{}).get('emoji','🏢')} {v['name']}"
+                               for i, v in enumerate(venues))
+            await message.channel.send(f"Which one? `_advertise <number or name>`\n{lines}")
+            return
+    elif rest.isdigit() and 1 <= int(rest) <= len(venues):
+        venue = venues[int(rest) - 1]
+    else:
+        low = rest.lower()
+        matches = [v for v in venues if low in v["name"].lower()]
+        if len(matches) == 1:
+            venue = matches[0]
+        elif len(matches) > 1:
+            await message.channel.send("⚠️ That matches multiple venues — use the number from `_advertise`.")
+            return
+    if venue is None:
+        await message.channel.send(f"❌ No venue found for `{rest}`.")
+        return
+
+    now = time.time()
+    info = VENUE_TYPES.get(venue["type"], {})
+    if venue.get("closed_until", 0) > now:
+        hrs = (venue["closed_until"] - now) / 3600
+        await message.channel.send(f"🚧 **{venue['name']}** is closed for another **{hrs:.1f}h** — can't advertise a shut door.")
+        return
+    if venue.get("ad_pending"):
+        await message.channel.send(f"📣 **{venue['name']}** already has a campaign running. Patience.")
+        return
+    if now - venue.get("last_ad", 0) < AD_COOLDOWN_HOURS * 3600:
+        left = (venue.get("last_ad", 0) + AD_COOLDOWN_HOURS * 3600 - now) / 3600
+        await message.channel.send(f"⏳ The city's tired of your flyers. Next campaign in **{left:.1f}h**.")
+        return
+
+    fee = int(info.get("income_per_hour", 1000)) * AD_FEE_MULT
+    if economy.balance(message.author.id) < fee:
+        await message.channel.send(f"❌ Campaign costs **{fee:,}** — you don't have it.")
+        return
+
+    economy.add(message.author.id, -fee, f"ad campaign: {venue['name']}")
+    venue["last_ad"] = now
+    venue["ad_pending"] = {
+        "resolve_at": now + random.uniform(1, AD_CAMPAIGN_HOURS - 1) * 3600,
+        "fee": fee,
+        "channel_id": message.channel.id,
+    }
+    _save_nightlife(data)
+
+    await message.channel.send(
+        f"📣 **{fee:,}** coins later, {info.get('emoji','🏢')} **{venue['name']}** is plastered across the city.\n"
+        f"Word's out. Something happens in the next **{AD_CAMPAIGN_HOURS} hours** — "
+        f"could be a celebrity, could be the fire marshal. 🎲"
+    )
+
+
+async def _ad_campaign_loop():
+    """Resolve due ad campaigns. Runs every 10 min; restart-safe (state on disk)."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            data = _load_nightlife()
+            dirty = False
+            now = time.time()
+            for uid, venues in data.get("users", {}).items():
+                for venue in venues:
+                    ad = venue.get("ad_pending")
+                    if not ad or ad.get("resolve_at", 0) > now:
+                        continue
+                    dirty = True
+                    venue.pop("ad_pending", None)
+                    fee = int(ad.get("fee", 0))
+                    info = VENUE_TYPES.get(venue["type"], {"emoji": "🏢"})
+                    outcome = _ad_pick_outcome(venue)
+
+                    if outcome == "celebrity":
+                        venue["celebrity_until"] = now + 6 * 3600
+                        text = (f"⭐ THE CAMPAIGN WORKED. A celebrity walked into "
+                                f"{info['emoji']} **{venue['name']}** — **3x income for 6 hours!**")
+                        dm = f"⭐ Your ad campaign paid off — celebrity night at {venue['name']}! 3x income for 6h."
+                    elif outcome == "packed":
+                        venue["packed_until"] = now + 12 * 3600
+                        text = (f"🔥 {info['emoji']} **{venue['name']}** is PACKED — the flyers worked. "
+                                f"**1.5x income for 12 hours.**")
+                        dm = f"🔥 Your ad campaign packed {venue['name']} — 1.5x income for 12h."
+                    elif outcome == "fine":
+                        fine = fee * AD_FINE_MULT
+                        economy.add(int(uid), -fine, f"overcrowding fine: {venue['name']}")
+                        text = (f"📋 The fire marshal counted heads at {info['emoji']} **{venue['name']}** — "
+                                f"way over capacity. **Fined {fine:,} coins.** The crowds you paid for snitched on you.")
+                        dm = f"📋 Overcrowding fine at {venue['name']}: -{fine:,} coins. Your own ad did this."
+                    elif outcome == "raid":
+                        venue["closed_until"] = now + 6 * 3600
+                        text = (f"🚨 Too loud, too visible — {info['emoji']} **{venue['name']}** got RAIDED. "
+                                f"**Closed for 6 hours.** Maybe don't put your address on every corner.")
+                        dm = f"🚨 Your ad campaign brought the wrong crowd — {venue['name']} raided, closed 6h."
+                    else:  # flop
+                        text = (f"🪦 {info['emoji']} **{venue['name']}**'s campaign flopped. "
+                                f"**{fee:,}** coins of flyers, zero pull. Brutal.")
+                        dm = f"🪦 Your {fee:,}-coin ad campaign for {venue['name']} flopped. Nothing happened."
+
+                    ch = client.get_channel(int(ad.get("channel_id", 0) or 0))
+                    if ch is None:
+                        try:
+                            cfg = load_config()
+                            notif_id = get_notification_channel_id(cfg)
+                            ch = client.get_channel(int(notif_id)) if notif_id else None
+                        except Exception:
+                            ch = None
+                    if ch is not None:
+                        try:
+                            await ch.send(f"<@{uid}> {text}",
+                                          allowed_mentions=discord.AllowedMentions(users=True))
+                        except Exception:
+                            pass
+                    try:
+                        await send_dm(int(uid), "business", content=dm)
+                    except Exception:
+                        pass
+            if dirty:
+                _save_nightlife(data)
+        except Exception as e:
+            log.warning("ad campaign loop error: %s", e)
+        await asyncio.sleep(600)
 
 
 async def _handle_webhookaudit(message: discord.Message):
@@ -22694,6 +22866,7 @@ async def on_ready():
     log.info("ghostlog v3 armed: watching %s -> posting %s", GHOSTLOG_WATCH_CHANNEL, GHOSTLOG_POST_CHANNEL)
     asyncio.create_task(_ghostlog_backfill())
     asyncio.create_task(_burner_sweeper())
+    asyncio.create_task(_ad_campaign_loop())
     log.info("burner armed: channel %s, ttl %ss", BURNER_CHANNEL_ID, BURNER_TTL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
@@ -25289,6 +25462,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("webhookaudit", "webhooks", "hookaudit"):
         await _handle_webhookaudit(message)
+        return True
+    if cmd_name in ("advertise", "promote", "plaster", "ads"):
+        await _handle_advertise(message, rest)
         return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
