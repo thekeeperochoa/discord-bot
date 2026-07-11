@@ -17106,6 +17106,59 @@ def _ad_pick_outcome(venue: dict) -> str:
     return "flop"
 
 
+async def _handle_tagcheck(message: discord.Message):
+    """Prefix: _dgen / _tags — count + list everyone wearing this server's guild tag."""
+    guild = message.guild
+    if guild is None:
+        return
+
+    wearing = []
+    tag_name = None
+    for m in guild.members:
+        pg = getattr(m, "primary_guild", None)
+        if pg is None:
+            continue
+        if getattr(pg, "id", None) == guild.id and getattr(pg, "identity_enabled", False):
+            wearing.append(m)
+            tag_name = getattr(pg, "tag", None) or tag_name
+
+    if not wearing:
+        await message.channel.send(
+            "Nobody's repping the tag right now. 💀 (or my library/cache can't see it — "
+            "tag data only shows for members I've fully loaded)"
+        )
+        return
+
+    wearing.sort(key=lambda m: m.display_name.lower())
+    lines = [f"`{i+1}.` {m.mention} — {m.display_name}" for i, m in enumerate(wearing)]
+
+    def _chunk(ls, cap=1024):
+        blocks, cur = [], ""
+        for ln in ls:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur); cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    blocks = _chunk(lines)
+    embed = discord.Embed(
+        title=f"🏷️ Repping the {tag_name or 'ＤＧＥＮ'} tag",
+        description=f"**{len(wearing)}** members flying the flag",
+        color=0x000000,
+    )
+    count = 0
+    for b in blocks:
+        if count >= 24:
+            break
+        embed.add_field(name="\u200b", value=b, inline=False)
+        count += 1
+    embed.set_footer(text=f"{len(wearing)} / {guild.member_count} members")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_pp(message: discord.Message):
     """Prefix: _pp — the classics never die. Random length, mobile-safe."""
     # 0-20 ='s stays on one line even on phones (worst case ~25 chars)
@@ -25475,6 +25528,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name == "pp":
         await _handle_pp(message)
+        return True
+    if cmd_name in ("dgen", "tags", "tagcheck", "reps"):
+        await _handle_tagcheck(message)
         return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
