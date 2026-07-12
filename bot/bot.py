@@ -17968,6 +17968,39 @@ def build_dm_onboarding_view(guild=None, cfg=None) -> discord.ui.View:
     return view
 
 
+async def _ping_new_member(member: discord.Member):
+    """Tag a newly-joined member in the designated channel, then delete the
+    ping after 5 minutes so the channel stays clean."""
+    NEW_MEMBER_PING_CHANNEL = 1525893581619855512
+    NEW_MEMBER_PING_TTL = 300  # 5 minutes
+    try:
+        ch = member.guild.get_channel(NEW_MEMBER_PING_CHANNEL)
+        if ch is None:
+            ch = await client.fetch_channel(NEW_MEMBER_PING_CHANNEL)
+        msg = await ch.send(
+            f"👋 {member.mention} just pulled up — welcome to the city.\n\n"
+            f"🏷️ **Equip our server tag** to unlock free perks (read above for the full list).\n"
+            f"Here's how: **Settings → Profiles → Server Tag → pick ＤＧＥＮ.**\n"
+            f"The perks turn on automatically the second the tag goes on.",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+
+        async def _fuse():
+            try:
+                await asyncio.sleep(NEW_MEMBER_PING_TTL)
+                await msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+            except Exception as e:
+                log.warning("new-member ping delete failed: %s", e)
+
+        asyncio.create_task(_fuse())
+    except discord.Forbidden:
+        log.warning("new-member ping: missing perms in channel %s", NEW_MEMBER_PING_CHANNEL)
+    except Exception as e:
+        log.warning("new-member ping failed: %s", e)
+
+
 async def handle_member_join(member: discord.Member):
     """Welcome a new member: public message + DM + starter coins."""
     if member.bot:
@@ -17975,6 +18008,9 @@ async def handle_member_join(member: discord.Member):
     cfg = load_config()
     if not cfg.get("welcome_enabled", True):
         return
+
+    # Tag the new member in the dedicated channel (auto-deletes after 5 min)
+    await _ping_new_member(member)
 
     # Grant starter coins
     starter = cfg.get("welcome_starter_coins", 500)
