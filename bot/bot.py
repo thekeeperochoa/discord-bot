@@ -1809,6 +1809,31 @@ def get_perk(user_id: int, key: str) -> int:
     return u.get("perks", {}).get(key, 0)
 
 
+# ── 🏷️ Tag Member Perks ──────────────────────────────────────────────────────
+# Members wearing the server's guild tag (and thus holding TAG_ROLE_ID) get
+# baked-in perks: bigger daily, no drip/stock fees, better luck. Live role check
+# so perks turn on/off exactly when the role does — no separate opt-in state.
+TAG_PERK_DAILY_BONUS_PCT = 25     # +25% on daily claim
+TAG_PERK_DRIP_DISCOUNT = 0.25     # 25% off every drip item
+TAG_PERK_ROB_LUCK = 10            # +10 percentage points to positive-outcome rolls
+
+
+def has_tag_perks(user_id: int) -> bool:
+    """True if the user currently holds the tag rep role in any guild the bot sees.
+    Cheap: iterates cached members, no API calls."""
+    try:
+        for g in client.guilds:
+            role = g.get_role(TAG_ROLE_ID)
+            if role is None:
+                continue
+            m = g.get_member(int(user_id))
+            if m is not None and role in m.roles:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def get_user_badges(user_id: int) -> str:
     """Return a string of emoji badges the user has earned."""
     earned = _get_achievements(user_id)
@@ -4669,6 +4694,10 @@ async def daily_command(interaction: discord.Interaction):
     await asyncio.sleep(0.7)
     # Apply daily_bonus_pct perk + passive_income perk
     bonus_pct = get_perk(user.id, "daily_bonus_pct")
+    # 🏷️ Tag members get a daily boost
+    _tag_perk = has_tag_perks(user.id)
+    if _tag_perk:
+        bonus_pct += TAG_PERK_DAILY_BONUS_PCT
     # Permanent prestige bonus stacks on top
     try:
         bonus_pct += prestige_daily_bonus_pct(user.id)
@@ -4950,7 +4979,10 @@ async def rob_command(interaction: discord.Interaction, target: discord.Member):
         )
         return
 
-    if random.random() < ROB_SUCCESS_CHANCE + (HEIST_TOOLS_BOOST if has_heist_tools(user.id) else 0):
+    _rob_chance = ROB_SUCCESS_CHANCE + (HEIST_TOOLS_BOOST if has_heist_tools(user.id) else 0)
+    if has_tag_perks(user.id):
+        _rob_chance += TAG_PERK_ROB_LUCK / 100  # 🏷️ tag members rob luckier
+    if random.random() < _rob_chance:
         # Success
         pct = random.uniform(ROB_PERCENT_MIN, ROB_PERCENT_MAX)
         amount = max(1, int(target_bal * pct))
@@ -16217,11 +16249,15 @@ async def _send_drip_shop(message: discord.Message, rest: str = ""):
 
 def _charge_drip(uid: int, key: str) -> tuple[bool, str]:
     it = DRIP_ITEMS[key]
-    if economy.balance(uid) < it["price"]:
-        return False, f"❌ **{it['name']}** costs **{it['price']:,}**. You have **{economy.balance(uid):,}**."
-    economy.add(uid, -it["price"], f"drip:{key}")
+    price = it["price"]
+    tag_perk = has_tag_perks(uid)
+    if tag_perk:
+        price = int(price * (1 - TAG_PERK_DRIP_DISCOUNT))  # 🏷️ tag discount
+    if economy.balance(uid) < price:
+        return False, f"❌ **{it['name']}** costs **{price:,}**. You have **{economy.balance(uid):,}**."
+    economy.add(uid, -price, f"drip:{key}")
     try:
-        track_economy_event("spent", it["price"])
+        track_economy_event("spent", price)
     except Exception:
         pass
     return True, ""
@@ -17104,6 +17140,92 @@ def _ad_pick_outcome(venue: dict) -> str:
         if roll <= acc:
             return k
     return "flop"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏷️ TAG ROLE SYNC — everyone wearing the server's guild tag gets the rep role;
+# take the tag off, lose the role. Two layers: a sweep loop every 10 min covers
+# everyone (including members already wearing it before this deployed), and an
+# opportunistic check on every message makes it feel instant for active users.
+# ─────────────────────────────────────────────────────────────────────────────
+TAG_ROLE_ID = 1525884309267812552
+
+
+def _wears_guild_tag(member) -> bool:
+    pg = getattr(member, "primary_guild", None)
+    return (pg is not None
+            and getattr(pg, "id", None) == member.guild.id
+            and getattr(pg, "identity_enabled", False))
+
+
+async def _tagrole_fix(member) -> bool:
+    """Add/remove the tag role for one member if out of sync. Returns True if changed."""
+    role = member.guild.get_role(TAG_ROLE_ID)
+    if role is None or member.bot:
+        return False
+    wearing = _wears_guild_tag(member)
+    has = role in member.roles
+    try:
+        if wearing and not has:
+            await member.add_roles(role, reason="wearing the guild tag")
+            return True
+        if not wearing and has:
+            await member.remove_roles(role, reason="stopped wearing the guild tag")
+            return True
+    except discord.Forbidden:
+        log.warning("tagrole: missing perms (Manage Roles / role hierarchy) for %s", member)
+    except Exception as e:
+        log.warning("tagrole: fix failed for %s: %s", member, e)
+    return False
+
+
+async def _tagrole_sweep_loop():
+    """Full-membership sync every 10 minutes — catches existing wearers on first
+    run after deploy, and anyone the opportunistic check missed."""
+    await client.wait_until_ready()
+    first = True
+    while not client.is_closed():
+        try:
+            changed = 0
+            for guild in client.guilds:
+                if guild.get_role(TAG_ROLE_ID) is None:
+                    continue
+                for m in guild.members:
+                    if await _tagrole_fix(m):
+                        changed += 1
+                        await asyncio.sleep(0.5)  # rate-limit courtesy
+            if changed or first:
+                log.info("tagrole sweep: %d role changes", changed)
+            first = False
+        except Exception as e:
+            log.warning("tagrole sweep error: %s", e)
+        await asyncio.sleep(600)
+
+
+async def _handle_perks(message: discord.Message):
+    """Prefix: _perks — show the tag-member perks and whether you have them."""
+    has = has_tag_perks(message.author.id)
+    status = "✅ **ACTIVE** — you're repping the tag" if has else "🔒 **LOCKED** — put on the ＤＧＥＮ guild tag to unlock"
+    embed = discord.Embed(
+        title="🏷️ Tag Member Perks",
+        description=f"{status}\n\nWear the server's guild tag and these turn on automatically:",
+        color=0x2ECC71 if has else 0x000000,
+    )
+    embed.add_field(
+        name="💰 Economy",
+        value=(f"• **+{TAG_PERK_DAILY_BONUS_PCT}%** on every `/daily`\n"
+               f"• **{int(TAG_PERK_DRIP_DISCOUNT*100)}% off** everything in the drip shop\n"
+               f"• **Zero brokerage fees** on `/stocks` (normally {int(STOCKS_BROKERAGE_FEE*100)}%)"),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎲 Edge",
+        value=(f"• **+{TAG_PERK_ROB_LUCK}%** better odds on risk plays\n"
+               f"• The 🏷️ rep role + its flex in `_dgen`"),
+        inline=False,
+    )
+    embed.set_footer(text="Take the tag off and the perks turn off. Simple as that.")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _handle_tagcheck(message: discord.Message):
@@ -22086,7 +22208,8 @@ async def _stocks_buy(interaction, data, ticker, shares, coins=None):
         if coins <= 0:
             await interaction.response.send_message("❌ `coins:` must be positive.", ephemeral=True)
             return
-        cost_per_share = price * (1 + STOCKS_BROKERAGE_FEE)
+        _fee_rate = 0.0 if has_tag_perks(interaction.user.id) else STOCKS_BROKERAGE_FEE
+        cost_per_share = price * (1 + _fee_rate)
         shares = int(coins // cost_per_share)
         if shares <= 0:
             await interaction.response.send_message(
@@ -22100,7 +22223,7 @@ async def _stocks_buy(interaction, data, ticker, shares, coins=None):
         return
     user = interaction.user
     gross = int(price * shares)
-    fee = int(gross * STOCKS_BROKERAGE_FEE)
+    fee = 0 if has_tag_perks(user.id) else int(gross * STOCKS_BROKERAGE_FEE)
     total = gross + fee
     if economy.balance(user.id) < total:
         await interaction.response.send_message(
@@ -22151,7 +22274,7 @@ async def _stocks_sell(interaction, data, ticker, shares):
         return
     price = _stock_price(ticker, data)
     gross = int(price * shares)
-    fee = int(gross * STOCKS_BROKERAGE_FEE)
+    fee = 0 if has_tag_perks(user.id) else int(gross * STOCKS_BROKERAGE_FEE)
     net = gross - fee
     holdings[ticker] = owned - shares
     if holdings[ticker] == 0:
@@ -22927,6 +23050,7 @@ async def on_ready():
     asyncio.create_task(_ghostlog_backfill())
     asyncio.create_task(_burner_sweeper())
     asyncio.create_task(_ad_campaign_loop())
+    asyncio.create_task(_tagrole_sweep_loop())
     log.info("burner armed: channel %s, ttl %ss", BURNER_CHANNEL_ID, BURNER_TTL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
@@ -25532,6 +25656,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("dgen", "tags", "tagcheck", "reps"):
         await _handle_tagcheck(message)
         return True
+    if cmd_name in ("perks", "tagperks", "myperks"):
+        await _handle_perks(message)
+        return True
     if cmd_name == "ghostlogtest":
         await _handle_ghostlogtest(message)
         return True
@@ -25942,6 +26069,9 @@ async def on_message(message: discord.Message):
     _ghostlog_remember(message)
     # ── 🔥 Burner channel: arm the 5-minute self-destruct (bots burn too) ──
     _burner_schedule(message)
+    # ── 🏷️ Tag role: instant sync for active members (no-op unless mismatched) ──
+    if isinstance(message.author, discord.Member) and not message.author.bot:
+        asyncio.create_task(_tagrole_fix(message.author))
     if message.author.bot and message.author != client.user:
         last_channel_activity[str(message.channel.id)] = time.time()
         return
