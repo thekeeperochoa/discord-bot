@@ -331,10 +331,106 @@ def api_guild_meta():
         return jsonify({"error": "Failed to load server data."}), 502
 
 
+def _build_embed(data: dict):
+    """Turn the dashboard's embed form data into a Discord embed dict.
+    Returns the embed dict on success, or an error string on validation failure.
+    Enforces Discord's field limits so the API doesn't reject the whole send."""
+    embed = {}
+
+    def _clip(s, n):
+        s = str(s or "").strip()
+        return s[:n]
+
+    title = _clip(data.get("title"), 256)
+    if title:
+        embed["title"] = title
+
+    desc = _clip(data.get("description"), 4096)
+    if desc:
+        embed["description"] = desc
+
+    url = str(data.get("url") or "").strip()
+    if url:
+        if not url.startswith(("http://", "https://")):
+            return "Embed title URL must start with http:// or https://"
+        embed["url"] = url
+
+    # Color: accept "#RRGGBB", "RRGGBB", or an int
+    color = data.get("color")
+    if color not in (None, "", "#"):
+        try:
+            if isinstance(color, str):
+                color = int(color.lstrip("#"), 16)
+            embed["color"] = int(color) & 0xFFFFFF
+        except (ValueError, TypeError):
+            return "Embed color must be a hex code like #f1c40f."
+
+    author_name = _clip(data.get("author_name"), 256)
+    if author_name:
+        author = {"name": author_name}
+        a_icon = str(data.get("author_icon") or "").strip()
+        if a_icon.startswith(("http://", "https://")):
+            author["icon_url"] = a_icon
+        embed["author"] = author
+
+    footer_text = _clip(data.get("footer_text"), 2048)
+    if footer_text:
+        footer = {"text": footer_text}
+        f_icon = str(data.get("footer_icon") or "").strip()
+        if f_icon.startswith(("http://", "https://")):
+            footer["icon_url"] = f_icon
+        embed["footer"] = footer
+
+    image = str(data.get("image") or "").strip()
+    if image:
+        if not image.startswith(("http://", "https://")):
+            return "Image URL must start with http:// or https://"
+        embed["image"] = {"url": image}
+
+    thumb = str(data.get("thumbnail") or "").strip()
+    if thumb:
+        if not thumb.startswith(("http://", "https://")):
+            return "Thumbnail URL must start with http:// or https://"
+        embed["thumbnail"] = {"url": thumb}
+
+    if data.get("timestamp"):
+        from datetime import datetime, timezone
+        embed["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    fields_in = data.get("fields")
+    if isinstance(fields_in, list):
+        fields = []
+        for f in fields_in[:25]:  # Discord caps at 25 fields
+            if not isinstance(f, dict):
+                continue
+            name = _clip(f.get("name"), 256)
+            value = _clip(f.get("value"), 1024)
+            if not name or not value:
+                continue  # skip incomplete rows silently
+            fields.append({"name": name, "value": value, "inline": bool(f.get("inline"))})
+        if fields:
+            embed["fields"] = fields
+
+    # An embed with nothing in it is meaningless
+    if not embed:
+        return "Your embed is empty — add a title, description, or at least one field."
+
+    # Discord's 6000-char total budget across an embed
+    total = len(embed.get("title", "")) + len(embed.get("description", "")) \
+        + len(embed.get("author", {}).get("name", "")) \
+        + len(embed.get("footer", {}).get("text", "")) \
+        + sum(len(f["name"]) + len(f["value"]) for f in embed.get("fields", []))
+    if total > 6000:
+        return f"Embed is too long ({total}/6000 characters total). Trim it down."
+
+    return embed
+
+
 @app.route("/api/send-message", methods=["POST"])
 def api_send_message():
     """Send a message to a channel AS THE BOT (no sender attribution). Admin-only.
-    Mentions in the message content (<@id>, <@&roleid>) are allowed to ping."""
+    Supports plain content, a rich embed, or both. Mentions in the content
+    (<@id>, <@&roleid>) are allowed to ping."""
     if not is_admin():
         return jsonify({"error": "unauthorized"}), 403
     if not BOT_TOKEN:
@@ -343,19 +439,33 @@ def api_send_message():
     body = request.get_json(silent=True) or {}
     channel_id = str(body.get("channel_id", "")).strip()
     message = body.get("message", "")
+    embed_in = body.get("embed") if isinstance(body.get("embed"), dict) else None
 
     if not channel_id.isdigit():
         return jsonify({"error": "Enter a valid channel ID (numbers only)."}), 400
-    if not isinstance(message, str) or not message.strip():
-        return jsonify({"error": "Message can't be empty."}), 400
-    if len(message) > 2000:
+
+    # Build the embed (if provided and non-empty) BEFORE requiring message text,
+    # since an embed-only message is valid.
+    embed = None
+    if embed_in:
+        embed = _build_embed(embed_in)
+        if isinstance(embed, str):  # _build_embed returns an error string on failure
+            return jsonify({"error": embed}), 400
+
+    has_text = isinstance(message, str) and message.strip()
+    if not has_text and not embed:
+        return jsonify({"error": "Add a message, an embed, or both."}), 400
+    if isinstance(message, str) and len(message) > 2000:
         return jsonify({"error": "Message is over Discord's 2000-character limit."}), 400
 
     payload = {
-        "content": message,
         # Allow user + role pings to actually fire; block @everyone/@here for safety.
         "allowed_mentions": {"parse": ["users", "roles"]},
     }
+    if has_text:
+        payload["content"] = message
+    if embed:
+        payload["embeds"] = [embed]
     try:
         resp = requests.post(
             f"{DISCORD_API}/channels/{channel_id}/messages",
@@ -460,6 +570,46 @@ textarea.cm-input { line-height:1.5; }
 .cm-send:hover { filter:brightness(1.1); }
 .cm-send:disabled { opacity:.5; cursor:not-allowed; }
 .cm-status { margin-top:12px; font-size:14px; min-height:20px; }
+/* Embed builder */
+.eb-toggle { display:flex; align-items:center; gap:8px; margin-top:20px; padding-top:16px; border-top:1px solid var(--border); cursor:pointer; user-select:none; }
+.eb-toggle input { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+.eb-toggle span { font-size:14px; font-weight:600; }
+.eb-body { display:none; margin-top:14px; gap:20px; }
+.eb-body.open { display:grid; grid-template-columns:1fr 300px; }
+@media (max-width:800px){ .eb-body.open { grid-template-columns:1fr; } }
+.eb-form { display:flex; flex-direction:column; gap:12px; }
+.eb-row { display:flex; gap:10px; }
+.eb-row > * { flex:1; }
+.eb-mini { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:4px; display:block; }
+.eb-in { width:100%; background:#0e0e10; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 10px; font-size:13px; font-family:inherit; resize:vertical; }
+.eb-color { display:flex; align-items:center; gap:8px; }
+.eb-color input[type=color] { width:38px; height:34px; padding:0; border:1px solid var(--border); border-radius:6px; background:#0e0e10; cursor:pointer; }
+.eb-field { border:1px solid var(--border); border-radius:8px; padding:10px; background:#0e0e10; }
+.eb-field .eb-row { align-items:flex-end; }
+.eb-inline-lbl { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); white-space:nowrap; flex:0 0 auto; }
+.eb-fieldbtns { display:flex; gap:8px; margin-top:4px; }
+.eb-btn { background:transparent; border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; }
+.eb-btn:hover { border-color:var(--accent); }
+.eb-del { color:var(--red); border-color:transparent; padding:4px 8px; }
+/* Live preview — mimics a Discord embed */
+.eb-preview-wrap { position:sticky; top:20px; align-self:start; }
+.eb-preview-lbl { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:8px; }
+.eb-preview { background:#313338; border-radius:4px; padding:2px 0; }
+.eb-embed { border-left:4px solid #4f545c; background:#2b2d31; border-radius:4px; padding:12px 16px 16px; margin:2px 0; max-width:100%; position:relative; }
+.eb-embed .pv-author { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:#fff; margin-bottom:6px; }
+.eb-embed .pv-author img { width:20px; height:20px; border-radius:50%; }
+.eb-embed .pv-title { color:#00a8fc; font-size:15px; font-weight:600; margin-bottom:6px; word-wrap:break-word; }
+.eb-embed .pv-desc { color:#dbdee1; font-size:13px; line-height:1.4; white-space:pre-wrap; word-wrap:break-word; margin-bottom:6px; }
+.eb-embed .pv-fields { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; }
+.eb-embed .pv-field { min-width:100%; }
+.eb-embed .pv-field.inline { min-width:30%; flex:1; }
+.eb-embed .pv-fname { color:#fff; font-size:13px; font-weight:600; margin-bottom:2px; }
+.eb-embed .pv-fval { color:#dbdee1; font-size:13px; white-space:pre-wrap; }
+.eb-embed .pv-thumb { position:absolute; top:12px; right:16px; width:60px; height:60px; border-radius:6px; object-fit:cover; }
+.eb-embed .pv-image { width:100%; border-radius:6px; margin-top:8px; }
+.eb-embed .pv-footer { display:flex; align-items:center; gap:8px; font-size:11px; color:#949ba4; margin-top:8px; }
+.eb-embed .pv-footer img { width:18px; height:18px; border-radius:50%; }
+.eb-empty { color:#949ba4; font-size:12px; padding:16px; text-align:center; }
 .cm-status.ok { color:var(--green); }
 .cm-status.err { color:var(--red); }
 </style>
@@ -545,6 +695,61 @@ textarea.cm-input { line-height:1.5; }
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
         <span id="cm-charcount" class="subtitle" style="margin:0;">0 / 2000</span>
+      </div>
+
+      <!-- EMBED BUILDER -->
+      <label class="eb-toggle" for="eb-enable">
+        <input type="checkbox" id="eb-enable" />
+        <span>📐 Add an embed</span>
+      </label>
+      <div id="eb-body" class="eb-body">
+        <div class="eb-form">
+          <div>
+            <label class="eb-mini">Color</label>
+            <div class="eb-color">
+              <input type="color" id="eb-color" value="#f1c40f" />
+              <input type="text" id="eb-color-hex" class="eb-in" value="#f1c40f" style="max-width:110px;" />
+              <span class="subtitle" style="margin:0;">left bar color</span>
+            </div>
+          </div>
+          <div class="eb-row">
+            <div><label class="eb-mini">Author name</label><input type="text" id="eb-author" class="eb-in" placeholder="e.g. Jordan Belfort" /></div>
+            <div><label class="eb-mini">Author icon URL</label><input type="text" id="eb-author-icon" class="eb-in" placeholder="https://…" /></div>
+          </div>
+          <div class="eb-row">
+            <div><label class="eb-mini">Title</label><input type="text" id="eb-title" class="eb-in" placeholder="Embed title" /></div>
+            <div><label class="eb-mini">Title link URL</label><input type="text" id="eb-url" class="eb-in" placeholder="https://… (optional)" /></div>
+          </div>
+          <div>
+            <label class="eb-mini">Description</label>
+            <textarea id="eb-desc" class="eb-in" rows="4" placeholder="Main body text. Markdown works — **bold**, *italic*, links, etc."></textarea>
+          </div>
+          <div class="eb-row">
+            <div><label class="eb-mini">Thumbnail URL</label><input type="text" id="eb-thumb" class="eb-in" placeholder="https://… (small, top-right)" /></div>
+            <div><label class="eb-mini">Big image URL</label><input type="text" id="eb-image" class="eb-in" placeholder="https://… (full width)" /></div>
+          </div>
+          <div class="eb-row">
+            <div><label class="eb-mini">Footer text</label><input type="text" id="eb-footer" class="eb-in" placeholder="Footer line" /></div>
+            <div><label class="eb-mini">Footer icon URL</label><input type="text" id="eb-footer-icon" class="eb-in" placeholder="https://…" /></div>
+          </div>
+          <label class="eb-inline-lbl"><input type="checkbox" id="eb-timestamp" /> Add current timestamp</label>
+
+          <div>
+            <label class="eb-mini">Fields</label>
+            <div id="eb-fields"></div>
+            <div class="eb-fieldbtns">
+              <button type="button" class="eb-btn" id="eb-add-field">+ Add field</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="eb-preview-wrap">
+          <div class="eb-preview-lbl">Live preview</div>
+          <div class="eb-preview"><div id="eb-preview-inner"><div class="eb-empty">Your embed preview shows here as you type.</div></div></div>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:16px;">
         <button id="cm-send-btn" class="cm-send">Send Message</button>
       </div>
       <div id="cm-status" class="cm-status"></div>
@@ -861,19 +1066,45 @@ function initMentionAutocomplete() {
   updateCount();
 }
 
+function ebCollect() {
+  // Returns an embed object, or null if the builder is off / empty.
+  if (!document.getElementById('eb-enable').checked) return null;
+  const v = id => (document.getElementById(id).value || '').trim();
+  const fields = [];
+  document.querySelectorAll('#eb-fields .eb-field').forEach(row => {
+    const name = row.querySelector('.eb-fname-in').value.trim();
+    const value = row.querySelector('.eb-fval-in').value.trim();
+    const inline = row.querySelector('.eb-finline').checked;
+    if (name && value) fields.push({ name, value, inline });
+  });
+  const e = {
+    title: v('eb-title'), description: v('eb-desc'), url: v('eb-url'),
+    color: v('eb-color-hex'),
+    author_name: v('eb-author'), author_icon: v('eb-author-icon'),
+    footer_text: v('eb-footer'), footer_icon: v('eb-footer-icon'),
+    image: v('eb-image'), thumbnail: v('eb-thumb'),
+    timestamp: document.getElementById('eb-timestamp').checked,
+    fields
+  };
+  // If nothing meaningful was entered, treat as no embed
+  const hasContent = e.title || e.description || fields.length || e.author_name || e.image;
+  return hasContent ? e : null;
+}
+
 async function sendCustomMessage() {
   const btn = document.getElementById('cm-send-btn');
   const channelId = document.getElementById('cm-channel-id').value.trim();
   const message = document.getElementById('cm-message').value;
+  const embed = ebCollect();
   if (!channelId) { setCmStatus('Pick a channel first.', false); return; }
-  if (!message.trim()) { setCmStatus('Write a message first.', false); return; }
+  if (!message.trim() && !embed) { setCmStatus('Write a message or build an embed first.', false); return; }
   if (message.length > 2000) { setCmStatus('Message is over 2000 characters.', false); return; }
   btn.disabled = true; setCmStatus('Sending…', true);
   try {
     const r = await fetch('/api/send-message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel_id: channelId, message })
+      body: JSON.stringify({ channel_id: channelId, message, embed })
     });
     const d = await r.json();
     if (d.ok) {
@@ -887,12 +1118,95 @@ async function sendCustomMessage() {
   btn.disabled = false;
 }
 
+function ebAddField(name, value, inline) {
+  const wrap = document.getElementById('eb-fields');
+  const row = document.createElement('div');
+  row.className = 'eb-field';
+  row.style.marginBottom = '8px';
+  row.innerHTML =
+    '<div class="eb-row">'
+    + '<div style="flex:2"><label class="eb-mini">Field name</label><input type="text" class="eb-in eb-fname-in" placeholder="Name" /></div>'
+    + '<label class="eb-inline-lbl"><input type="checkbox" class="eb-finline" /> Inline</label>'
+    + '<button type="button" class="eb-btn eb-del" title="Remove">✕</button>'
+    + '</div>'
+    + '<div style="margin-top:6px"><label class="eb-mini">Field value</label><textarea class="eb-in eb-fval-in" rows="2" placeholder="Value"></textarea></div>';
+  wrap.appendChild(row);
+  if (name) row.querySelector('.eb-fname-in').value = name;
+  if (value) row.querySelector('.eb-fval-in').value = value;
+  if (inline) row.querySelector('.eb-finline').checked = true;
+  row.querySelector('.eb-del').addEventListener('click', () => { row.remove(); ebRenderPreview(); });
+  row.querySelectorAll('input, textarea').forEach(el => el.addEventListener('input', ebRenderPreview));
+  ebRenderPreview();
+}
+
+function ebEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function ebRenderPreview() {
+  const e = ebCollect();
+  const box = document.getElementById('eb-preview-inner');
+  if (!e) { box.innerHTML = '<div class="eb-empty">Your embed preview shows here as you type.</div>'; return; }
+  let hex = (document.getElementById('eb-color-hex').value || '#4f545c').trim();
+  if (!/^#?[0-9a-fA-F]{6}$/.test(hex)) hex = '#4f545c';
+  if (hex[0] !== '#') hex = '#' + hex;
+  let h = '<div class="eb-embed" style="border-left-color:' + hex + '">';
+  if (e.thumbnail) h += '<img class="pv-thumb" src="' + ebEsc(e.thumbnail) + '" onerror="this.style.display=\'none\'" />';
+  if (e.author_name) {
+    h += '<div class="pv-author">';
+    if (e.author_icon) h += '<img src="' + ebEsc(e.author_icon) + '" onerror="this.style.display=\'none\'" />';
+    h += ebEsc(e.author_name) + '</div>';
+  }
+  if (e.title) h += '<div class="pv-title">' + ebEsc(e.title) + '</div>';
+  if (e.description) h += '<div class="pv-desc">' + ebEsc(e.description) + '</div>';
+  if (e.fields && e.fields.length) {
+    h += '<div class="pv-fields">';
+    e.fields.forEach(f => {
+      h += '<div class="pv-field' + (f.inline ? ' inline' : '') + '">'
+        + '<div class="pv-fname">' + ebEsc(f.name) + '</div>'
+        + '<div class="pv-fval">' + ebEsc(f.value) + '</div></div>';
+    });
+    h += '</div>';
+  }
+  if (e.image) h += '<img class="pv-image" src="' + ebEsc(e.image) + '" onerror="this.style.display=\'none\'" />';
+  if (e.footer_text || e.timestamp) {
+    h += '<div class="pv-footer">';
+    if (e.footer_icon) h += '<img src="' + ebEsc(e.footer_icon) + '" onerror="this.style.display=\'none\'" />';
+    let ft = ebEsc(e.footer_text);
+    if (e.timestamp) ft += (ft ? ' • ' : '') + new Date().toLocaleString();
+    h += ft + '</div>';
+  }
+  h += '</div>';
+  box.innerHTML = h;
+}
+
+function initEmbedBuilder() {
+  const enable = document.getElementById('eb-enable');
+  const body = document.getElementById('eb-body');
+  enable.addEventListener('change', () => {
+    body.classList.toggle('open', enable.checked);
+    ebRenderPreview();
+  });
+  // keep the two color inputs in sync
+  const colr = document.getElementById('eb-color');
+  const hex = document.getElementById('eb-color-hex');
+  colr.addEventListener('input', () => { hex.value = colr.value; ebRenderPreview(); });
+  hex.addEventListener('input', () => {
+    let val = hex.value.trim(); if (val[0] !== '#') val = '#' + val;
+    if (/^#[0-9a-fA-F]{6}$/.test(val)) colr.value = val;
+    ebRenderPreview();
+  });
+  document.getElementById('eb-add-field').addEventListener('click', () => ebAddField());
+  ['eb-title','eb-desc','eb-url','eb-author','eb-author-icon','eb-footer','eb-footer-icon','eb-image','eb-thumb']
+    .forEach(id => document.getElementById(id).addEventListener('input', ebRenderPreview));
+  document.getElementById('eb-timestamp').addEventListener('change', ebRenderPreview);
+}
+
 let cmInited = false;
 function initCustomMessages() {
   if (cmInited) return;
   cmInited = true;
   initChannelPicker();
   initMentionAutocomplete();
+  initEmbedBuilder();
   document.getElementById('cm-send-btn').addEventListener('click', sendCustomMessage);
 }
 
