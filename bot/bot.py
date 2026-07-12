@@ -18494,6 +18494,62 @@ async def on_invite_delete(invite: discord.Invite):
         pass
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ MEMBER ACCEPT LOG — record every member approved through the join gate:
+# who they are, when they were accepted, account age, and who invited them.
+# NOTE: Discord provides NO way for a bot to see WHICH moderator clicked approve
+# (there's no gateway event or audit-log action for join-request approval), so
+# this logs the acceptance itself + the inviter, which is the useful signal.
+# ─────────────────────────────────────────────────────────────────────────────
+MEMBER_ACCEPT_LOG_CHANNEL = 1525920922719223939
+
+
+async def _log_member_accepted(member, inviter_id, counted: bool):
+    ch = client.get_channel(MEMBER_ACCEPT_LOG_CHANNEL)
+    if ch is None:
+        try:
+            ch = await client.fetch_channel(MEMBER_ACCEPT_LOG_CHANNEL)
+        except Exception as e:
+            log.warning("accept-log: channel fetch failed: %s", e)
+            return
+
+    now = discord.utils.utcnow()
+    acct_age_days = (now - member.created_at).days
+    age_flag = " ⚠️ new account" if acct_age_days <= 7 else ""
+
+    embed = discord.Embed(
+        title="✅ Member Accepted",
+        description=f"{member.mention} passed the join gate.",
+        color=0x2ECC71,
+        timestamp=now,
+    )
+    embed.set_author(name=f"{member.display_name} ({member})",
+                     icon_url=member.display_avatar.url)
+    embed.add_field(name="Member", value=f"`{member}`\n`{member.id}`", inline=True)
+    embed.add_field(
+        name="Accepted",
+        value=f"<t:{int(now.timestamp())}:F>\n(<t:{int(now.timestamp())}:R>)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Account age",
+        value=f"<t:{int(member.created_at.timestamp())}:R>{age_flag}",
+        inline=True,
+    )
+
+    if inviter_id:
+        inv_line = f"<@{inviter_id}> (`{inviter_id}`)"
+        inv_line += "\n✅ invite counted" if counted else "\n➖ invite not counted (young/risky)"
+    else:
+        inv_line = "❓ unknown (joined via vanity, direct, or an untracked invite)"
+    embed.add_field(name="Invited by", value=inv_line, inline=False)
+
+    embed.set_footer(text=f"Member #{member.guild.member_count}")
+
+    await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    log.info("accept-log: %s accepted (inviter=%s, counted=%s)", member.id, inviter_id, counted)
+
+
 @client.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     """When a member loses the booster role, remove their signature perk."""
@@ -18503,7 +18559,19 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         now_pending = getattr(after, "pending", False)
         if was_pending and not now_pending:
             # Member was just approved through the application gate.
+            # Grab the inviter attribution BEFORE commit clears the provisional store.
+            _accept_inviter_id = None
+            try:
+                _prov = _load_invites().get("provisional", {}).get(str(after.id))
+                if _prov:
+                    _accept_inviter_id = _prov.get("inviter_id")
+            except Exception:
+                pass
             counted = await commit_provisional_attribution(after)
+            try:
+                await _log_member_accepted(after, _accept_inviter_id, counted)
+            except Exception as e:
+                log.warning("accept-log failed: %s", e)
             # Run the welcome flow + anti-spam now that they're a full member,
             # regardless of whether the invite counted.
             try:
