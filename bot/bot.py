@@ -17224,7 +17224,7 @@ async def _handle_perks(message: discord.Message):
                f"• The 🏷️ rep role + its flex in `_dgen`"),
         inline=False,
     )
-    embed.set_footer(text="Take the tag off and the perks turn off. Simple as that.")
+    embed.set_footer(text="Take the tag off and the perks turn off · Supporter tiers? type _support")
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -24613,7 +24613,7 @@ ASK_SYSTEM_PROMPT = (
 # prefix-only command here makes the bot's AI aware of it automatically.
 ASK_PREFIX_ONLY_COMMANDS = {
     # Supporter / meta
-    "perks", "supporter", "donate", "vip", "help", "commands", "cmds",
+    "perks", "tagperks", "myperks", "support", "supporter", "donate", "vip", "patreon", "help", "commands", "cmds",
     "docs", "guide", "manual", "employees", "staff", "workers",
     "credits", "supporters", "flex", "flexline", "setclass", "classification",
     "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
@@ -25376,6 +25376,7 @@ async def _send_perks_embed(message: discord.Message):
         description=(
             "_Keep the bot running and unlock cosmetic perks._\n"
             "All perks are **cosmetic only** — no pay-to-win, the economy stays fair.\n"
+            "_(Looking for the free perks from wearing the tag? type_ `_perks`_.)_\n"
             f"\n**[→ Become a supporter]({PATREON_URL})**"
         ),
         color=0xF1C40F,
@@ -25459,7 +25460,7 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             track_command_use(cmd_name, message.author.id)
         except Exception:
             pass
-    if cmd_name in ("perks", "supporter", "donate", "vip"):
+    if cmd_name in ("support", "supporter", "donate", "vip", "patreon"):
         await _send_perks_embed(message)
         return True
     if cmd_name in ("help", "commands", "cmds"):
