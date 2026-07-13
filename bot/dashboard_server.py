@@ -604,6 +604,147 @@ def api_send_message():
         return jsonify({"error": "Failed to reach Discord."}), 502
 
 
+def _parse_message_link(link: str):
+    """Pull (channel_id, message_id) from a Discord message link or a
+    'channel-message' / 'channel/message' shorthand. Returns (ch, msg) or (None, None)."""
+    import re
+    link = (link or "").strip()
+    # Full link: https://discord.com/channels/<guild>/<channel>/<message>
+    m = re.search(r"/channels/\d+/(\d+)/(\d+)", link)
+    if m:
+        return m.group(1), m.group(2)
+    # Shorthand: "channelid-messageid" (Discord's "Copy ID" pair) or "channelid/messageid"
+    m = re.match(r"^\s*(\d+)[-/](\d+)\s*$", link)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+@app.route("/api/load-message", methods=["POST"])
+def api_load_message():
+    """Fetch an existing message (by link) so the composer can edit it.
+    Only messages the BOT authored are editable — flagged in the response."""
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 403
+    if not BOT_TOKEN:
+        return jsonify({"error": "Bot token not configured."}), 500
+
+    body = request.get_json(silent=True) or {}
+    ch_id, msg_id = _parse_message_link(body.get("link", ""))
+    if not ch_id or not msg_id:
+        return jsonify({"error": "Paste a valid message link (right-click a message → Copy Message Link)."}), 400
+
+    try:
+        resp = requests.get(
+            f"{DISCORD_API}/channels/{ch_id}/messages/{msg_id}",
+            headers=_bot_headers(), timeout=15,
+        )
+        if resp.status_code == 403:
+            return jsonify({"error": "The bot can't read that channel (missing permission)."}), 502
+        if resp.status_code == 404:
+            return jsonify({"error": "Message not found — check the link, or the bot may not be in that channel."}), 502
+        if resp.status_code != 200:
+            return jsonify({"error": f"Discord rejected the request ({resp.status_code})."}), 502
+        msg = resp.json()
+    except Exception as e:
+        log.warning("load-message failed: %s", e)
+        return jsonify({"error": "Failed to reach Discord."}), 502
+
+    # Is this message authored by the bot? (only then can we edit it)
+    bot_id = None
+    try:
+        me = requests.get(f"{DISCORD_API}/users/@me", headers=_bot_headers(), timeout=10)
+        if me.status_code == 200:
+            bot_id = me.json().get("id")
+    except Exception:
+        pass
+    author_id = (msg.get("author") or {}).get("id")
+    editable = bool(bot_id and author_id == bot_id)
+
+    # Convert the first embed (if any) back into the dashboard's form shape
+    embed_form = None
+    embeds = msg.get("embeds") or []
+    if embeds:
+        e = embeds[0]
+        embed_form = {
+            "title": e.get("title", ""),
+            "description": e.get("description", ""),
+            "url": e.get("url", ""),
+            "color": ("#%06x" % e["color"]) if isinstance(e.get("color"), int) else "",
+            "author_name": (e.get("author") or {}).get("name", ""),
+            "author_icon": (e.get("author") or {}).get("icon_url", ""),
+            "footer_text": (e.get("footer") or {}).get("text", ""),
+            "footer_icon": (e.get("footer") or {}).get("icon_url", ""),
+            "image": (e.get("image") or {}).get("url", ""),
+            "thumbnail": (e.get("thumbnail") or {}).get("url", ""),
+            "timestamp": bool(e.get("timestamp")),
+            "fields": [{"name": f.get("name", ""), "value": f.get("value", ""),
+                        "inline": bool(f.get("inline"))} for f in (e.get("fields") or [])],
+        }
+
+    return jsonify({
+        "ok": True,
+        "channel_id": ch_id,
+        "message_id": msg_id,
+        "content": msg.get("content", ""),
+        "embed": embed_form,
+        "editable": editable,
+        "author_name": (msg.get("author") or {}).get("username", "someone"),
+    })
+
+
+@app.route("/api/edit-message", methods=["POST"])
+def api_edit_message():
+    """Edit an existing bot message (content and/or embed) via its link."""
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 403
+    if not BOT_TOKEN:
+        return jsonify({"error": "Bot token not configured."}), 500
+
+    body = request.get_json(silent=True) or {}
+    ch_id, msg_id = _parse_message_link(body.get("link", ""))
+    if not ch_id or not msg_id:
+        return jsonify({"error": "Missing or invalid message link."}), 400
+
+    message = body.get("message", "")
+    embed_in = body.get("embed") if isinstance(body.get("embed"), dict) else None
+    embed = None
+    if embed_in:
+        embed = _build_embed(embed_in)
+        if isinstance(embed, str):
+            return jsonify({"error": embed}), 400
+
+    has_text = isinstance(message, str) and message.strip()
+    if not has_text and not embed:
+        return jsonify({"error": "The edited message can't be empty — keep some text or an embed."}), 400
+    if isinstance(message, str) and len(message) > 2000:
+        return jsonify({"error": "Message is over Discord's 2000-character limit."}), 400
+
+    # PATCH: set content and embeds explicitly. Empty content clears text;
+    # empty embeds list clears the embed.
+    payload = {
+        "content": message if has_text else "",
+        "embeds": [embed] if embed else [],
+        "allowed_mentions": {"parse": ["users", "roles"]},
+    }
+    try:
+        resp = requests.patch(
+            f"{DISCORD_API}/channels/{ch_id}/messages/{msg_id}",
+            headers=_bot_headers(), json=payload, timeout=15,
+        )
+        if resp.status_code == 200:
+            log.info("dashboard message %s edited by admin %s", msg_id, session.get("user_id"))
+            return jsonify({"ok": True})
+        if resp.status_code == 403:
+            return jsonify({"error": "Can't edit that message — the bot can only edit messages IT sent."}), 502
+        if resp.status_code == 404:
+            return jsonify({"error": "Message not found — check the link."}), 502
+        return jsonify({"error": f"Discord rejected the edit ({resp.status_code})."}), 502
+    except Exception as e:
+        log.warning("edit-message failed: %s", e)
+        return jsonify({"error": "Failed to reach Discord."}), 502
+
+
 
 # ── Pages ────────────────────────────────────────────────────────────────
 def _render_denied():
@@ -689,6 +830,7 @@ textarea.cm-input { line-height:1.5; }
 .cm-send:hover { filter:brightness(1.1); }
 .cm-send:disabled { opacity:.5; cursor:not-allowed; }
 .cm-status { margin-top:12px; font-size:14px; min-height:20px; }
+.cm-editbox { margin:14px 0 4px; padding:12px 14px; background:#0e0e10; border:1px solid var(--border); border-radius:10px; }
 /* Voice analytics tab */
 .vx-live-banner { margin-bottom:16px; }
 .vx-live-card { background:linear-gradient(135deg,rgba(0,168,252,.12),rgba(61,255,154,.06)); border:1px solid rgba(0,168,252,.3); border-radius:12px; padding:14px 18px; margin-bottom:10px; }
@@ -846,6 +988,22 @@ textarea.cm-input { line-height:1.5; }
     <div class="card" style="max-width:720px;">
       <h2>✉️ Send a Custom Message</h2>
       <div class="subtitle">Posts as the bot — no sender shown. Type <strong>@</strong> to mention a role or user (searchable). Markdown works.</div>
+
+      <!-- EDIT MODE -->
+      <div class="cm-editbox">
+        <label class="eb-toggle" for="cm-edit-enable" style="margin-top:0;border-top:none;padding-top:0;">
+          <input type="checkbox" id="cm-edit-enable" />
+          <span>✏️ Edit an existing message instead</span>
+        </label>
+        <div id="cm-edit-panel" style="display:none; margin-top:10px;">
+          <label class="cm-label">Message link</label>
+          <div class="cm-field" style="display:flex; gap:8px;">
+            <input id="cm-edit-link" class="cm-input" type="text" placeholder="Paste message link (right-click message → Copy Message Link)" style="flex:1;" />
+            <button id="cm-load-btn" class="eb-btn" style="white-space:nowrap;">Load</button>
+          </div>
+          <div id="cm-edit-status" class="cm-status" style="min-height:0;"></div>
+        </div>
+      </div>
 
       <label class="cm-label">Channel</label>
       <div class="cm-field">
@@ -1258,6 +1416,99 @@ function ebCollect() {
   return hasContent ? e : null;
 }
 
+let cmEditMode = false;   // false = send new, true = edit existing
+let cmEditLink = '';
+
+function initEditMode() {
+  const enable = document.getElementById('cm-edit-enable');
+  const panel = document.getElementById('cm-edit-panel');
+  const btn = document.getElementById('cm-send-btn');
+  enable.addEventListener('change', () => {
+    cmEditMode = enable.checked;
+    panel.style.display = cmEditMode ? 'block' : 'none';
+    btn.textContent = cmEditMode ? 'Save Changes' : 'Send Message';
+    if (!cmEditMode) { cmEditLink = ''; }
+  });
+  document.getElementById('cm-load-btn').addEventListener('click', loadMessageForEdit);
+}
+
+function setEditStatus(msg, ok) {
+  const el = document.getElementById('cm-edit-status');
+  el.textContent = msg;
+  el.style.color = ok ? 'var(--green, #3dff9a)' : 'var(--red, #ff6b6b)';
+}
+
+async function loadMessageForEdit() {
+  const link = document.getElementById('cm-edit-link').value.trim();
+  if (!link) { setEditStatus('Paste a message link first.', false); return; }
+  setEditStatus('Loading…', true);
+  try {
+    const r = await fetch('/api/load-message', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link })
+    });
+    const d = await r.json();
+    if (!d.ok) { setEditStatus(d.error || 'Failed to load.', false); return; }
+    if (!d.editable) {
+      setEditStatus('⚠️ That message was sent by ' + d.author_name + ', not the bot — it can\\'t be edited. The bot can only edit its own messages.', false);
+      return;
+    }
+    cmEditLink = link;
+
+    // Populate the message box
+    document.getElementById('cm-message').value = d.content || '';
+    document.getElementById('cm-charcount').textContent = (d.content || '').length + ' / 2000';
+
+    // Populate the embed builder
+    const ebEnable = document.getElementById('eb-enable');
+    document.getElementById('eb-fields').innerHTML = '';
+    if (d.embed) {
+      ebEnable.checked = true;
+      document.getElementById('eb-body').classList.add('open');
+      const e = d.embed;
+      const set = (id, val) => { document.getElementById(id).value = val || ''; };
+      set('eb-title', e.title); set('eb-desc', e.description); set('eb-url', e.url);
+      set('eb-author', e.author_name); set('eb-author-icon', e.author_icon);
+      set('eb-footer', e.footer_text); set('eb-footer-icon', e.footer_icon);
+      set('eb-image', e.image); set('eb-thumb', e.thumbnail);
+      const hex = e.color || '#f1c40f';
+      document.getElementById('eb-color-hex').value = hex;
+      if (/^#[0-9a-fA-F]{6}$/.test(hex)) document.getElementById('eb-color').value = hex;
+      document.getElementById('eb-timestamp').checked = !!e.timestamp;
+      (e.fields || []).forEach(f => ebAddField(f.name, f.value, f.inline));
+      ebRenderPreview();
+    } else {
+      ebEnable.checked = false;
+      document.getElementById('eb-body').classList.remove('open');
+    }
+    setEditStatus('✓ Loaded. Make your changes and hit Save Changes.', true);
+  } catch (e) { setEditStatus('Failed to reach the server.', false); }
+}
+
+function sendOrEditMessage() {
+  if (cmEditMode) { editCustomMessage(); }
+  else { sendCustomMessage(); }
+}
+
+async function editCustomMessage() {
+  const btn = document.getElementById('cm-send-btn');
+  if (!cmEditLink) { setCmStatus('Load a message first (paste its link and hit Load).', false); return; }
+  const message = document.getElementById('cm-message').value;
+  const embed = ebCollect();
+  if (!message.trim() && !embed) { setCmStatus('The edited message needs text or an embed.', false); return; }
+  btn.disabled = true; setCmStatus('Saving…', true);
+  try {
+    const r = await fetch('/api/edit-message', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link: cmEditLink, message, embed })
+    });
+    const d = await r.json();
+    if (d.ok) { setCmStatus('✓ Saved! The message has been updated.', true); }
+    else { setCmStatus(d.error || 'Failed to save.', false); }
+  } catch (e) { setCmStatus('Failed to reach the server.', false); }
+  btn.disabled = false;
+}
+
 async function sendCustomMessage() {
   const btn = document.getElementById('cm-send-btn');
   const channelId = document.getElementById('cm-channel-id').value.trim();
@@ -1374,7 +1625,8 @@ function initCustomMessages() {
   initChannelPicker();
   initMentionAutocomplete();
   initEmbedBuilder();
-  document.getElementById('cm-send-btn').addEventListener('click', sendCustomMessage);
+  initEditMode();
+  document.getElementById('cm-send-btn').addEventListener('click', sendOrEditMessage);
 }
 
 
