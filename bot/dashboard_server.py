@@ -1450,7 +1450,7 @@ async function loadMessageForEdit() {
     const d = await r.json();
     if (!d.ok) { setEditStatus(d.error || 'Failed to load.', false); return; }
     if (!d.editable) {
-      setEditStatus('⚠️ That message was sent by ' + d.author_name + ', not the bot — it can\\'t be edited. The bot can only edit its own messages.', false);
+      setEditStatus('⚠️ That message was sent by ' + d.author_name + ', not the bot — it cannot be edited. The bot can only edit its own messages.', false);
       return;
     }
     cmEditLink = link;
@@ -1671,7 +1671,7 @@ async function loadVoiceAnalytics() {
     d = await r.json();
     if (!d.ok) throw new Error(d.error || 'failed');
   } catch (e) {
-    document.getElementById('vx-cards').innerHTML = '<div class="vx-empty-live">Couldn\\'t load voice data yet. Once people use voice channels, stats show here.</div>';
+    document.getElementById('vx-cards').innerHTML = '<div class="vx-empty-live">Could not load voice data yet. Once people use voice channels, stats show here.</div>';
     return;
   }
   const s = d.summary;
