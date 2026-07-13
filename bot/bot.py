@@ -16244,12 +16244,48 @@ async def _send_drip_shop(message: discord.Message, rest: str = ""):
         color=theme_color(0x00F0FF),
     )
     embed.set_footer(text="Timed: _accent _persona _aura _titletag _entrance · Server: _hypetrain _coinrain _theme _sponsor _renamechannel · Off: _drip off")
+    if free_drip_active():
+        left = int((_load_events().get("free_drip_until", 0) - time.time()) / 60)
+        embed.description = f"🎉 **FREE DRIP WINDOW LIVE — all timed cosmetics are 0 coins for ~{left} more min!** 🎉\n\n" + (embed.description or "")
     await message.channel.send(embed=embed)
+
+
+# ── 🎉 FREE DRIP WINDOW — event where all timed drip cosmetics cost 0. Server-wide
+# plays (hype train / coin rain) are NOT affected. State persists on disk with an
+# expiry timestamp, so the bot "tracks the event" and it's simply on whenever the
+# window is live — no per-purchase toggling needed. ──
+EVENTS_FILE = MEMORY_DIR / "events.json"
+
+
+def _load_events() -> dict:
+    if EVENTS_FILE.exists():
+        try:
+            with open(EVENTS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_events(data: dict):
+    try:
+        with open(EVENTS_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.warning("events save failed: %s", e)
+
+
+def free_drip_active() -> bool:
+    """True if a Free Drip Window is currently live."""
+    return _load_events().get("free_drip_until", 0) > time.time()
 
 
 def _charge_drip(uid: int, key: str) -> tuple[bool, str]:
     it = DRIP_ITEMS[key]
     price = it["price"]
+    # 🎉 Free Drip Window: timed cosmetics are free while the event is live
+    if free_drip_active():
+        return True, ""
     tag_perk = has_tag_perks(uid)
     if tag_perk:
         price = int(price * (1 - TAG_PERK_DRIP_DISCOUNT))  # 🏷️ tag discount
@@ -17479,6 +17515,252 @@ async def _ad_campaign_loop():
         except Exception as e:
             log.warning("ad campaign loop error: %s", e)
         await asyncio.sleep(600)
+
+
+async def _handle_freedrip(message: discord.Message, rest: str):
+    """ADMIN/OWNER: _freedrip <minutes>  — start a Free Drip Window (all timed
+    cosmetics free). `_freedrip off` ends it early. `_freedrip` shows status."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+
+    rest = (rest or "").strip().lower()
+
+    # Status check — anyone can see if it's live
+    if not rest:
+        if free_drip_active():
+            left = int((_load_events().get("free_drip_until", 0) - time.time()) / 60)
+            await message.channel.send(f"🎉 **Free Drip Window is LIVE** — ~{left} min left. All timed cosmetics are free!")
+        else:
+            await message.channel.send("Free Drip Window isn't running right now. "
+                                       + ("Start one with `_freedrip <minutes>`." if (is_owner or is_admin) else ""))
+        return
+
+    if not (is_owner or is_admin):
+        return  # silent to non-admins for start/stop
+
+    data = _load_events()
+    if rest in ("off", "stop", "end"):
+        data["free_drip_until"] = 0
+        _save_events(data)
+        await message.channel.send("🛑 Free Drip Window ended. Cosmetics cost coins again.")
+        return
+
+    try:
+        minutes = int(rest.split()[0])
+    except (ValueError, IndexError):
+        await message.channel.send("Usage: `_freedrip <minutes>` (e.g. `_freedrip 60`), or `_freedrip off`.")
+        return
+    if minutes < 1 or minutes > 1440:
+        await message.channel.send("Pick between 1 and 1440 minutes.")
+        return
+
+    data["free_drip_until"] = time.time() + minutes * 60
+    _save_events(data)
+
+    embed = discord.Embed(
+        title="🎉 FREE DRIP WINDOW IS LIVE",
+        description=(f"For the next **{minutes} minutes**, **everything in the drip shop is FREE.**\n\n"
+                     "🗣️ Accents · 🎭 Personas · ✨ Auras · 🏷️ Title Tags · 🚪 Entrances — "
+                     "all **0 coins**. Go wild.\n\nBrowse it with `_dripshop` and stack up before the clock runs out. ⏳"),
+        color=0x3DFF9A,
+    )
+    embed.set_footer(text="Timed cosmetics only · Hype Train & Coin Rain still cost coins")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+# ── 👑 KING OF THE HILL — one Crown, held by one person. Anyone can challenge the
+# holder by staking coins; winner takes the Crown role + the loser's stake. Held
+# time is tracked for a hall-of-fame. ──
+CROWN_ROLE_ID = 0  # set via _crownrole <role id> (stored in events.json)
+CROWN_CHALLENGE_COOLDOWN = 300  # 5 min between challenges per user
+
+
+async def _handle_crown(message: discord.Message, rest: str):
+    """_crown — show the current King. _crown challenge <stake> — challenge the
+    holder for the Crown. Owner: _crown setrole <id>, _crown give @user."""
+    guild = message.guild
+    if guild is None:
+        return
+    data = _load_events()
+    crown = data.setdefault("crown", {"holder": None, "since": 0, "role_id": 0, "reigns": {}})
+    rest = (rest or "").strip()
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+
+    # ── Admin: set the crown role ──
+    if rest.lower().startswith("setrole"):
+        if not (is_owner or is_admin):
+            return
+        parts = rest.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            await message.channel.send("Usage: `_crown setrole <role id>`")
+            return
+        crown["role_id"] = int(parts[1])
+        _save_events(data)
+        await message.channel.send(f"👑 Crown role set to <@&{parts[1]}>. Now anyone can `_crown challenge <stake>`.")
+        return
+
+    role_id = crown.get("role_id", 0)
+    role = guild.get_role(role_id) if role_id else None
+
+    # ── Status: who holds it ──
+    if not rest or rest.lower() in ("status", "who"):
+        holder_id = crown.get("holder")
+        if holder_id:
+            held_min = int((time.time() - crown.get("since", time.time())) / 60)
+            await message.channel.send(
+                f"👑 The Crown is held by <@{holder_id}> — reigning for **{held_min} min**.\n"
+                f"Challenge them with `_crown challenge <stake>` and take it.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await message.channel.send("👑 The Crown is **unclaimed.** First to `_crown challenge 0` takes it uncontested.")
+        return
+
+    # ── Admin: hand the crown directly ──
+    if rest.lower().startswith("give"):
+        if not (is_owner or is_admin):
+            return
+        if not message.mentions:
+            await message.channel.send("Usage: `_crown give @user`")
+            return
+        target = message.mentions[0]
+        await _crown_transfer(guild, crown, target.id, role)
+        _save_events(data)
+        await message.channel.send(f"👑 The Crown was granted to {target.mention}.",
+                                   allowed_mentions=discord.AllowedMentions(users=False))
+        return
+
+    # ── Challenge ──
+    if rest.lower().startswith("challenge"):
+        if role_id == 0:
+            await message.channel.send("The Crown isn't set up yet. An admin needs to run `_crown setrole <id>` first.")
+            return
+        parts = rest.split()
+        stake = 0
+        if len(parts) > 1:
+            try:
+                stake = max(0, int(parts[1]))
+            except ValueError:
+                stake = 0
+
+        challenger = message.author
+        holder_id = crown.get("holder")
+
+        # Uncontested claim
+        if not holder_id:
+            await _crown_transfer(guild, crown, challenger.id, role)
+            _save_events(data)
+            await message.channel.send(f"👑 {challenger.mention} claims the empty throne! Long may they reign.",
+                                       allowed_mentions=discord.AllowedMentions(users=False))
+            return
+
+        if holder_id == challenger.id:
+            await message.channel.send("You already wear the Crown. 👑")
+            return
+
+        # cooldown
+        cds = data.setdefault("crown_cd", {})
+        last = cds.get(str(challenger.id), 0)
+        if time.time() - last < CROWN_CHALLENGE_COOLDOWN:
+            left = int((last + CROWN_CHALLENGE_COOLDOWN - time.time()))
+            await message.channel.send(f"⏳ Catch your breath — challenge again in {left}s.")
+            return
+
+        # stake check
+        if stake > 0 and economy.balance(challenger.id) < stake:
+            await message.channel.send(f"You can't cover a **{stake:,}** stake. You have **{economy.balance(challenger.id):,}**.")
+            return
+
+        cds[str(challenger.id)] = time.time()
+
+        # The duel: bigger stake tilts the odds, but never a sure thing (40–60% base).
+        # Base 50/50, shifted up to ±10% by relative stake vs holder's balance.
+        holder_bal = max(1, economy.balance(holder_id))
+        tilt = min(0.10, (stake / holder_bal) * 0.10) if stake else 0
+        challenger_odds = 0.45 + tilt  # slight underdog by default — holder has home advantage
+        won = random.random() < challenger_odds
+
+        if won:
+            # transfer crown + stake from holder to challenger
+            if stake > 0:
+                economy.add(holder_id, -stake, "crown loss")
+                economy.add(challenger.id, stake, "crown win")
+            old_holder = holder_id
+            await _crown_transfer(guild, crown, challenger.id, role)
+            _save_events(data)
+            msg = (f"⚔️ {challenger.mention} **DETHRONES** <@{old_holder}> and seizes the Crown! 👑")
+            if stake:
+                msg += f"\nThey take **{stake:,}** coins off the fallen king."
+            await message.channel.send(msg, allowed_mentions=discord.AllowedMentions(users=False))
+        else:
+            if stake > 0:
+                economy.add(challenger.id, -stake, "crown loss")
+                economy.add(holder_id, stake, "crown defense")
+            _save_events(data)
+            msg = f"🛡️ <@{holder_id}> **holds the throne** — {challenger.mention}'s challenge fails."
+            if stake:
+                msg += f"\nThe crown keeps their **{stake:,}** coin stake."
+            await message.channel.send(msg, allowed_mentions=discord.AllowedMentions(users=False))
+        return
+
+    await message.channel.send("👑 `_crown` — see the King · `_crown challenge <stake>` — take the throne")
+
+
+async def _crown_transfer(guild, crown: dict, new_holder_id: int, role):
+    """Move the Crown role from the old holder to the new one, and bank the old
+    holder's reign time into the hall-of-fame totals."""
+    old_id = crown.get("holder")
+    now = time.time()
+    # bank the outgoing reign
+    if old_id and crown.get("since"):
+        reigns = crown.setdefault("reigns", {})
+        reigns[str(old_id)] = reigns.get(str(old_id), 0) + int(now - crown["since"])
+    # role swap (best-effort)
+    if role is not None:
+        try:
+            if old_id:
+                old_m = guild.get_member(int(old_id))
+                if old_m and role in old_m.roles:
+                    await old_m.remove_roles(role, reason="lost the Crown")
+            new_m = guild.get_member(int(new_holder_id))
+            if new_m and role not in new_m.roles:
+                await new_m.add_roles(role, reason="won the Crown")
+        except discord.Forbidden:
+            log.warning("crown: missing Manage Roles / hierarchy")
+        except Exception as e:
+            log.warning("crown role swap failed: %s", e)
+    crown["holder"] = new_holder_id
+    crown["since"] = now
+
+
+async def _handle_crownboard(message: discord.Message):
+    """_crownboard — hall of fame: who's held the Crown longest, all-time."""
+    data = _load_events()
+    crown = data.get("crown", {})
+    reigns = dict(crown.get("reigns", {}))
+    # add the current holder's live reign
+    if crown.get("holder") and crown.get("since"):
+        hid = str(crown["holder"])
+        reigns[hid] = reigns.get(hid, 0) + int(time.time() - crown["since"])
+    if not reigns:
+        await message.channel.send("👑 Nobody's held the Crown yet. Be the first: `_crown challenge 0`.")
+        return
+    top = sorted(reigns.items(), key=lambda kv: kv[1], reverse=True)[:10]
+
+    def _fmt(sec):
+        h = sec // 3600; m = (sec % 3600) // 60
+        return f"{h}h {m}m" if h else f"{m}m"
+
+    lines = [f"`{i+1}.` <@{uid}> — {_fmt(sec)}" for i, (uid, sec) in enumerate(top)]
+    embed = discord.Embed(
+        title="👑 Crown Hall of Fame",
+        description="\n".join(lines),
+        color=0xF1C40F,
+    )
+    cur = crown.get("holder")
+    embed.set_footer(text="Total time each has worn the Crown · challenge the current king to climb")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _handle_webhookaudit(message: discord.Message):
@@ -25989,6 +26271,15 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("webhookaudit", "webhooks", "hookaudit"):
         await _handle_webhookaudit(message)
+        return True
+    if cmd_name in ("freedrip", "dripfree", "freewindow"):
+        await _handle_freedrip(message, rest)
+        return True
+    if cmd_name in ("crown", "kingofthehill", "koth", "throne"):
+        await _handle_crown(message, rest)
+        return True
+    if cmd_name in ("crownboard", "crownlb", "kings"):
+        await _handle_crownboard(message)
         return True
     if cmd_name in ("advertise", "promote", "plaster", "ads"):
         await _handle_advertise(message, rest)
