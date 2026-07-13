@@ -18219,6 +18219,56 @@ def _burner_schedule(message):
         log.warning("burner: schedule failed: %s", e)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 💧 HYDRATE REMINDER — posts an embed every 2 hours nudging people to drink water,
+# with a brief plug for the tag perks. Restart-safe (no persistence needed; it
+# just sleeps between posts and starts fresh on boot).
+# ─────────────────────────────────────────────────────────────────────────────
+HYDRATE_CHANNEL_ID = 1522611232396415118
+HYDRATE_TAG_CHANNEL_ID = 1525893581619855512
+HYDRATE_INTERVAL = 2 * 60 * 60  # 2 hours
+
+_HYDRATE_LINES = [
+    "Been a minute since your last sip. Go get some water. 💧",
+    "Hydration check. When did you last drink water? Fix that now.",
+    "Your body's mostly water and you've been running low. Drink up. 💧",
+    "This is your sign to put down whatever you're doing and hydrate.",
+    "Water break. Non-negotiable. Go. 💧",
+    "Dry mouth? Headache? Tired? Probably dehydration. Grab a glass.",
+]
+
+
+async def _hydrate_loop():
+    await client.wait_until_ready()
+    import random as _r
+    i = 0
+    while not client.is_closed():
+        try:
+            ch = client.get_channel(HYDRATE_CHANNEL_ID)
+            if ch is None:
+                ch = await client.fetch_channel(HYDRATE_CHANNEL_ID)
+            embed = discord.Embed(
+                title="💧 Hydrate",
+                description=_HYDRATE_LINES[i % len(_HYDRATE_LINES)],
+                color=0x00A8FC,
+            )
+            embed.add_field(
+                name="🏷️ While you're up",
+                value=(f"Wearing our server tag unlocks free perks — bigger daily, drip discounts, "
+                       f"and **automatic entry into our Nitro giveaways**. "
+                       f"Read up in <#{HYDRATE_TAG_CHANNEL_ID}>."),
+                inline=False,
+            )
+            embed.set_footer(text="Stay watered. 🏴")
+            await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            i += 1
+        except discord.Forbidden:
+            log.warning("hydrate: missing perms in channel %s", HYDRATE_CHANNEL_ID)
+        except Exception as e:
+            log.warning("hydrate loop error: %s", e)
+        await asyncio.sleep(HYDRATE_INTERVAL)
+
+
 async def _burner_sweeper():
     """Backstop loop: purge anything in the burner channel older than BURNER_TTL.
     Covers messages sent before the last restart, which have no armed timer."""
@@ -23209,6 +23259,7 @@ async def on_ready():
     asyncio.create_task(_ghostlog_backfill())
     asyncio.create_task(_burner_sweeper())
     asyncio.create_task(_ad_campaign_loop())
+    asyncio.create_task(_hydrate_loop())
     asyncio.create_task(_tagrole_sweep_loop())
     log.info("burner armed: channel %s, ttl %ss", BURNER_CHANNEL_ID, BURNER_TTL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
