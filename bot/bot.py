@@ -18498,6 +18498,7 @@ def _ghostlog_skip(message_id: int):
 
 
 _ghostlog_backfilled = False
+_background_loops_started = False   # ensures on_ready reconnects don't relaunch loops
 _ghostlog_audit_primed = False
 
 
@@ -23379,11 +23380,19 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
     log.info("ghostlog v3 armed: watching %s -> posting %s", GHOSTLOG_WATCH_CHANNEL, GHOSTLOG_POST_CHANNEL)
-    asyncio.create_task(_ghostlog_backfill())
-    asyncio.create_task(_burner_sweeper())
-    asyncio.create_task(_ad_campaign_loop())
-    asyncio.create_task(_hydrate_loop())
-    asyncio.create_task(_tagrole_sweep_loop())
+    # on_ready fires on EVERY gateway (re)connect — only launch the background
+    # loops once, or reconnects spawn duplicate loops (double hydrate posts, etc.)
+    global _background_loops_started
+    if not _background_loops_started:
+        _background_loops_started = True
+        asyncio.create_task(_ghostlog_backfill())
+        asyncio.create_task(_burner_sweeper())
+        asyncio.create_task(_ad_campaign_loop())
+        asyncio.create_task(_hydrate_loop())
+        asyncio.create_task(_tagrole_sweep_loop())
+        log.info("background loops started")
+    else:
+        log.info("reconnected — background loops already running, not relaunching")
     log.info("burner armed: channel %s, ttl %ss", BURNER_CHANNEL_ID, BURNER_TTL)
     available = [p for p in ["groq","cerebras","gemini"] if os.environ.get(f"{p.upper()}_API_KEY")]
     log.info("Available AI providers: %s", available or "NONE")
