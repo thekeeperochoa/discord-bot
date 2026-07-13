@@ -163,6 +163,125 @@ def health():
     return jsonify({"ok": True, "stats_file_exists": STATS_FILE.exists()})
 
 
+VOICE_FILE = MEMORY_DIR / "voice_analytics.json"
+
+
+@app.route("/api/voice-analytics")
+def api_voice_analytics():
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 403
+
+    import time as _t
+    from datetime import datetime as _dt
+    v = _load_json(VOICE_FILE, {})
+    sessions = v.get("sessions", [])
+    events = v.get("events", [])
+    totals = v.get("totals", {})
+    channel_totals = v.get("channel_totals", {})
+    pairs = v.get("pairs", {})
+    now = _t.time()
+
+    # Name lookups from sessions/events
+    name_by_id = {}
+    for s in sessions:
+        name_by_id[s.get("user_id")] = s.get("user_name")
+    for e in events:
+        name_by_id.setdefault(e.get("user_id"), e.get("user_name"))
+    chname_by_id = {}
+    for s in sessions:
+        chname_by_id[s.get("channel_id")] = s.get("channel_name")
+
+    # Currently in voice: last event per user is a join/move (not leave)
+    live = {}
+    seen = set()
+    for e in events:  # newest first
+        uid = e.get("user_id")
+        if uid in seen:
+            continue
+        seen.add(uid)
+        if e.get("type") in ("join", "move"):
+            live.setdefault(e.get("channel_name") or "?", []).append({
+                "name": e.get("user_name"),
+                "state": e.get("state", {}),
+            })
+    live_list = [{"channel": ch, "members": mem} for ch, mem in live.items()]
+
+    # Summary numbers
+    total_seconds = sum(totals.values())
+    day_ago = now - 86400
+    week_ago = now - 604800
+    sessions_today = [s for s in sessions if s.get("left", 0) >= day_ago]
+    unique_today = len({s.get("user_id") for s in sessions_today})
+    avg_session = int(sum(s.get("duration", 0) for s in sessions) / len(sessions)) if sessions else 0
+    longest = max((s.get("duration", 0) for s in sessions), default=0)
+
+    # Leaderboard: top users by total voice time
+    top_users = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:12]
+    top_users = [{"name": name_by_id.get(uid, uid), "seconds": sec} for uid, sec in top_users]
+
+    # Channel breakdown
+    top_channels = sorted(channel_totals.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    top_channels = [{"name": chname_by_id.get(cid, cid), "seconds": sec} for cid, sec in top_channels]
+
+    # Heatmap: 7 days x 24 hours of join events
+    heat = [[0] * 24 for _ in range(7)]
+    for e in events:
+        if e.get("type") == "join":
+            d = _dt.fromtimestamp(e.get("t", 0))
+            heat[d.weekday()][d.hour] += 1
+
+    # Activity over last 14 days (sessions/day)
+    daily = {}
+    for s in sessions:
+        if s.get("left"):
+            day = _dt.fromtimestamp(s["left"]).strftime("%Y-%m-%d")
+            daily[day] = daily.get(day, 0) + 1
+    daily_series = sorted(daily.items())[-14:]
+
+    # Social graph pairs (top co-presence)
+    top_pairs = sorted(pairs.items(), key=lambda kv: kv[1], reverse=True)[:15]
+    pair_list = []
+    for pk, sec in top_pairs:
+        a, b = pk.split(":")
+        pair_list.append({"a": name_by_id.get(a, a), "b": name_by_id.get(b, b), "seconds": sec})
+
+    # Streaming / camera usage counts
+    stream_ct = sum(1 for e in events if e.get("state", {}).get("streaming"))
+    cam_ct = sum(1 for e in events if e.get("state", {}).get("camera"))
+
+    # Recent sessions table (last 25)
+    recent = []
+    for s in sessions[:25]:
+        recent.append({
+            "user": s.get("user_name"),
+            "channel": s.get("channel_name"),
+            "joined": s.get("joined"),
+            "duration": s.get("duration", 0),
+            "with": len(s.get("co_present", [])),
+        })
+
+    return jsonify({
+        "ok": True,
+        "summary": {
+            "total_seconds": total_seconds,
+            "sessions_all": len(sessions),
+            "unique_today": unique_today,
+            "avg_session": avg_session,
+            "longest": longest,
+            "live_count": sum(len(x["members"]) for x in live_list),
+            "streams": stream_ct,
+            "cameras": cam_ct,
+        },
+        "live": live_list,
+        "top_users": top_users,
+        "top_channels": top_channels,
+        "heatmap": heat,
+        "daily": daily_series,
+        "pairs": pair_list,
+        "recent": recent,
+    })
+
+
 @app.route("/api/stats")
 def api_stats():
     if not is_admin():
@@ -570,6 +689,31 @@ textarea.cm-input { line-height:1.5; }
 .cm-send:hover { filter:brightness(1.1); }
 .cm-send:disabled { opacity:.5; cursor:not-allowed; }
 .cm-status { margin-top:12px; font-size:14px; min-height:20px; }
+/* Voice analytics tab */
+.vx-live-banner { margin-bottom:16px; }
+.vx-live-card { background:linear-gradient(135deg,rgba(0,168,252,.12),rgba(61,255,154,.06)); border:1px solid rgba(0,168,252,.3); border-radius:12px; padding:14px 18px; margin-bottom:10px; }
+.vx-live-card .vx-ch { font-weight:700; color:#00a8fc; font-size:15px; margin-bottom:8px; display:flex; align-items:center; gap:8px; }
+.vx-live-card .vx-ch .dot { width:8px; height:8px; border-radius:50%; background:#3dff9a; box-shadow:0 0 8px #3dff9a; animation:vxpulse 1.5s infinite; }
+@keyframes vxpulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+.vx-live-members { display:flex; flex-wrap:wrap; gap:8px; }
+.vx-chip { background:#0e0e10; border:1px solid var(--border); border-radius:20px; padding:4px 12px; font-size:13px; display:flex; align-items:center; gap:6px; }
+.vx-empty-live { color:var(--muted); font-size:13px; padding:10px; }
+.vx-heatmap { display:grid; grid-template-columns:auto repeat(24,1fr); gap:2px; font-size:10px; }
+.vx-heatmap .hlabel { color:var(--muted); font-size:10px; display:flex; align-items:center; justify-content:flex-end; padding-right:6px; }
+.vx-heatmap .hhour { color:var(--muted); font-size:9px; text-align:center; }
+.vx-heatmap .cell { aspect-ratio:1; border-radius:2px; background:#151517; transition:transform .1s; cursor:default; }
+.vx-heatmap .cell:hover { transform:scale(1.4); z-index:2; position:relative; }
+.vx-pairs { display:flex; flex-direction:column; gap:8px; }
+.vx-pair { display:flex; align-items:center; gap:10px; font-size:13px; }
+.vx-pair .bar { height:8px; border-radius:4px; background:linear-gradient(90deg,#00a8fc,#3dff9a); }
+.vx-pair .names { flex:0 0 auto; min-width:180px; }
+.vx-pair .amt { color:var(--muted); font-size:12px; margin-left:auto; }
+.vx-recent { display:flex; flex-direction:column; gap:6px; max-height:360px; overflow-y:auto; }
+.vx-recent .row { display:grid; grid-template-columns:1.5fr 1.2fr 1fr .8fr; gap:10px; padding:8px 10px; background:#0e0e10; border-radius:6px; font-size:13px; align-items:center; }
+.vx-recent .row .u { font-weight:600; }
+.vx-recent .row .c { color:#00a8fc; }
+.vx-recent .row .d { color:var(--muted); }
+.vx-recent .head { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; background:transparent; }
 /* Embed builder */
 .eb-toggle { display:flex; align-items:center; gap:8px; margin-top:20px; padding-top:16px; border-top:1px solid var(--border); cursor:pointer; user-select:none; }
 .eb-toggle input { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
@@ -634,6 +778,7 @@ textarea.cm-input { line-height:1.5; }
     <button class="tab-btn" data-tab="games">Games</button>
     <button class="tab-btn" data-tab="features">Features</button>
     <button class="tab-btn" data-tab="feed">Live Feed</button>
+    <button class="tab-btn" data-tab="voice">🎙️ Voice</button>
     <button class="tab-btn" data-tab="messages">Custom Messages</button>
   </nav>
   <div id="tab-overview" class="tab-content active">
@@ -673,6 +818,28 @@ textarea.cm-input { line-height:1.5; }
   </div>
   <div id="tab-feed" class="tab-content">
     <div class="card"><h2>📰 Live Activity Feed</h2><div class="subtitle">Last 30 events. Refresh to update.</div><div id="activity-feed"></div></div>
+  </div>
+
+  <div id="tab-voice" class="tab-content">
+    <div class="vx-live-banner" id="vx-live-banner"></div>
+    <div class="stat-grid" id="vx-cards"></div>
+    <div class="card-row">
+      <div class="chart-card">
+        <h3>🔥 Activity Heatmap <span class="hint">joins by day &amp; hour</span></h3>
+        <div id="vx-heatmap" class="vx-heatmap"></div>
+      </div>
+    </div>
+    <div class="card-row">
+      <div class="chart-card"><h3>🏆 Top Talkers <span class="hint">total time in voice</span></h3><canvas id="vx-top-users"></canvas></div>
+      <div class="chart-card"><h3>📊 Busiest Channels</h3><canvas id="vx-channels"></canvas></div>
+    </div>
+    <div class="card-row">
+      <div class="chart-card"><h3>📈 Sessions / Day <span class="hint">last 14 days</span></h3><canvas id="vx-daily"></canvas></div>
+      <div class="chart-card"><h3>🤝 Who Hangs Together <span class="hint">shared voice time</span></h3><div id="vx-pairs" class="vx-pairs"></div></div>
+    </div>
+    <div class="card-row">
+      <div class="chart-card" style="flex:1"><h3>🕐 Recent Sessions</h3><div id="vx-recent" class="vx-recent"></div></div>
+    </div>
   </div>
 
   <div id="tab-messages" class="tab-content">
@@ -1222,10 +1389,136 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
       initCustomMessages();
       loadGuildMeta();
     }
+    if (btn.dataset.tab === 'voice') {
+      loadVoiceAnalytics();
+    }
   });
 });
 loadStats();
 setInterval(loadStats, 60_000);
+
+// ── Voice Analytics ──────────────────────────────────────────────────────────
+function vxFmt(sec) {
+  sec = Math.round(sec || 0);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + s + 's';
+  return s + 's';
+}
+function vxAgo(ts) {
+  const d = Math.round(Date.now() / 1000 - ts);
+  if (d < 60) return d + 's ago';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  return Math.floor(d / 86400) + 'd ago';
+}
+async function loadVoiceAnalytics() {
+  let d;
+  try {
+    const r = await fetch('/api/voice-analytics');
+    d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'failed');
+  } catch (e) {
+    document.getElementById('vx-cards').innerHTML = '<div class="vx-empty-live">Couldn\\'t load voice data yet. Once people use voice channels, stats show here.</div>';
+    return;
+  }
+  const s = d.summary;
+
+  // Summary cards
+  document.getElementById('vx-cards').innerHTML = [
+    ['🔴 In Voice Now', s.live_count],
+    ['⏱️ Total Voice Time', vxFmt(s.total_seconds)],
+    ['📞 Total Sessions', s.sessions_all.toLocaleString()],
+    ['👥 Unique Today', s.unique_today],
+    ['📊 Avg Session', vxFmt(s.avg_session)],
+    ['🏅 Longest Session', vxFmt(s.longest)],
+    ['📺 Streams Logged', s.streams],
+    ['📹 Cameras Logged', s.cameras],
+  ].map(([label, val]) =>
+    '<div class="stat-box"><div class="stat-label">' + label + '</div><div class="stat-value">' + val + '</div></div>'
+  ).join('');
+
+  // Live banner
+  const banner = document.getElementById('vx-live-banner');
+  if (d.live && d.live.length) {
+    banner.innerHTML = d.live.map(ch => {
+      const chips = ch.members.map(m => {
+        const st = m.state || {};
+        let icons = '';
+        if (st.streaming) icons += '📺'; if (st.camera) icons += '📹';
+        if (st.self_mute) icons += '🔇'; if (st.self_deaf) icons += '🔕';
+        return '<span class="vx-chip">' + (m.name || '?') + (icons ? ' ' + icons : '') + '</span>';
+      }).join('');
+      return '<div class="vx-live-card"><div class="vx-ch"><span class="dot"></span>' +
+        (ch.channel || '?') + ' — ' + ch.members.length + ' in call</div>' +
+        '<div class="vx-live-members">' + chips + '</div></div>';
+    }).join('');
+  } else {
+    banner.innerHTML = '<div class="vx-live-card"><div class="vx-empty-live">🔇 Nobody in voice right now.</div></div>';
+  }
+
+  // Heatmap (7x24)
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  let maxH = 1;
+  d.heatmap.forEach(row => row.forEach(v => { if (v > maxH) maxH = v; }));
+  let hm = '<div class="hlabel"></div>';
+  for (let h = 0; h < 24; h++) hm += '<div class="hhour">' + (h % 6 === 0 ? h : '') + '</div>';
+  d.heatmap.forEach((row, di) => {
+    hm += '<div class="hlabel">' + days[di] + '</div>';
+    row.forEach(v => {
+      const intensity = v / maxH;
+      const bg = v === 0 ? '#151517'
+        : 'rgba(0,168,252,' + (0.15 + intensity * 0.85).toFixed(2) + ')';
+      hm += '<div class="cell" style="background:' + bg + '" title="' + days[di] + ' ' + '"' + '></div>';
+    });
+  });
+  document.getElementById('vx-heatmap').innerHTML = hm;
+
+  // Top users bar
+  destroyChart('vx-top-users');
+  charts['vx-top-users'] = new Chart(document.getElementById('vx-top-users'), {
+    type: 'bar',
+    data: { labels: d.top_users.map(u => u.name), datasets: [{ data: d.top_users.map(u => Math.round(u.seconds / 60)), backgroundColor: '#00a8fc', borderRadius: 4 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.x + ' min' } } }, scales: { x: { title: { display: true, text: 'minutes' } } } }
+  });
+
+  // Channels doughnut
+  destroyChart('vx-channels');
+  charts['vx-channels'] = new Chart(document.getElementById('vx-channels'), {
+    type: 'doughnut',
+    data: { labels: d.top_channels.map(c => c.name), datasets: [{ data: d.top_channels.map(c => Math.round(c.seconds / 60)), backgroundColor: ['#00a8fc','#3dff9a','#f1c40f','#e74c3c','#9b59b6','#1abc9c','#e67e22','#34495e','#fd79a8','#00cec9'] }] },
+    options: { plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } } } }
+  });
+
+  // Daily line
+  destroyChart('vx-daily');
+  charts['vx-daily'] = new Chart(document.getElementById('vx-daily'), {
+    type: 'line',
+    data: { labels: d.daily.map(x => x[0].slice(5)), datasets: [{ data: d.daily.map(x => x[1]), borderColor: '#3dff9a', backgroundColor: 'rgba(61,255,154,.1)', fill: true, tension: .3 }] },
+    options: { plugins: { legend: { display: false } } }
+  });
+
+  // Pairs
+  const maxP = d.pairs.length ? d.pairs[0].seconds : 1;
+  document.getElementById('vx-pairs').innerHTML = d.pairs.length
+    ? d.pairs.map(p =>
+        '<div class="vx-pair"><span class="names">' + p.a + ' × ' + p.b + '</span>' +
+        '<div class="bar" style="width:' + Math.max(6, (p.seconds / maxP) * 120) + 'px"></div>' +
+        '<span class="amt">' + vxFmt(p.seconds) + '</span></div>'
+      ).join('')
+    : '<div class="vx-empty-live">No shared sessions logged yet.</div>';
+
+  // Recent sessions
+  const rec = document.getElementById('vx-recent');
+  let rh = '<div class="row head"><div>User</div><div>Channel</div><div>Duration</div><div>With</div></div>';
+  rh += d.recent.map(r =>
+    '<div class="row"><div class="u">' + (r.user || '?') + '</div>' +
+    '<div class="c">' + (r.channel || '?') + '</div>' +
+    '<div class="d">' + vxFmt(r.duration) + ' · ' + vxAgo(r.joined) + '</div>' +
+    '<div class="d">' + (r.with ? r.with + ' others' : 'alone') + '</div></div>'
+  ).join('');
+  rec.innerHTML = d.recent.length ? rh : '<div class="vx-empty-live">No completed sessions yet.</div>';
+}
 </script>
 </body>
 </html>

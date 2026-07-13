@@ -18187,6 +18187,129 @@ async def on_member_remove(member: discord.Member):
         log.warning("on_member_remove welcome cleanup failed: %s", e)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🎙️ VOICE ANALYTICS — logs every voice state change to voice_analytics.json on
+# the shared volume so the dashboard can visualize it. Captures joins, leaves,
+# moves, session durations, co-presence (who was in with whom), and rich state
+# (mute/deafen, screenshare, camera, stage speaking). NO audio is ever touched —
+# this is metadata only, exactly what Discord exposes via voice state events.
+# ─────────────────────────────────────────────────────────────────────────────
+VOICE_FILE = MEMORY_DIR / "voice_analytics.json"
+_VOICE_MAX_SESSIONS = 5000   # ring-buffer cap for completed sessions
+_VOICE_MAX_EVENTS = 2000     # cap for the raw event log
+_voice_active = {}           # (guild_id, user_id) -> open session dict
+
+
+def _load_voice():
+    if VOICE_FILE.exists():
+        try:
+            with open(VOICE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"sessions": [], "events": [], "totals": {}, "channel_totals": {}, "pairs": {}}
+
+
+def _save_voice(data):
+    try:
+        with open(VOICE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.warning("voice save failed: %s", e)
+
+
+def _voice_key(guild_id, user_id):
+    return f"{guild_id}:{user_id}"
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    try:
+        if member.bot:
+            return
+        now = time.time()
+        data = _load_voice()
+
+        b_ch = before.channel
+        a_ch = after.channel
+
+        def _snap_state(vs):
+            return {
+                "self_mute": bool(vs.self_mute),
+                "self_deaf": bool(vs.self_deaf),
+                "server_mute": bool(vs.mute),
+                "server_deaf": bool(vs.deaf),
+                "streaming": bool(vs.self_stream),
+                "camera": bool(vs.self_video),
+                "suppress": bool(getattr(vs, "suppress", False)),
+            }
+
+        # Determine the event type
+        if b_ch is None and a_ch is not None:
+            etype = "join"
+        elif b_ch is not None and a_ch is None:
+            etype = "leave"
+        elif b_ch is not None and a_ch is not None and b_ch.id != a_ch.id:
+            etype = "move"
+        else:
+            etype = "update"  # mute/cam/stream toggled, same channel
+
+        key = _voice_key(member.guild.id, member.id)
+
+        # Close an open session on leave or move
+        if etype in ("leave", "move") and key in _voice_active:
+            sess = _voice_active.pop(key)
+            sess["left"] = now
+            sess["duration"] = int(now - sess["joined"])
+            # Co-presence: who else was in that channel during this session
+            others = []
+            if b_ch is not None:
+                for m in b_ch.members:
+                    if m.id != member.id and not m.bot:
+                        others.append(str(m.id))
+            sess["co_present"] = others
+            data["sessions"].insert(0, sess)
+            data["sessions"] = data["sessions"][:_VOICE_MAX_SESSIONS]
+            # Totals
+            data.setdefault("totals", {})
+            data["totals"][str(member.id)] = data["totals"].get(str(member.id), 0) + sess["duration"]
+            data.setdefault("channel_totals", {})
+            data["channel_totals"][sess["channel_id"]] = data["channel_totals"].get(sess["channel_id"], 0) + sess["duration"]
+            # Pair time (social graph) — add duration to each co-present pair
+            data.setdefault("pairs", {})
+            for oid in others:
+                pk = ":".join(sorted([str(member.id), oid]))
+                data["pairs"][pk] = data["pairs"].get(pk, 0) + sess["duration"]
+
+        # Open a new session on join or move
+        if etype in ("join", "move") and a_ch is not None:
+            _voice_active[key] = {
+                "user_id": str(member.id),
+                "user_name": member.display_name,
+                "channel_id": str(a_ch.id),
+                "channel_name": a_ch.name,
+                "joined": now,
+                "start_state": _snap_state(after),
+            }
+
+        # Log the raw event
+        ev = {
+            "t": now,
+            "type": etype,
+            "user_id": str(member.id),
+            "user_name": member.display_name,
+            "channel_id": str(a_ch.id) if a_ch else (str(b_ch.id) if b_ch else None),
+            "channel_name": a_ch.name if a_ch else (b_ch.name if b_ch else None),
+            "state": _snap_state(after),
+        }
+        data.setdefault("events", []).insert(0, ev)
+        data["events"] = data["events"][:_VOICE_MAX_EVENTS]
+
+        _save_voice(data)
+    except Exception as e:
+        log.warning("voice analytics error: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🔥 BURNER CHANNEL — every message self-destructs 5 minutes after being posted.
 # Two layers: (1) per-message timer for precision, (2) a sweeper loop every 60s
 # that catches strays — messages sent while the bot was offline/restarting, or
