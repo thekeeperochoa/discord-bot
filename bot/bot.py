@@ -17228,6 +17228,61 @@ async def _handle_perks(message: discord.Message):
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+async def _handle_whotag(message: discord.Message, rest: str):
+    """Prefix: _whotag <tag> — list everyone in the server wearing a specific guild
+    tag (works for OTHER servers' tags too, matched by the tag text itself).
+    Defaults to a preset tag if none is given."""
+    guild = message.guild
+    if guild is None:
+        return
+
+    target_tag = (rest or "").strip()
+    if not target_tag:
+        target_tag = "iǁɛﬆ"  # default: iǁɛﬆ
+
+    wearing = []
+    for m in guild.members:
+        pg = getattr(m, "primary_guild", None)
+        if pg is None:
+            continue
+        if not getattr(pg, "identity_enabled", False):
+            continue
+        tag = getattr(pg, "tag", None)
+        if tag and tag == target_tag:
+            wearing.append(m)
+
+    if not wearing:
+        await message.channel.send(
+            f"Nobody here is wearing the **{target_tag}** tag right now. 💀 "
+            "(tag data only shows for members I've fully loaded — and it must be their *active* tag.)"
+        )
+        return
+
+    wearing.sort(key=lambda m: m.display_name.lower())
+    lines = [f"`{i+1}.` {m.mention} — {m.display_name}" for i, m in enumerate(wearing)]
+
+    def _chunk(ls, cap=1024):
+        blocks, cur = [], ""
+        for ln in ls:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur); cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    embed = discord.Embed(
+        title=f"🏷️ Wearing the {target_tag} tag",
+        description=f"**{len(wearing)}** member{'s' if len(wearing) != 1 else ''} repping it",
+        color=0x000000,
+    )
+    for i, b in enumerate(_chunk(lines)[:24]):
+        embed.add_field(name="\u200b", value=b, inline=False)
+    embed.set_footer(text=f"{len(wearing)} / {guild.member_count} members")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_tagcheck(message: discord.Message):
     """Prefix: _dgen / _tags — count + list everyone wearing this server's guild tag."""
     guild = message.guild
@@ -25760,6 +25815,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("dgen", "tags", "tagcheck", "reps"):
         await _handle_tagcheck(message)
+        return True
+    if cmd_name in ("whotag", "wearing", "tagusers"):
+        await _handle_whotag(message, rest)
         return True
     if cmd_name in ("perks", "tagperks", "myperks"):
         await _handle_perks(message)
