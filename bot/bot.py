@@ -18931,6 +18931,138 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🕵️ CRYPTIC / INSIDE-JOKE DETECTOR — AI-scans a channel for coded, evasive, or
+# in-group messaging and alerts the owner with the flagged messages + jump links.
+# Batches messages (analyze on a rolling buffer) to keep API calls sane, and
+# rate-limits alerts so it can't spam. Tuned to favor genuinely notable / coded
+# talk over ordinary slang, since normal chat is full of casual inside jokes.
+# ─────────────────────────────────────────────────────────────────────────────
+CRYPTIC_SCAN_CHANNEL = 1522611232396415118   # channel to read
+CRYPTIC_ALERT_CHANNEL = 1525920922719223939  # where alerts post
+CRYPTIC_OWNER_ID = 1222360070101270651       # who to tag
+CRYPTIC_BATCH_SIZE = 8                        # analyze every N messages
+CRYPTIC_ALERT_COOLDOWN = 300                  # min seconds between alerts
+
+_cryptic_buffer = []          # rolling list of (message, text) awaiting analysis
+_cryptic_last_alert = 0.0
+_cryptic_analyzing = False
+
+CRYPTIC_SYSTEM = (
+    "You are a moderation assistant for a Discord server. You are given a batch of "
+    "recent chat messages, each tagged with a numeric ID. Identify ONLY messages that "
+    "look like genuinely CRYPTIC, CODED, or EVASIVE communication: coded language that "
+    "seems designed to arrange something off-the-books, obscure in-group references "
+    "clearly hiding a real meaning, or deliberately veiled or secretive talk. "
+    "Do NOT flag ordinary slang, memes, casual inside jokes, sarcasm, gaming or pop-"
+    "culture references, emojis, or normal banter. Be conservative: most chat is NOT "
+    "cryptic. Only flag something if it genuinely reads as hidden or coded meaning. "
+    "Respond with STRICT JSON and nothing else, in this exact shape: "
+    "{\"flagged\": [{\"id\": 123, \"reason\": \"short why\"}]}. "
+    "If nothing qualifies, respond exactly: {\"flagged\": []}"
+)
+
+
+async def _cryptic_analyze():
+    """Run the AI over the buffered messages; alert on anything flagged."""
+    global _cryptic_buffer, _cryptic_last_alert, _cryptic_analyzing
+    if _cryptic_analyzing:
+        return
+    if len(_cryptic_buffer) < CRYPTIC_BATCH_SIZE:
+        return
+    _cryptic_analyzing = True
+    batch = _cryptic_buffer[:]
+    _cryptic_buffer = []
+    try:
+        # Build the numbered transcript for the model
+        lines = []
+        by_id = {}
+        for msg, text in batch:
+            by_id[msg.id] = msg
+            author = msg.author.display_name
+            lines.append(f"[{msg.id}] {author}: {text}")
+        transcript = "\n".join(lines)
+
+        cfg = dict(load_config())
+        cfg["max_tokens"] = 400
+        cfg["temperature"] = 0.2
+        try:
+            reply = await asyncio.wait_for(
+                ask_ai(CRYPTIC_SYSTEM, [{"role": "user", "content": transcript}], cfg),
+                timeout=20,
+            )
+        except asyncio.TimeoutError:
+            return
+        if not reply:
+            return
+
+        # Parse JSON (strip code fences if present)
+        clean = reply.strip().replace("```json", "").replace("```", "").strip()
+        try:
+            data = json.loads(clean)
+        except Exception:
+            log.info("cryptic: non-JSON reply, skipping: %s", clean[:120])
+            return
+        flagged = data.get("flagged") or []
+        if not flagged:
+            return
+
+        # Rate-limit alerts
+        if time.time() - _cryptic_last_alert < CRYPTIC_ALERT_COOLDOWN:
+            return
+
+        alert_ch = client.get_channel(CRYPTIC_ALERT_CHANNEL)
+        if alert_ch is None:
+            alert_ch = await client.fetch_channel(CRYPTIC_ALERT_CHANNEL)
+
+        embed = discord.Embed(
+            title="🕵️ Possible cryptic / coded messaging",
+            description="The AI flagged the following as potentially coded or evasive. Review in context — it can be wrong.",
+            color=0xFFCF2B,
+        )
+        shown = 0
+        for f in flagged[:5]:
+            msg = by_id.get(f.get("id")) if isinstance(f.get("id"), int) else by_id.get(int(f.get("id", 0) or 0))
+            if not msg:
+                continue
+            content = (msg.content or "").strip()[:400] or "_(no text)_"
+            reason = str(f.get("reason", ""))[:200]
+            embed.add_field(
+                name=f"{msg.author.display_name}",
+                value=f"> {content}\n🧠 _{reason}_\n[jump to message]({msg.jump_url})",
+                inline=False,
+            )
+            shown += 1
+        if shown == 0:
+            return
+        embed.set_footer(text="AI moderation aid · not a verdict")
+        await alert_ch.send(
+            content=f"<@{CRYPTIC_OWNER_ID}>",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=[discord.Object(CRYPTIC_OWNER_ID)]),
+        )
+        _cryptic_last_alert = time.time()
+    except Exception as e:
+        log.warning("cryptic analyze error: %s", e)
+    finally:
+        _cryptic_analyzing = False
+
+
+async def handle_cryptic_scan(message: discord.Message):
+    """Buffer a message from the scanned channel; trigger analysis when full."""
+    try:
+        if message.channel.id != CRYPTIC_SCAN_CHANNEL or message.author.bot:
+            return
+        text = (message.content or "").strip()
+        if not text or text.startswith(("_", "/", "!", ".")):
+            return
+        _cryptic_buffer.append((message, text))
+        if len(_cryptic_buffer) >= CRYPTIC_BATCH_SIZE:
+            asyncio.create_task(_cryptic_analyze())
+    except Exception as e:
+        log.warning("cryptic scan buffer error: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🔥 BURNER CHANNEL — every message self-destructs 5 minutes after being posted.
 # Two layers: (1) per-message timer for precision, (2) a sweeper loop every 60s
 # that catches strays — messages sent while the bot was offline/restarting, or
@@ -27052,6 +27184,9 @@ async def on_message(message: discord.Message):
     # ── 🕵️ Ghost Log: snapshot EVERY watched-channel message (humans + bots)
     # before any early-returns, so embed/bot deletions can be mirrored too.
     _ghostlog_remember(message)
+    # ── 🕵️ Cryptic/coded-message detector: buffer scanned-channel messages ──
+    if not (message.author.bot and message.author != client.user):
+        asyncio.create_task(handle_cryptic_scan(message))
     # ── 🔥 Burner channel: arm the 5-minute self-destruct (bots burn too) ──
     _burner_schedule(message)
     # ── 🏷️ Tag role: instant sync for active members (no-op unless mismatched) ──
