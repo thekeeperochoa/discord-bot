@@ -17808,6 +17808,108 @@ async def _handle_crownboard(message: discord.Message):
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+async def _handle_dangerousroles(message: discord.Message):
+    """ADMIN/OWNER: _dangerousroles — list every role with native moderation or
+    nuke-capable permissions, so you can strip them and route staff through
+    supervised mod commands instead."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_admin or is_owner):
+        return  # silent to non-admins
+
+    guild = message.guild
+    if guild is None:
+        return
+
+    # Permissions that let a role nuke or moderate natively, worst first
+    PERM_FLAGS = [
+        ("administrator", "👑 ADMIN"),
+        ("ban_members", "🔨 Ban"),
+        ("kick_members", "👢 Kick"),
+        ("manage_guild", "⚙️ Manage Server"),
+        ("manage_roles", "🎭 Manage Roles"),
+        ("manage_channels", "📺 Manage Channels"),
+        ("manage_webhooks", "🪝 Manage Webhooks"),
+        ("moderate_members", "🔇 Timeout"),
+        ("manage_messages", "🗑️ Manage Msgs"),
+    ]
+
+    flagged = []
+    for role in guild.roles:
+        if role.is_default():
+            continue  # @everyone handled separately below
+        perms = role.permissions
+        hits = [label for attr, label in PERM_FLAGS if getattr(perms, attr, False)]
+        if hits:
+            flagged.append((role, hits))
+
+    # Sort: admin roles first, then by how many dangerous perms, then position
+    def _severity(item):
+        role, hits = item
+        return (0 if role.permissions.administrator else 1, -len(hits), -role.position)
+    flagged.sort(key=_severity)
+
+    if not flagged:
+        await message.channel.send("✅ No roles have native moderation permissions. Clean.")
+        return
+
+    def _chunk(lines, cap=1024):
+        blocks, cur = [], ""
+        for ln in lines:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur); cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    admin_lines, mod_lines = [], []
+    for role, hits in flagged:
+        n = len(role.members)
+        bots = sum(1 for m in role.members if m.bot)
+        who = f"{n} member{'s' if n != 1 else ''}"
+        if bots:
+            who += f" ({bots} bot{'s' if bots != 1 else ''})"
+        line = f"**{role.name}** — {who}\n└ {' · '.join(hits)}"
+        if role.permissions.administrator:
+            admin_lines.append(line)
+        else:
+            mod_lines.append(line)
+
+    embed = discord.Embed(
+        title="⚠️ Roles With Native Moderation Powers",
+        description=(f"**{len(flagged)}** role{'s' if len(flagged) != 1 else ''} can moderate or "
+                     "nuke natively. Strip these and route staff through supervised mod commands."),
+        color=0xFF3B5C,
+    )
+    if admin_lines:
+        for i, b in enumerate(_chunk(admin_lines)[:6]):
+            embed.add_field(
+                name=f"👑 ADMINISTRATOR — bypasses everything ({len(admin_lines)})" if i == 0 else "\u200b",
+                value=b, inline=False,
+            )
+    if mod_lines:
+        for i, b in enumerate(_chunk(mod_lines)[:12]):
+            embed.add_field(
+                name=f"🔨 Moderation perms ({len(mod_lines)})" if i == 0 else "\u200b",
+                value=b, inline=False,
+            )
+
+    # @everyone is the sneaky one — flag it loudly if it has anything
+    ev = guild.default_role.permissions
+    ev_hits = [label for attr, label in PERM_FLAGS if getattr(ev, attr, False)]
+    if ev_hits:
+        embed.add_field(
+            name="🚨 @everyone HAS DANGEROUS PERMS",
+            value="Every member in the server has: " + " · ".join(ev_hits) + "\n**Fix this first.**",
+            inline=False,
+        )
+
+    embed.set_footer(text="Admin bypasses ALL channel overrides · empty roles are still a risk if assignable")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_webhookaudit(message: discord.Message):
     """Prefix-only, ADMIN/OWNER ONLY: _webhookaudit — list every webhook in the
     server with creator + channel, flagging any not created by the bot."""
@@ -26316,6 +26418,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("webhookaudit", "webhooks", "hookaudit"):
         await _handle_webhookaudit(message)
+        return True
+    if cmd_name in ("dangerousroles", "modroles", "permaudit", "roleaudit"):
+        await _handle_dangerousroles(message)
         return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
