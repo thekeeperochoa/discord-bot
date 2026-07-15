@@ -17808,6 +17808,96 @@ async def _handle_crownboard(message: discord.Message):
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+HOME_GUILD_ID = 1227848251798061077  # Degenerates — never leave this one
+
+
+class LeaveServersView(discord.ui.View):
+    """One-tap purge: make the bot leave every guild except the home server.
+    Owner-only, with a confirm step so it can't be fat-fingered."""
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your control panel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Leave ALL other servers", emoji="🚪", style=discord.ButtonStyle.danger)
+    async def leave_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        targets = [g for g in client.guilds if g.id != HOME_GUILD_ID]
+        if not self.confirmed:
+            # First click = arm + require a second confirm
+            self.confirmed = True
+            button.label = f"CONFIRM — leave {len(targets)} servers?"
+            button.emoji = "⚠️"
+            await interaction.response.edit_message(
+                content=f"⚠️ This will make the bot leave **{len(targets)}** servers, "
+                        f"keeping only <#{HOME_GUILD_ID}>'s server. **Click again to confirm.**",
+                view=self,
+            )
+            return
+
+        # Second click = execute
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="🚪 Leaving servers…", view=self)
+
+        left, failed = 0, 0
+        for g in targets:
+            try:
+                await g.leave()
+                left += 1
+                await asyncio.sleep(0.5)  # be polite to the API
+            except Exception as e:
+                failed += 1
+                log.warning("leave guild %s failed: %s", g.id, e)
+        log.info("Bulk-left %d servers by owner %s (%d failed)", left, self.owner_id, failed)
+        await interaction.followup.send(
+            f"✅ Left **{left}** servers." + (f" ⚠️ {failed} failed." if failed else "") +
+            f" Still in **{len(client.guilds)}** (home server kept)."
+        )
+
+
+async def _handle_servers(message: discord.Message):
+    """OWNER-ONLY: _servers — list every server the bot is in (name + ID), with a
+    button to leave all of them except the home server."""
+    if message.author.id != SECRET_GIVE_OWNER_ID:
+        return  # owner only, silent to everyone else
+
+    guilds = sorted(client.guilds, key=lambda g: g.member_count or 0, reverse=True)
+    lines = []
+    for g in guilds:
+        home = " 🏠 **HOME**" if g.id == HOME_GUILD_ID else ""
+        members = f"{g.member_count:,}" if g.member_count else "?"
+        lines.append(f"**{g.name}** — `{g.id}` · {members} members{home}")
+
+    def _chunk(ls, cap=1024):
+        blocks, cur = [], ""
+        for ln in ls:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur); cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    embed = discord.Embed(
+        title=f"🌐 Servers ({len(guilds)})",
+        description=f"Every server the bot is in. Home server is <#{HOME_GUILD_ID}>'s (kept on purge).",
+        color=0x5865F2,
+    )
+    for i, b in enumerate(_chunk(lines)[:20]):
+        embed.add_field(name="\u200b" if i else "Servers", value=b, inline=False)
+    embed.set_footer(text="The button leaves ALL except the home server · requires confirm")
+
+    view = LeaveServersView(message.author.id)
+    await message.channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_dangeroususers(message: discord.Message):
     """ADMIN/OWNER: _dangeroususers — list every MEMBER whose combined roles grant
     native moderation or nuke permissions. Shows humans and bots separately so you
@@ -26526,6 +26616,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("dangeroususers", "moduser", "modusers", "poweraudit", "whocanban"):
         await _handle_dangeroususers(message)
+        return True
+    if cmd_name in ("servers", "guilds", "serverlist"):
+        await _handle_servers(message)
         return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
