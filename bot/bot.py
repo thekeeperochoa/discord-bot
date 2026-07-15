@@ -17861,6 +17861,84 @@ class LeaveServersView(discord.ui.View):
         )
 
 
+async def _handle_nitro(message: discord.Message, rest: str):
+    """ADMIN/OWNER: manage the ready-check Nitro jackpot.
+      _nitro                — status
+      _nitro on / off       — enable/disable the jackpot
+      _nitro add <link...>  — add one or more Nitro links to the prize pool
+      _nitro list           — show how many links are stocked
+      _nitro clear          — empty the pool"""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_owner or is_admin):
+        return  # silent to non-admins
+
+    data = _load_events()
+    nitro = data.setdefault("nitro", {"enabled": False, "codes": [], "claimed": []})
+    parts = (rest or "").strip().split()
+    sub = parts[0].lower() if parts else ""
+
+    if not sub or sub == "status":
+        state = "🟢 ON" if nitro.get("enabled") else "🔴 OFF"
+        stock = len(nitro.get("codes", []))
+        given = len(nitro.get("claimed", []))
+        await message.channel.send(
+            f"🎁 **Nitro Jackpot** — {state}\n"
+            f"🎟️ Links in pool: **{stock}**\n"
+            f"🏆 Won so far: **{given}**\n"
+            f"🎲 Jackpot chance: **{int(READY_NITRO_CHANCE*100)}%** per first click\n\n"
+            f"_Jackpot only fires when it's ON **and** links are stocked._"
+        )
+        return
+
+    if sub in ("on", "enable"):
+        if not nitro.get("codes"):
+            await message.channel.send("⚠️ Turning it on, but the pool is **empty** — add links with `_nitro add <link>` or nobody can win.")
+        nitro["enabled"] = True
+        _save_events(data)
+        await message.channel.send("🟢 Nitro jackpot is **ON**. Ready-check clicks can now hit Nitro.")
+        return
+
+    if sub in ("off", "disable"):
+        nitro["enabled"] = False
+        _save_events(data)
+        await message.channel.send("🔴 Nitro jackpot is **OFF**. Clicks still pay coins, just no Nitro.")
+        return
+
+    if sub == "add":
+        # everything after "add" — supports multiple links (space/newline separated)
+        raw = rest[len(parts[0]):].strip()
+        links = [l.strip() for l in re.split(r"\s+", raw) if l.strip().startswith("http")]
+        if not links:
+            await message.channel.send("Usage: `_nitro add <link>` — paste one or more Nitro links (must start with http).")
+            return
+        nitro.setdefault("codes", []).extend(links)
+        _save_events(data)
+        # delete the command message so the links aren't left sitting in chat
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.channel.send(
+            f"✅ Added **{len(links)}** Nitro link(s). Pool now holds **{len(nitro['codes'])}**. "
+            f"_(Your message was deleted so the links stay private.)_",
+            delete_after=15,
+        )
+        return
+
+    if sub == "list":
+        await message.channel.send(f"🎟️ **{len(nitro.get('codes', []))}** Nitro link(s) stocked, **{len(nitro.get('claimed', []))}** already won.")
+        return
+
+    if sub == "clear":
+        nitro["codes"] = []
+        _save_events(data)
+        await message.channel.send("🗑️ Nitro pool emptied.")
+        return
+
+    await message.channel.send("Usage: `_nitro on|off|add <link>|list|clear`")
+
+
 async def _handle_servers(message: discord.Message):
     """OWNER-ONLY: _servers — list every server the bot is in (name + ID), with a
     button to leave all of them except the home server."""
@@ -18314,6 +18392,90 @@ READY_EMBED_COLOR = 0x000000  # black
 _ready_cooldowns: dict[int, float] = {}   # channel_id -> last run ts
 
 
+# ── 🎁 READY-CHECK REWARDS — clicking Join / one sec pays coins, with a rare
+# Nitro jackpot. Nitro is OFF by default (toggle with _nitro on) and only fires
+# when there are unclaimed Nitro links in the pool; winners get theirs by DM. ──
+READY_REWARD_MIN = 50
+READY_REWARD_MAX = 250
+READY_NITRO_CHANCE = 0.02   # 2% jackpot per first-time click (only if nitro on + stock)
+
+
+def _nitro_state() -> dict:
+    data = _load_events()
+    n = data.setdefault("nitro", {"enabled": False, "codes": [], "claimed": []})
+    return n
+
+
+async def _ready_reward(interaction: discord.Interaction, view):
+    """Pay the clicking user coins (once per ready check); roll for a Nitro jackpot."""
+    uid = interaction.user.id
+    if uid in view.rewarded:
+        return  # already paid this check — no farming by re-clicking
+    view.rewarded.add(uid)
+
+    coins = random.randint(READY_REWARD_MIN, READY_REWARD_MAX)
+    new_bal = economy.add(uid, coins, "ready check reward")
+    try:
+        track_economy_event("earned", coins)
+    except Exception:
+        pass
+
+    # Jackpot roll — only if Nitro is enabled AND there's stock to give
+    data = _load_events()
+    nitro = data.setdefault("nitro", {"enabled": False, "codes": [], "claimed": []})
+    won_nitro = False
+    if nitro.get("enabled") and nitro.get("codes") and random.random() < READY_NITRO_CHANCE:
+        code = nitro["codes"].pop(0)
+        nitro.setdefault("claimed", []).append({
+            "user_id": str(uid), "code": code, "ts": int(time.time()),
+        })
+        _save_events(data)
+        # DM the winner their Nitro
+        try:
+            dm = await interaction.user.create_dm()
+            await dm.send(
+                f"# 🎉 JACKPOT — YOU WON NITRO!\n\n"
+                f"You hit the ready-check jackpot. Here's your Nitro, on the house:\n\n"
+                f"{code}\n\n_Claim it before someone else does. Enjoy. 🏴_"
+            )
+            won_nitro = True
+        except discord.Forbidden:
+            # DMs closed — refund the code back into the pool so it isn't lost
+            nitro["codes"].insert(0, code)
+            nitro["claimed"].pop()
+            _save_events(data)
+            try:
+                await interaction.followup.send(
+                    f"🎉 You hit the **NITRO JACKPOT** — but your DMs are closed so I can't send it! "
+                    f"Open your DMs and click again, or ping an admin.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            return
+
+    # Ephemeral payout message
+    if won_nitro:
+        msg = (f"# 🎉 JACKPOT!!! 🎉\nYou won **+{coins:,}** coins **AND NITRO** — "
+               f"check your DMs. 📬\nBalance: **{new_bal:,}**")
+    else:
+        msg = f"🎁 +**{coins:,}** coins for showing up! Balance: **{new_bal:,}**"
+    try:
+        await interaction.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass
+
+    # Announce a Nitro win publicly (hype)
+    if won_nitro:
+        try:
+            await interaction.channel.send(
+                f"🎉 **{interaction.user.mention} just won NITRO from a ready-check jackpot!** 🎉",
+                allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
+            )
+        except Exception:
+            pass
+
+
 class ReadyCheckView(discord.ui.View):
     def __init__(self, starter_id: int, role_mention: str = ""):
         super().__init__(timeout=None)     # no timer — open until Count is pressed
@@ -18322,6 +18484,7 @@ class ReadyCheckView(discord.ui.View):
         self.locked = False
         self.joiners: list[int] = []       # user ids in join order
         self.almost: list[int] = []        # user ids who hit "one sec"
+        self.rewarded: set[int] = set()    # user ids already paid this ready check
         self.message: discord.Message | None = None
 
     def _joiners_embed(self, closed: bool = False) -> discord.Embed:
@@ -18367,6 +18530,7 @@ class ReadyCheckView(discord.ui.View):
                 await interaction.response.defer()
             except Exception:
                 pass
+        await _ready_reward(interaction, self)
 
     @discord.ui.button(label="one sec", emoji="⏳", style=discord.ButtonStyle.secondary)
     async def one_sec_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -18386,6 +18550,7 @@ class ReadyCheckView(discord.ui.View):
                 await interaction.response.defer()
             except Exception:
                 pass
+        await _ready_reward(interaction, self)
 
     @discord.ui.button(label="Count", emoji="🔢", style=discord.ButtonStyle.secondary)
     async def count_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -26751,6 +26916,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("servers", "guilds", "serverlist"):
         await _handle_servers(message)
+        return True
+    if cmd_name in ("nitro", "jackpot", "nitropool"):
+        await _handle_nitro(message, rest)
         return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
