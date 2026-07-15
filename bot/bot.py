@@ -5468,26 +5468,23 @@ async def _handle_ranks(message: discord.Message):
 
 
 
-@tree.command(name="leaderboard", description="See the richest users in the server.")
-async def leaderboard_command(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    # Compute net worth for every user, then rank by it.
+def _build_leaderboard_embed(guild, viewer_id: int, mode: str = "networth") -> discord.Embed:
+    """Build the leaderboard embed. mode: 'networth' (cash + assets) or 'cash'
+    (liquid balance only). Shared by the command and the toggle buttons."""
     economy._load()
-    nw_map = []  # (uid, networth_total, cash)
+    rows = []  # (uid, networth, cash)
     for uid, data in economy._data["users"].items():
         nw = compute_net_worth(uid)
-        nw_map.append((uid, nw["total"], nw["cash"]))
-    all_ranked = sorted(nw_map, key=lambda x: x[1], reverse=True)
-    if not all_ranked:
-        await interaction.edit_original_response(content="No one has any coins yet.")
-        return
+        rows.append((uid, nw["total"], nw["cash"]))
 
+    is_cash = (mode == "cash")
+    sort_idx = 2 if is_cash else 1
+    all_ranked = sorted(rows, key=lambda x: x[sort_idx], reverse=True)
     top = all_ranked[:10]
 
     def _name_for(uid):
         try:
-            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+            member = guild.get_member(int(uid)) if guild else None
             raw = member.display_name if member else f"User {uid}"
         except Exception:
             raw = f"User {uid}"
@@ -5499,72 +5496,115 @@ async def leaderboard_command(interaction: discord.Interaction):
         if n >= 1_000: return f"{n/1_000:.1f}K"
         return str(n)
 
-    # ── Top 3 podium (ANSI, color-coded) ──
+    def _badges(uid):
+        sbadge = supporter_badge(int(uid))
+        pbadge = prestige_badge(uid)
+        if pbadge:
+            sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
+        ctag = crew_tag_of(uid)
+        if ctag:
+            sbadge = f"{sbadge + ' ' if sbadge else ''}{ctag}"
+        return f" {sbadge}" if sbadge else ""
+
     rank_styles = [
-        ("\u001b[1;33m", "①"),  # gold
-        ("\u001b[0;37m", "②"),  # silver
-        ("\u001b[1;31m", "③"),  # bronze-ish red
+        ("\u001b[1;33m", "\u2460"),  # gold
+        ("\u001b[0;37m", "\u2461"),  # silver
+        ("\u001b[1;31m", "\u2462"),  # bronze
     ]
     podium_lines = []
     for i in range(min(3, len(top))):
         uid, networth, cash = top[i]
+        val = cash if is_cash else networth
         color, num = rank_styles[i]
         name = _name_for(uid)[:16]
-        sbadge = supporter_badge(int(uid))
-        pbadge = prestige_badge(uid)
-        if pbadge:
-            sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
-        ctag = crew_tag_of(uid)
-        if ctag:
-            sbadge = f"{sbadge + ' ' if sbadge else ''}{ctag}"
-        sb = f" {sbadge}" if sbadge else ""
         podium_lines.append(
-            f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(networth):>8}\u001b[0m{sb}"
+            f"{color}{num} {name:<16}\u001b[0m \u001b[1;32m{_compact(val):>8}\u001b[0m{_badges(uid)}"
         )
 
-    # ── Ranks 4-10 (dimmer, aligned) ──
     rest_lines = []
     for i in range(3, len(top)):
         uid, networth, cash = top[i]
+        val = cash if is_cash else networth
         name = _name_for(uid)[:16]
-        sbadge = supporter_badge(int(uid))
-        pbadge = prestige_badge(uid)
-        if pbadge:
-            sbadge = f"{pbadge}{' ' + sbadge if sbadge else ''}"
-        ctag = crew_tag_of(uid)
-        if ctag:
-            sbadge = f"{sbadge + ' ' if sbadge else ''}{ctag}"
-        sb = f" {sbadge}" if sbadge else ""
         rest_lines.append(
-            f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(networth):>8}\u001b[0m{sb}"
+            f"\u001b[0;30m{i+1:>2}\u001b[0m \u001b[0;37m{name:<16}\u001b[0m \u001b[0;32m{_compact(val):>8}\u001b[0m{_badges(uid)}"
         )
 
+    header = "\u001b[1;33m\u2593\u2592\u2591 RICHEST IN THE CITY \u2591\u2592\u2593\u001b[0m"
+    subhead = ("\u001b[0;37m      ranked by cash on hand\u001b[0m" if is_cash
+               else "\u001b[0;37m       ranked by net worth\u001b[0m")
     body = (
-        "```ansi\n"
-        "\u001b[1;33m▓▒░ RICHEST IN THE CITY ░▒▓\u001b[0m\n"
-        "\u001b[0;37m       ranked by net worth\u001b[0m\n"
-        "\u001b[0;30m──────────────────────────────\u001b[0m\n"
+        "```ansi\n" + header + "\n" + subhead + "\n"
+        "\u001b[0;30m\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u001b[0m\n"
         + "\n".join(podium_lines)
     )
     if rest_lines:
-        body += "\n\u001b[0;30m──────────────────────────────\u001b[0m\n" + "\n".join(rest_lines)
+        body += "\n\u001b[0;30m\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u001b[0m\n" + "\n".join(rest_lines)
     body += "\n```"
 
     embed = discord.Embed(description=body, color=0xF1C40F)
 
-    # ── Viewer's own rank (if not in top 10) ──
-    viewer_id = str(interaction.user.id)
-    viewer_rank = next((idx for idx, (uid, _nw, _c) in enumerate(all_ranked) if uid == viewer_id), None)
+    # Viewer's own rank if outside the top 10
+    vid = str(viewer_id)
+    viewer_rank = next((idx for idx, r in enumerate(all_ranked) if r[0] == vid), None)
     if viewer_rank is not None and viewer_rank >= 10:
-        vnw = all_ranked[viewer_rank][1]
+        vval = all_ranked[viewer_rank][sort_idx]
+        label = "cash" if is_cash else "net worth"
         embed.add_field(
-            name="📍 Your Rank",
-            value=f"**#{viewer_rank + 1}** of {len(all_ranked)} · net worth {COIN_EMOJI} {vnw:,}",
+            name="\U0001F4CD Your Rank",
+            value=f"**#{viewer_rank + 1}** of {len(all_ranked)} \u00b7 {label} {COIN_EMOJI} {vval:,}",
             inline=False,
         )
 
-    embed.set_footer(text=patreon_footer(interaction.user.id, f"{len(all_ranked)} players ranked"))
-    await interaction.edit_original_response(embed=embed)
+    note = "\U0001F4B5 Cash = coins on hand" if is_cash else "\U0001F3E6 Net worth = cash + businesses, property, stocks & venues"
+    embed.set_footer(text=patreon_footer(viewer_id, f"{note} \u00b7 {len(all_ranked)} players ranked"))
+    return embed
+
+
+class LeaderboardView(discord.ui.View):
+    """Toggle between net worth and cash-on-hand rankings."""
+    def __init__(self, viewer_id: int, mode: str = "networth"):
+        super().__init__(timeout=300)
+        self.viewer_id = viewer_id
+        self.mode = mode
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        for child in self.children:
+            if child.custom_id == "lb_networth":
+                child.style = discord.ButtonStyle.primary if self.mode == "networth" else discord.ButtonStyle.secondary
+                child.disabled = (self.mode == "networth")
+            elif child.custom_id == "lb_cash":
+                child.style = discord.ButtonStyle.primary if self.mode == "cash" else discord.ButtonStyle.secondary
+                child.disabled = (self.mode == "cash")
+
+    async def _switch(self, interaction: discord.Interaction, mode: str):
+        # Anyone can flip the view; it re-renders for whoever clicked.
+        self.mode = mode
+        self._sync_buttons()
+        embed = _build_leaderboard_embed(interaction.guild, interaction.user.id, mode)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Net Worth", emoji="\U0001F3E6", style=discord.ButtonStyle.primary,
+                       custom_id="lb_networth", disabled=True)
+    async def networth_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch(interaction, "networth")
+
+    @discord.ui.button(label="Cash", emoji="\U0001F4B5", style=discord.ButtonStyle.secondary,
+                       custom_id="lb_cash")
+    async def cash_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch(interaction, "cash")
+
+
+@tree.command(name="leaderboard", description="See the richest users in the server.")
+async def leaderboard_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    economy._load()
+    if not economy._data.get("users"):
+        await interaction.edit_original_response(content="No one has any coins yet.")
+        return
+    embed = _build_leaderboard_embed(interaction.guild, interaction.user.id, "networth")
+    await interaction.edit_original_response(embed=embed, view=LeaderboardView(interaction.user.id))
 
 
 @tree.command(name="bet", description="Bet coins on a coinflip. Double or nothing.")
