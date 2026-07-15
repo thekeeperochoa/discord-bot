@@ -17808,6 +17808,108 @@ async def _handle_crownboard(message: discord.Message):
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+async def _handle_dangeroususers(message: discord.Message):
+    """ADMIN/OWNER: _dangeroususers — list every MEMBER whose combined roles grant
+    native moderation or nuke permissions. Shows humans and bots separately so you
+    can see exactly who could wreck the server."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_admin or is_owner):
+        return  # silent to non-admins
+
+    guild = message.guild
+    if guild is None:
+        return
+
+    PERM_FLAGS = [
+        ("administrator", "👑 ADMIN"),
+        ("ban_members", "🔨 Ban"),
+        ("kick_members", "👢 Kick"),
+        ("manage_guild", "⚙️ Server"),
+        ("manage_roles", "🎭 Roles"),
+        ("manage_channels", "📺 Channels"),
+        ("manage_webhooks", "🪝 Webhooks"),
+        ("moderate_members", "🔇 Timeout"),
+        ("manage_messages", "🗑️ Msgs"),
+    ]
+
+    humans, bots = [], []
+    for m in guild.members:
+        perms = m.guild_permissions  # combined across all their roles
+        hits = [label for attr, label in PERM_FLAGS if getattr(perms, attr, False)]
+        if not hits:
+            continue
+        # Which roles grant the danger (so you know what to strip)
+        danger_roles = []
+        for r in m.roles:
+            if r.is_default():
+                continue
+            if any(getattr(r.permissions, attr, False) for attr, _ in PERM_FLAGS):
+                danger_roles.append(r.name)
+        entry = (m, hits, danger_roles, perms.administrator)
+        (bots if m.bot else humans).append(entry)
+
+    if not humans and not bots:
+        await message.channel.send("✅ Nobody has native moderation permissions. Clean.")
+        return
+
+    # Sort: admins first, then by number of dangerous perms
+    def _sev(e):
+        _m, hits, _dr, is_admin_p = e
+        return (0 if is_admin_p else 1, -len(hits))
+    humans.sort(key=_sev)
+    bots.sort(key=_sev)
+
+    def _chunk(lines, cap=1024):
+        blocks, cur = [], ""
+        for ln in lines:
+            if cur and len(cur) + 1 + len(ln) > cap:
+                blocks.append(cur); cur = ln
+            else:
+                cur = f"{cur}\n{ln}" if cur else ln
+        if cur:
+            blocks.append(cur)
+        return blocks
+
+    def _fmt(entry):
+        m, hits, danger_roles, is_admin_p = entry
+        via = ", ".join(danger_roles[:3])
+        if len(danger_roles) > 3:
+            via += f" +{len(danger_roles) - 3}"
+        return f"**{m.display_name}** (`{m}`)\n└ {' · '.join(hits)}\n└ _via: {via}_"
+
+    embed = discord.Embed(
+        title="⚠️ Users With Dangerous Permissions",
+        description=(f"**{len(humans)}** human{'s' if len(humans) != 1 else ''} and "
+                     f"**{len(bots)}** bot{'s' if len(bots) != 1 else ''} can moderate or nuke natively. "
+                     "Humans are the real risk — a compromised human account = a nuked server."),
+        color=0xFF3B5C,
+    )
+
+    if humans:
+        for i, b in enumerate(_chunk([_fmt(e) for e in humans])[:8]):
+            embed.add_field(
+                name=f"🧑 HUMANS with power ({len(humans)}) — review these first" if i == 0 else "\u200b",
+                value=b, inline=False,
+            )
+    else:
+        embed.add_field(name="🧑 Humans", value="_None — all power is held by bots. Good._", inline=False)
+
+    if bots:
+        # Bots are shown compactly — you mostly care about the count + admins
+        bot_admins = [e for e in bots if e[3]]
+        blist = [f"**{m.display_name}**" + (" 👑" if adm else "") for (m, _h, _dr, adm) in bots]
+        val = "\n".join(_chunk(blist)[:1]) if blist else "—"
+        embed.add_field(
+            name=f"🤖 Bots with power ({len(bots)}, {len(bot_admins)} admin)",
+            value=(val + "\n_See `_dangerousroles` for exactly what each bot can do._")[:1024],
+            inline=False,
+        )
+
+    embed.set_footer(text="A human with ADMIN or Ban is the top nuke risk · lock those down first")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 async def _handle_dangerousroles(message: discord.Message):
     """ADMIN/OWNER: _dangerousroles — list every role with native moderation or
     nuke-capable permissions, so you can strip them and route staff through
@@ -26421,6 +26523,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("dangerousroles", "modroles", "permaudit", "roleaudit"):
         await _handle_dangerousroles(message)
+        return True
+    if cmd_name in ("dangeroususers", "moduser", "modusers", "poweraudit", "whocanban"):
+        await _handle_dangeroususers(message)
         return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
