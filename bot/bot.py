@@ -18395,8 +18395,8 @@ _ready_cooldowns: dict[int, float] = {}   # channel_id -> last run ts
 # ── 🎁 READY-CHECK REWARDS — clicking Join / one sec pays coins, with a rare
 # Nitro jackpot. Nitro is OFF by default (toggle with _nitro on) and only fires
 # when there are unclaimed Nitro links in the pool; winners get theirs by DM. ──
-READY_REWARD_MIN = 50
-READY_REWARD_MAX = 250
+READY_REWARD_MIN = 100
+READY_REWARD_MAX = 25_000
 READY_NITRO_CHANCE = 0.02   # 2% jackpot per first-time click (only if nitro on + stock)
 
 
