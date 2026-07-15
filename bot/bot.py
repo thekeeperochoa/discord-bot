@@ -14286,7 +14286,7 @@ LIQUOR_TYPES = {
 NIGHTLIFE_COLLECT_COOLDOWN_MIN = 60  # 1 hour cooldown on collecting per venue
 NIGHTLIFE_MAX_IDLE_HOURS = 18
 NIGHTLIFE_RISK_INTERVAL_HOURS = 3  # how often to roll for events
-NIGHTLIFE_RISK_CHANCE = 0.10       # 10% chance per venue per roll
+NIGHTLIFE_RISK_CHANCE = 0.22       # 22% chance per venue per roll — the city is hostile
 
 
 def _load_nightlife() -> dict:
@@ -14349,6 +14349,59 @@ def _venue_cost(user_id: int, venue_type: str) -> int:
     return int(base * (1.5 ** same_tier_owned))
 
 
+# ── 🌃 VENUE DIFFICULTY LAYER ────────────────────────────────────────────────
+# Venues are no longer a buy-and-forget faucet. Four systems now interlock:
+#   1. REPUTATION (0-100) — scales all income. Events tank it, good nights build it.
+#   2. OVERHEAD — rent + staff salaries are deducted from every collection.
+#   3. LIQUOR REQUIRED — a dry bar can't serve drinks; income collapses to cover charge.
+#   4. HARSHER EVENTS — more frequent, more varied, and they damage reputation.
+# All new fields default safely so existing venues keep working.
+VENUE_REP_DEFAULT = 75       # existing/new venues start here
+VENUE_RENT_PCT = 0.25        # rent = 25% of base hourly income
+VENUE_SALARY_PCT = 0.005     # staff salary/hr = 0.5% of their hire cost
+VENUE_DRY_PENALTY = 0.35     # income multiplier when no liquor is stocked
+VENUE_REP_GAIN = 2           # rep gained per healthy collection
+VENUE_DRY_REP_LOSS = 5       # rep lost for collecting with an empty bar
+
+
+def _venue_rep(venue: dict) -> int:
+    return max(0, min(100, venue.get("rep", VENUE_REP_DEFAULT)))
+
+
+def _venue_rep_mult(venue: dict) -> float:
+    """Reputation scales income: 100 rep = 1.2x, 75 = 1.0x, 50 = 0.8x, 0 = 0.4x."""
+    return 0.4 + (_venue_rep(venue) / 100) * 0.8
+
+
+def _venue_rep_label(rep: int) -> str:
+    if rep >= 90: return "🌟 Legendary"
+    if rep >= 75: return "✅ Respected"
+    if rep >= 50: return "😐 Mixed"
+    if rep >= 25: return "⚠️ Struggling"
+    return "💀 Notorious"
+
+
+def _venue_adjust_rep(venue: dict, delta: int):
+    venue["rep"] = max(0, min(100, _venue_rep(venue) + delta))
+
+
+def _venue_has_liquor(venue: dict) -> bool:
+    return any(b > 0 for b in venue.get("liquor", {}).values())
+
+
+def _venue_overhead_per_hour(venue: dict) -> int:
+    """Rent + staff salaries. The cost of keeping the doors open."""
+    info = VENUE_TYPES.get(venue["type"])
+    if not info:
+        return 0
+    rent = info["income_per_hour"] * VENUE_RENT_PCT
+    salaries = 0
+    for role in venue.get("staff", []):
+        r = STAFF_ROLES.get(role, {})
+        salaries += r.get("cost", 0) * VENUE_SALARY_PCT
+    return int(rent + salaries)
+
+
 def _venue_income_per_hour(venue: dict) -> int:
     info = VENUE_TYPES.get(venue["type"])
     if not info:
@@ -14364,7 +14417,12 @@ def _venue_income_per_hour(venue: dict) -> int:
     # Packed night (ad campaign consolation win) — 1.5x
     elif venue.get("packed_until", 0) > time.time():
         boost *= 1.5
-    return int(base * boost)
+    # Reputation scales everything — a notorious venue bleeds customers
+    boost *= _venue_rep_mult(venue)
+    # A dry bar can't serve drinks — you're running on cover charge alone
+    if not _venue_has_liquor(venue):
+        boost *= VENUE_DRY_PENALTY
+    return max(0, int(base * boost))
 
 
 def _venue_pending_income(venue: dict) -> int:
@@ -14514,6 +14572,14 @@ async def collectvenue_command(interaction: discord.Interaction):
         pending = _venue_pending_income(venue)
         if pending <= 0:
             continue
+
+        # Hours this collection covers — overhead is charged for that whole window
+        now = time.time()
+        last = venue.get("last_collected", venue.get("purchased_at", now))
+        hours = min((now - last) / 3600, NIGHTLIFE_MAX_IDLE_HOURS)
+
+        had_liquor = _venue_has_liquor(venue)
+
         # Add liquor sales bonus based on stocked bottles
         liquor_bonus = 0
         for liq_key, bottles in list(venue.get("liquor", {}).items()):
@@ -14527,17 +14593,45 @@ async def collectvenue_command(interaction: discord.Interaction):
             liquor_bonus += sold * (liq_info["revenue_per_bottle"] - liq_info["cost_per_bottle"])
             venue["liquor"][liq_key] = bottles - sold
 
-        revenue = pending + liquor_bonus
-        venue["last_collected"] = time.time()
-        venue["lifetime_revenue"] = venue.get("lifetime_revenue", 0) + revenue
+        # 💸 Overhead: rent + payroll for the hours since last collection
+        overhead = int(_venue_overhead_per_hour(venue) * hours)
+        revenue = pending + liquor_bonus - overhead
+
+        # 📈 Reputation shifts based on how you ran the place
+        if had_liquor:
+            _venue_adjust_rep(venue, VENUE_REP_GAIN)
+        else:
+            _venue_adjust_rep(venue, -VENUE_DRY_REP_LOSS)
+
+        venue["last_collected"] = now
+        venue["lifetime_revenue"] = venue.get("lifetime_revenue", 0) + max(0, revenue)
         total += revenue
-        liquor_text = f" + {liquor_bonus:,} liquor" if liquor_bonus > 0 else ""
-        lines.append(f"{info['emoji']} **{venue['name']}** — {pending:,}{liquor_text} = **{revenue:,}**")
+
+        rep = _venue_rep(venue)
+        bits = [f"{pending:,}"]
+        if liquor_bonus > 0:
+            bits.append(f"+{liquor_bonus:,} 🍾")
+        bits.append(f"-{overhead:,} 💸")
+        flag = "" if had_liquor else "  ⚠️ **DRY BAR**"
+        sign = "**+" if revenue >= 0 else "**"
+        lines.append(
+            f"{info['emoji']} **{venue['name']}** ({rep} rep) — "
+            + " ".join(bits) + f" = {sign}{revenue:,}**{flag}"
+        )
 
     _save_nightlife(data)
-    if total <= 0:
+    if not lines:
         await interaction.response.send_message(
             "💤 No revenue yet. Be patient — venues take time.", ephemeral=True
+        )
+        return
+    if total <= 0:
+        economy.add(user.id, total, "venue overhead loss")
+        await interaction.response.send_message(
+            "# 📉 YOU RAN AT A LOSS\n\n" + "\n".join(lines)
+            + f"\n\n💸 **Net: {total:,}** — overhead ate everything.\n"
+            f"_Stock liquor with `/stockliquor`, and don't over-staff a small venue._\n"
+            f"Balance: **{economy.balance(user.id):,}**"
         )
         return
 
@@ -14745,15 +14839,25 @@ async def nightlife_events_scheduler():
 
                     # Check for bouncer risk reduction
                     has_bouncer = "bouncer" in venue.get("staff", [])
-                    # Pick an event weighted by venue + staff
+                    # Expanded event table — most outcomes now hurt, and they hit
+                    # reputation as well as closing the doors.
+                    # (emoji, desc, close_hours, is_brawl, rep_delta)
                     events = [
-                        ("🚨", "got raided — liquor license violation", 6, True),  # closes
-                        ("🥊", "had a brawl break out", 3, True),                    # closes (bouncer reduces)
-                        ("📋", "got a noise complaint visit", 2, False),             # no close, no celebrity
-                        ("⭐", "CELEBRITY in the building!", 0, False),              # 3x income for 6h
+                        ("🚨", "got raided — liquor license violation", 6, True, -20),
+                        ("🥊", "had a brawl break out", 3, True, -15),
+                        ("📋", "got a noise complaint visit", 2, False, -8),
+                        ("🦠", "failed a health inspection", 8, False, -25),
+                        ("💸", "got robbed at close", 2, False, -5),
+                        ("🚔", "had an underage sting", 12, False, -30),
+                        ("🐀", "had a rat sighting go viral", 4, False, -22),
+                        ("🚿", "flooded — burst pipe behind the bar", 5, False, -10),
+                        ("😤", "had a bartender walk out mid-shift", 0, False, -12),
+                        ("⭐", "CELEBRITY in the building!", 0, False, 10),
+                        ("🔥", "went viral — best night in months", 0, False, 15),
                     ]
                     event = random.choice(events)
-                    emoji, desc, close_hours, is_brawl = event
+                    emoji, desc, close_hours, is_brawl, rep_delta = event
+                    _venue_adjust_rep(venue, rep_delta)
 
                     if "CELEBRITY" in desc:
                         venue["celebrity_until"] = time.time() + 6 * 3600
@@ -14773,7 +14877,8 @@ async def nightlife_events_scheduler():
                         except Exception:
                             pass
                     elif is_brawl and has_bouncer and random.random() < 0.5:
-                        # Bouncer prevented it
+                        # Bouncer prevented it — undo the rep hit, it never happened
+                        _venue_adjust_rep(venue, -rep_delta)
                         if channel:
                             try:
                                 await channel.send(
@@ -14783,6 +14888,33 @@ async def nightlife_events_scheduler():
                                 )
                             except Exception:
                                 pass
+                    elif rep_delta > 0:
+                        # Positive night — no closure, just clout
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}\n"
+                                    f"📈 Reputation **+{rep_delta}** → now **{_venue_rep(venue)}/100**.",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                    elif close_hours <= 0:
+                        # Bad night, but the doors stay open — reputation takes the hit
+                        if channel:
+                            try:
+                                await channel.send(
+                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}!\n"
+                                    f"📉 Reputation **{rep_delta}** → now **{_venue_rep(venue)}/100**.",
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            await send_dm(int(uid), "business",
+                                content=f"{emoji} Your {venue['name']} {desc}. Reputation is now {_venue_rep(venue)}/100.")
+                        except Exception:
+                            pass
                     else:
                         venue["closed_until"] = time.time() + close_hours * 3600
                         if channel:
@@ -17859,6 +17991,95 @@ class LeaveServersView(discord.ui.View):
             f"✅ Left **{left}** servers." + (f" ⚠️ {failed} failed." if failed else "") +
             f" Still in **{len(client.guilds)}** (home server kept)."
         )
+
+
+VENUE_PR_COST_PER_POINT = 400   # coins per reputation point bought back
+
+
+async def _handle_venuedash(message: discord.Message):
+    """_venue — full management view: reputation, overhead, stock, net/hr."""
+    uid = str(message.author.id)
+    data = _load_nightlife()
+    venues = data.get("users", {}).get(uid, [])
+    if not venues:
+        await message.channel.send("You don't own any venues. `/buyvenue` to start.")
+        return
+
+    embed = discord.Embed(
+        title="🌃 Your Nightlife Empire",
+        description="_Rent and payroll are charged every collection. Keep the bar stocked and the rep high._",
+        color=0x9B59B6,
+    )
+    total_net = 0
+    for i, v in enumerate(venues, 1):
+        info = VENUE_TYPES.get(v["type"], {"emoji": "🏢", "name": "?"})
+        rep = _venue_rep(v)
+        gross = _venue_income_per_hour(v)
+        overhead = _venue_overhead_per_hour(v)
+        net = gross - overhead
+        total_net += net
+        bottles = sum(v.get("liquor", {}).values())
+        staff = len(v.get("staff", []))
+        closed = v.get("closed_until", 0) > time.time()
+
+        status = "🚧 CLOSED" if closed else ("⚠️ DRY BAR" if not _venue_has_liquor(v) else "✅ Open")
+        embed.add_field(
+            name=f"#{i} {info['emoji']} {v['name']}",
+            value=(f"{status} · {_venue_rep_label(rep)} **{rep}/100**\n"
+                   f"📈 Gross **{gross:,}/hr** − 💸 Overhead **{overhead:,}/hr** = "
+                   f"{'**+' if net >= 0 else '**'}{net:,}/hr**\n"
+                   f"🍾 {bottles} bottles · 👥 {staff} staff"),
+            inline=False,
+        )
+    embed.set_footer(text=f"Net {total_net:,}/hr across {len(venues)} venue(s) · _pr <slot> to buy reputation")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _handle_venue_pr(message: discord.Message, rest: str):
+    """_pr <slot> <points> — buy reputation back with a PR campaign."""
+    uid = str(message.author.id)
+    data = _load_nightlife()
+    venues = data.get("users", {}).get(uid, [])
+    if not venues:
+        await message.channel.send("You don't own any venues.")
+        return
+    parts = (rest or "").split()
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        await message.channel.send(
+            f"Usage: `_pr <slot> <points>` — buy reputation back at **{VENUE_PR_COST_PER_POINT:,}** coins/point.\n"
+            "_Slot numbers come from `_venue`._"
+        )
+        return
+    slot, points = int(parts[0]), int(parts[1])
+    if not (1 <= slot <= len(venues)):
+        await message.channel.send(f"You have {len(venues)} venue(s). Pick 1-{len(venues)}.")
+        return
+    v = venues[slot - 1]
+    rep = _venue_rep(v)
+    room = 100 - rep
+    if room <= 0:
+        await message.channel.send(f"**{v['name']}** is already at 100 rep. Nothing to fix.")
+        return
+    points = min(points, room)
+    cost = points * VENUE_PR_COST_PER_POINT
+    if economy.balance(message.author.id) < cost:
+        await message.channel.send(
+            f"❌ {points} rep costs **{cost:,}**. You have **{economy.balance(message.author.id):,}**."
+        )
+        return
+    economy.add(message.author.id, -cost, f"venue PR: {v['type']}")
+    _venue_adjust_rep(v, points)
+    _save_nightlife(data)
+    try:
+        track_economy_event("spent", cost)
+    except Exception:
+        pass
+    info = VENUE_TYPES.get(v["type"], {"emoji": "🏢"})
+    await message.channel.send(
+        f"📰 PR campaign ran for {info['emoji']} **{v['name']}** — "
+        f"paid **{cost:,}** for **+{points} rep**.\n"
+        f"Reputation now **{_venue_rep(v)}/100** ({_venue_rep_label(_venue_rep(v))})."
+    )
 
 
 async def _handle_nitro(message: discord.Message, rest: str):
@@ -26919,6 +27140,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("nitro", "jackpot", "nitropool"):
         await _handle_nitro(message, rest)
+        return True
+    if cmd_name in ("venue", "venuedash", "myvenues"):
+        await _handle_venuedash(message)
+        return True
+    if cmd_name in ("pr", "prcampaign", "repfix"):
+        await _handle_venue_pr(message, rest)
         return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
