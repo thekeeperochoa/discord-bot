@@ -13239,6 +13239,11 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
     atk_roll = atk_power + random.randint(0, 80)
     def_roll = def_power + min(60, defense) + def_crew_bonus + random.randint(0, 25)
 
+    # A corner beaten down to 0 defense is UNDEFENDED — the next raid takes it,
+    # period. Otherwise "defense: 0" is misleading (players hit 0 and still lose
+    # to the holder's raw power). Chipping it to 0 is the whole point of raiding.
+    captured = (defense <= 0) or (atk_roll > def_roll)
+
     attacker["last_raid"] = time.time()
     attacker["heat"] = min(HEAT_MAX, attacker.get("heat", 0) + TERRITORY_RAID_HEAT)
 
@@ -13252,7 +13257,7 @@ async def _handle_raid_turf(message: discord.Message, rest: str):
     atk_tag = f"[{attacker_crew['tag']}] " if attacker_crew else ""
     def_tag = f"[{defending_crew['tag']}] " if defending_crew else ""
 
-    if atk_roll > def_roll:
+    if captured:
         # Attacker takes the corner — it now flies the attacker's crew (or no crew)
         corner["controller"] = str(uid)
         corner["since"] = time.time()
