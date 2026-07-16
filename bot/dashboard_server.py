@@ -1963,8 +1963,29 @@ async function loadVoiceAnalytics() {
 """
 
 
-def start_dashboard(port: int = 8080):
+def _rebind_memory_dir(memory_dir):
+    """Point every data path at the SAME folder bot.py is using. Called at startup
+    with bot.py's own MEMORY_DIR so the two halves can never disagree — this is the
+    handoff that makes verify tokens (written by the bot, read here) resolve."""
+    global MEMORY_DIR, STATS_FILE, ECONOMY_FILE, VOICE_FILE
+    global VERIFY_CONFIG_FILE, VERIFY_DATA_FILE, VERIFY_PENDING_FILE, VERIFY_QUEUE_FILE, _SALT_FILE
+    MEMORY_DIR = Path(memory_dir)
+    STATS_FILE = MEMORY_DIR / "stats.json"
+    ECONOMY_FILE = MEMORY_DIR / "economy.json"
+    VOICE_FILE = MEMORY_DIR / "voice_analytics.json"
+    VERIFY_CONFIG_FILE = MEMORY_DIR / "verify_config.json"
+    VERIFY_DATA_FILE = MEMORY_DIR / "verify_data.json"
+    VERIFY_PENDING_FILE = MEMORY_DIR / "verify_pending.json"
+    VERIFY_QUEUE_FILE = MEMORY_DIR / "verify_queue.json"
+    _SALT_FILE = MEMORY_DIR / "verify_salt.txt"
+    log.info("dashboard paths bound to bot's MEMORY_DIR: %s (exists=%s)",
+             MEMORY_DIR, MEMORY_DIR.exists())
+
+
+def start_dashboard(port: int = 8080, memory_dir=None):
     """Run the Flask server. Called from bot.py on a background thread."""
+    if memory_dir is not None:
+        _rebind_memory_dir(memory_dir)
     log.info("Starting dashboard on port %s", port)
     # Use waitress if available (production-quality), else Flask dev server
     try:

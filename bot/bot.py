@@ -28360,7 +28360,9 @@ if __name__ == "__main__":
             import threading
             from dashboard_server import start_dashboard
             port = int(os.environ.get("PORT", 8080))
-            t = threading.Thread(target=start_dashboard, args=(port,), daemon=True)
+            # Hand the dashboard our exact MEMORY_DIR so both halves read/write
+            # the same files (verify tokens, stats, economy) — no path guessing.
+            t = threading.Thread(target=start_dashboard, args=(port, MEMORY_DIR), daemon=True)
             t.start()
             log.info("Dashboard thread started on port %s", port)
     except ImportError as e:
