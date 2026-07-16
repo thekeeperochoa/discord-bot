@@ -14530,9 +14530,10 @@ async def venues_command(interaction: discord.Interaction, user: discord.Member 
         pending = _venue_pending_income(venue)
         staff = venue.get("staff", [])
         if venue.get("closed_until", 0) > time.time():
-            status = "🚨 CLOSED"
+            # Discord relative timestamp = live countdown, never goes stale
+            status = f"🚨 CLOSED · reopens <t:{int(venue['closed_until'])}:R>"
         elif venue.get("celebrity_until", 0) > time.time():
-            status = "⭐ CELEBRITY NIGHT (3x)"
+            status = f"⭐ CELEBRITY NIGHT (3x) · ends <t:{int(venue['celebrity_until'])}:R>"
         else:
             status = "✅ Open"
         embed.add_field(
@@ -17594,15 +17595,19 @@ async def _handle_advertise(message: discord.Message, rest: str):
     now = time.time()
     info = VENUE_TYPES.get(venue["type"], {})
     if venue.get("closed_until", 0) > now:
-        hrs = (venue["closed_until"] - now) / 3600
-        await message.channel.send(f"🚧 **{venue['name']}** is closed for another **{hrs:.1f}h** — can't advertise a shut door.")
+        await message.channel.send(
+            f"🚧 **{venue['name']}** is closed — reopens <t:{int(venue['closed_until'])}:R>. "
+            f"Can't advertise a shut door."
+        )
         return
     if venue.get("ad_pending"):
         await message.channel.send(f"📣 **{venue['name']}** already has a campaign running. Patience.")
         return
     if now - venue.get("last_ad", 0) < AD_COOLDOWN_HOURS * 3600:
-        left = (venue.get("last_ad", 0) + AD_COOLDOWN_HOURS * 3600 - now) / 3600
-        await message.channel.send(f"⏳ The city's tired of your flyers. Next campaign in **{left:.1f}h**.")
+        next_ad = venue.get("last_ad", 0) + AD_COOLDOWN_HOURS * 3600
+        await message.channel.send(
+            f"⏳ The city's tired of your flyers. Next campaign <t:{int(next_ad)}:R>."
+        )
         return
 
     fee = int(info.get("income_per_hour", 1000)) * AD_FEE_MULT
@@ -18024,7 +18029,16 @@ async def _handle_venuedash(message: discord.Message):
         staff = len(v.get("staff", []))
         closed = v.get("closed_until", 0) > time.time()
 
-        status = "🚧 CLOSED" if closed else ("⚠️ DRY BAR" if not _venue_has_liquor(v) else "✅ Open")
+        if closed:
+            status = f"🚧 CLOSED · reopens <t:{int(v['closed_until'])}:R>"
+        elif v.get("celebrity_until", 0) > time.time():
+            status = f"⭐ CELEBRITY NIGHT · ends <t:{int(v['celebrity_until'])}:R>"
+        elif v.get("packed_until", 0) > time.time():
+            status = f"🔥 PACKED · ends <t:{int(v['packed_until'])}:R>"
+        elif not _venue_has_liquor(v):
+            status = "⚠️ DRY BAR"
+        else:
+            status = "✅ Open"
         embed.add_field(
             name=f"#{i} {info['emoji']} {v['name']}",
             value=(f"{status} · {_venue_rep_label(rep)} **{rep}/100**\n"
