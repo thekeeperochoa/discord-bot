@@ -31,7 +31,11 @@ ADMIN_IDS = set(
     s.strip() for s in os.environ.get("DASHBOARD_ADMIN_IDS", "").split(",") if s.strip()
 )
 SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET", secrets.token_hex(32))
-MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/app/memory"))
+# Must resolve to the SAME folder bot.py uses, or the two halves of the app read
+# different files. bot.py uses ROOT/"memory" where ROOT = <repo>/ — mirror that,
+# and only let an explicit env var override it.
+_DEFAULT_MEMORY_DIR = Path(__file__).resolve().parent.parent / "memory"
+MEMORY_DIR = Path(os.environ.get("MEMORY_DIR") or _DEFAULT_MEMORY_DIR)
 STATS_FILE = MEMORY_DIR / "stats.json"
 ECONOMY_FILE = MEMORY_DIR / "economy.json"
 
@@ -52,6 +56,9 @@ def _bot_headers() -> dict:
 # Small in-process cache for guild metadata (channels/roles/members) so the
 # autocomplete doesn't hammer the Discord API on every keystroke.
 _guild_meta_cache = {"ts": 0.0, "data": None}
+
+log.info("dashboard MEMORY_DIR resolved to: %s (exists=%s)",
+         MEMORY_DIR, MEMORY_DIR.exists())
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
@@ -258,6 +265,14 @@ def verify_page(token):
     pend = _load_json(VERIFY_PENDING_FILE, {})
     entry = pend.get(token)
     now = datetime.now(timezone.utc).timestamp()
+
+    if not entry:
+        log.warning(
+            "verify: token NOT FOUND. file=%s exists=%s tokens_on_disk=%d token=%s…",
+            VERIFY_PENDING_FILE, VERIFY_PENDING_FILE.exists(), len(pend), token[:8],
+        )
+    elif entry.get("expires", 0) < now:
+        log.warning("verify: token expired %.0fs ago", now - entry.get("expires", 0))
 
     if not entry or entry.get("expires", 0) < now:
         return _verify_page("Expired", (
