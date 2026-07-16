@@ -19793,8 +19793,11 @@ class VerifyView(discord.ui.View):
         }
         _vsave(VERIFY_PENDING_FILE, pend)
         link = f"{base}/verify/{token}"
+        # <angle brackets> stop Discord unfurling — and therefore pre-fetching — the
+        # link. A crawler hit would otherwise consume the one-time token before the
+        # user ever clicks it.
         await interaction.response.send_message(
-            f"### 🔐 Your private verification link\n{link}\n\n"
+            f"### 🔐 Your private verification link\n<{link}>\n\n"
             f"⏱️ Expires in **15 minutes** · single use · **don't share it.**\n\n"
             f"_We check your connection for a VPN/proxy and for alt accounts. "
             f"Your IP is **never stored** — only an anonymous fingerprint._",

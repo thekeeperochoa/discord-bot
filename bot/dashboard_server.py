@@ -260,25 +260,68 @@ and your country — used solely to detect duplicate accounts.</div>
 </div></body></html>"""
 
 
-@app.route("/verify/<token>")
+def _is_crawler() -> bool:
+    """Discord (and Slack/Twitter/etc) fetch posted links to build previews. Those
+    hits must never consume a token or get IP-checked — they're not the user."""
+    ua = (request.headers.get("User-Agent") or "").lower()
+    return any(bot in ua for bot in (
+        "discordbot", "slackbot", "twitterbot", "facebookexternalhit",
+        "telegrambot", "whatsapp", "skypeuripreview", "bot", "crawler", "spider",
+        "preview", "curl", "wget", "python-requests",
+    ))
+
+
+@app.route("/verify/<token>", methods=["GET"])
 def verify_page(token):
+    """SAFE GET — never consumes the token. Renders a confirm button that POSTs.
+    This is what makes link previews harmless: crawlers only ever GET."""
+    if _is_crawler():
+        # Give previews a neutral card; touch nothing.
+        return _verify_page("Verification", (
+            '<div class="big">🔐</div><h1>Verification</h1>'
+            '<p>Open this link in your browser to verify.</p>')), 200
+
     pend = _load_json(VERIFY_PENDING_FILE, {})
     entry = pend.get(token)
     now = datetime.now(timezone.utc).timestamp()
 
     if not entry:
-        log.warning(
-            "verify: token NOT FOUND. file=%s exists=%s tokens_on_disk=%d token=%s…",
-            VERIFY_PENDING_FILE, VERIFY_PENDING_FILE.exists(), len(pend), token[:8],
-        )
+        log.warning("verify GET: token NOT FOUND. file=%s exists=%s tokens_on_disk=%d token=%s…",
+                    VERIFY_PENDING_FILE, VERIFY_PENDING_FILE.exists(), len(pend), token[:8])
     elif entry.get("expires", 0) < now:
-        log.warning("verify: token expired %.0fs ago", now - entry.get("expires", 0))
+        log.warning("verify GET: token expired %.0fs ago", now - entry.get("expires", 0))
 
     if not entry or entry.get("expires", 0) < now:
         return _verify_page("Expired", (
             '<div class="big">⏱️</div><h1 style="color:#ff6b6b">Link expired or invalid</h1>'
             '<p>Verification links last 15 minutes and work once. '
             'Head back to Discord and hit <b>Verify Me</b> again.</p>'), "#ff6b6b"), 400
+
+    mins = max(1, int((entry["expires"] - now) / 60))
+    return _verify_page("Verify", (
+        '<div class="big">🔐</div><h1>Ready to verify</h1>'
+        '<p>Click below and we\'ll check your connection. Takes a second.</p>'
+        f'<form method="POST" style="margin-top:22px">'
+        f'<button type="submit" style="width:100%;padding:14px;border:none;border-radius:10px;'
+        f'background:#3dff9a;color:#0a0a0b;font-size:15px;font-weight:700;cursor:pointer">'
+        f'✅ Verify Me</button></form>'
+        f'<p style="font-size:12px;margin-top:14px">Link valid for ~{mins} more minute(s).</p>'))
+
+
+@app.route("/verify/<token>", methods=["POST"])
+def verify_submit(token):
+    """The real work — only a human clicking the button reaches this."""
+    if _is_crawler():
+        return "", 204
+
+    pend = _load_json(VERIFY_PENDING_FILE, {})
+    entry = pend.get(token)
+    now = datetime.now(timezone.utc).timestamp()
+
+    if not entry or entry.get("expires", 0) < now:
+        return _verify_page("Expired", (
+            '<div class="big">⏱️</div><h1 style="color:#ff6b6b">Link expired or invalid</h1>'
+            '<p>Head back to Discord and hit <b>Verify Me</b> again.</p>'), "#ff6b6b"), 400
 
     user_id = str(entry["user_id"])
     guild_id = str(entry["guild_id"])
@@ -289,7 +332,7 @@ def verify_page(token):
             '<div class="big">⚠️</div><h1 style="color:#ffcf2b">Couldn\'t read your connection</h1>'
             '<p>Try again, or contact a moderator.</p>'), "#ffcf2b"), 400
 
-    # Burn the token immediately — single use, win or lose
+    # Burn the token now — a real click has happened, win or lose.
     pend.pop(token, None)
     _save_json_file_dash(VERIFY_PENDING_FILE, pend)
 
@@ -298,10 +341,9 @@ def verify_page(token):
     block_vpn = gcfg.get("block_vpn", True)
 
     check = _check_vpn(ip)
-    ip_hash = _hash_ip(ip)          # raw ip is discarded after this line
+    ip_hash = _hash_ip(ip)          # raw ip discarded after this line
     country = check.get("country", "?")
 
-    # 1. VPN / proxy / datacenter
     if block_vpn and check.get("vpn"):
         log.info("verify DENIED (vpn): user=%s", user_id)
         return _verify_page("VPN", (
@@ -311,7 +353,6 @@ def verify_page(token):
             '<p>On a VPN for a reason? Contact a moderator and they can verify you manually.</p>'),
             "#ff6b6b"), 403
 
-    # 2. Alt check — has this fingerprint verified under a different account?
     data = _load_json(VERIFY_DATA_FILE, {"users": {}})
     users = data.setdefault("users", {})
     for other_id, rec in users.items():
@@ -324,12 +365,7 @@ def verify_page(token):
                 '<p>Sharing a network with family or a roommate? That can trigger this — '
                 'contact a moderator and they\'ll sort it out.</p>'), "#ff6b6b"), 403
 
-    # 3. Approved
-    users[user_id] = {
-        "ip_hash": ip_hash,
-        "country": country,
-        "verified_at": int(now),
-    }
+    users[user_id] = {"ip_hash": ip_hash, "country": country, "verified_at": int(now)}
     _save_json_file_dash(VERIFY_DATA_FILE, data)
 
     queue = _load_json(VERIFY_QUEUE_FILE, [])
