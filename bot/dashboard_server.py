@@ -166,6 +166,177 @@ def health():
 VOICE_FILE = MEMORY_DIR / "voice_analytics.json"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ VERIFICATION PAGE — the only public (non-admin) route. Checks the visitor's
+# connection for a VPN/proxy and for alt accounts, then hands the result to the
+# bot via a queue file.
+#
+# PRIVACY: the raw IP is used in-memory for the VPN lookup and to compute a
+# salted hash — then discarded. Only the hash + country are ever written to disk.
+# ─────────────────────────────────────────────────────────────────────────────
+VERIFY_CONFIG_FILE = MEMORY_DIR / "verify_config.json"
+VERIFY_DATA_FILE = MEMORY_DIR / "verify_data.json"
+VERIFY_PENDING_FILE = MEMORY_DIR / "verify_pending.json"
+VERIFY_QUEUE_FILE = MEMORY_DIR / "verify_queue.json"
+
+# Salt for IP hashing. Set VERIFY_SALT in Railway for a stable value across
+# deploys; otherwise one is generated and persisted on the volume.
+_SALT_FILE = MEMORY_DIR / "verify_salt.txt"
+
+
+def _verify_salt() -> str:
+    s = os.environ.get("VERIFY_SALT", "").strip()
+    if s:
+        return s
+    try:
+        if _SALT_FILE.exists():
+            return _SALT_FILE.read_text().strip()
+        new = secrets.token_hex(32)
+        _SALT_FILE.write_text(new)
+        return new
+    except Exception:
+        return "jb-fallback-salt"
+
+
+def _hash_ip(ip: str) -> str:
+    import hashlib
+    return hashlib.sha256((_verify_salt() + ip).encode()).hexdigest()
+
+
+def _client_ip() -> str:
+    """Real client IP behind Railway's proxy."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.headers.get("X-Real-IP") or request.remote_addr or ""
+
+
+def _check_vpn(ip: str) -> dict:
+    """Free proxy/VPN lookup via ip-api.com. Fails OPEN (never blocks on error)."""
+    try:
+        r = requests.get(
+            f"http://ip-api.com/json/{ip}",
+            params={"fields": "status,country,proxy,hosting"},
+            timeout=6,
+        )
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("status") == "success":
+                return {
+                    "ok": True,
+                    "vpn": bool(d.get("proxy") or d.get("hosting")),
+                    "country": d.get("country", "?"),
+                }
+    except Exception as e:
+        log.warning("vpn check failed: %s", e)
+    return {"ok": False, "vpn": False, "country": "?"}
+
+
+def _verify_page(title: str, body: str, color: str = "#3dff9a") -> str:
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Verification</title><style>
+*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:flex;align-items:center;
+justify-content:center;background:#0a0a0b;color:#e8e8ea;font-family:-apple-system,
+BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px}}
+.card{{max-width:460px;width:100%;background:#151517;border:1px solid #26262b;
+border-radius:16px;padding:36px 30px;text-align:center}}
+h1{{margin:0 0 14px;font-size:22px;color:{color}}}
+p{{color:#a0a0a8;line-height:1.6;font-size:14px;margin:10px 0}}
+.big{{font-size:44px;margin-bottom:10px}}
+.note{{margin-top:22px;padding-top:16px;border-top:1px solid #26262b;font-size:11px;color:#66666e}}
+</style></head><body><div class="card">{body}
+<div class="note">🔐 Your IP address is <b>not stored</b>. It's checked for VPN/proxy use,
+converted to an anonymous fingerprint, then discarded. We keep only that fingerprint
+and your country — used solely to detect duplicate accounts.</div>
+</div></body></html>"""
+
+
+@app.route("/verify/<token>")
+def verify_page(token):
+    pend = _load_json(VERIFY_PENDING_FILE, {})
+    entry = pend.get(token)
+    now = datetime.now(timezone.utc).timestamp()
+
+    if not entry or entry.get("expires", 0) < now:
+        return _verify_page("Expired", (
+            '<div class="big">⏱️</div><h1 style="color:#ff6b6b">Link expired or invalid</h1>'
+            '<p>Verification links last 15 minutes and work once. '
+            'Head back to Discord and hit <b>Verify Me</b> again.</p>'), "#ff6b6b"), 400
+
+    user_id = str(entry["user_id"])
+    guild_id = str(entry["guild_id"])
+
+    ip = _client_ip()
+    if not ip:
+        return _verify_page("Error", (
+            '<div class="big">⚠️</div><h1 style="color:#ffcf2b">Couldn\'t read your connection</h1>'
+            '<p>Try again, or contact a moderator.</p>'), "#ffcf2b"), 400
+
+    # Burn the token immediately — single use, win or lose
+    pend.pop(token, None)
+    _save_json_file_dash(VERIFY_PENDING_FILE, pend)
+
+    cfg_all = _load_json(VERIFY_CONFIG_FILE, {})
+    gcfg = cfg_all.get(guild_id, {})
+    block_vpn = gcfg.get("block_vpn", True)
+
+    check = _check_vpn(ip)
+    ip_hash = _hash_ip(ip)          # raw ip is discarded after this line
+    country = check.get("country", "?")
+
+    # 1. VPN / proxy / datacenter
+    if block_vpn and check.get("vpn"):
+        log.info("verify DENIED (vpn): user=%s", user_id)
+        return _verify_page("VPN", (
+            '<div class="big">🛜</div><h1 style="color:#ff6b6b">VPN or proxy detected</h1>'
+            '<p>Turn off your VPN, proxy, or Tor and try again — this server requires a '
+            'direct connection to verify you\'re not an alt.</p>'
+            '<p>On a VPN for a reason? Contact a moderator and they can verify you manually.</p>'),
+            "#ff6b6b"), 403
+
+    # 2. Alt check — has this fingerprint verified under a different account?
+    data = _load_json(VERIFY_DATA_FILE, {"users": {}})
+    users = data.setdefault("users", {})
+    for other_id, rec in users.items():
+        if other_id != user_id and rec.get("ip_hash") == ip_hash:
+            log.info("verify DENIED (alt of %s): user=%s", other_id, user_id)
+            return _verify_page("Alt", (
+                '<div class="big">🚫</div><h1 style="color:#ff6b6b">Already verified</h1>'
+                '<p>This connection is already linked to another account in the server. '
+                'Only one account per person.</p>'
+                '<p>Sharing a network with family or a roommate? That can trigger this — '
+                'contact a moderator and they\'ll sort it out.</p>'), "#ff6b6b"), 403
+
+    # 3. Approved
+    users[user_id] = {
+        "ip_hash": ip_hash,
+        "country": country,
+        "verified_at": int(now),
+    }
+    _save_json_file_dash(VERIFY_DATA_FILE, data)
+
+    queue = _load_json(VERIFY_QUEUE_FILE, [])
+    queue.append({"user_id": user_id, "guild_id": guild_id, "action": "approve"})
+    _save_json_file_dash(VERIFY_QUEUE_FILE, queue)
+    log.info("verify APPROVED: user=%s (%s)", user_id, country)
+
+    return _verify_page("Verified", (
+        '<div class="big">✅</div><h1>You\'re verified</h1>'
+        '<p>Your role is being applied right now — head back to Discord, '
+        'it lands within a few seconds.</p>'
+        '<p style="color:#3dff9a"><b>Welcome in.</b> 🏴</p>'))
+
+
+def _save_json_file_dash(path, data):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.warning("verify write failed (%s): %s", path.name, e)
+
+
 @app.route("/api/voice-analytics")
 def api_voice_analytics():
     if not is_admin():

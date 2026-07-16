@@ -21,7 +21,9 @@ import asyncio
 import logging
 import random
 import time
+import hashlib
 import re
+import secrets
 import base64
 from datetime import datetime, timezone, timedelta
 try:
@@ -19074,6 +19076,19 @@ async def handle_member_join(member: discord.Member):
     # Tag the new member in the dedicated channel (auto-deletes after 5 min)
     await _ping_new_member(member)
 
+    # 🛡️ Verification gate: hand out the Unverified role so the server stays hidden
+    try:
+        vcfg = _verify_cfg(member.guild.id)
+        ur_id = vcfg.get("unverified_role") or 0
+        if ur_id:
+            ur = member.guild.get_role(int(ur_id))
+            if ur and ur not in member.roles:
+                await member.add_roles(ur, reason="pending verification")
+    except discord.Forbidden:
+        log.warning("verify: can't assign unverified role (perms/hierarchy)")
+    except Exception as e:
+        log.warning("verify: unverified assign failed: %s", e)
+
     # Grant starter coins
     starter = cfg.get("welcome_starter_coins", 500)
     if starter > 0:
@@ -19446,6 +19461,454 @@ async def handle_cryptic_scan(message: discord.Message):
             asyncio.create_task(_cryptic_analyze())
     except Exception as e:
         log.warning("cryptic scan buffer error: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ VERIFICATION SYSTEM — gate new members behind an alt-check.
+# Flow: join -> auto-assign Unverified (hides server) -> click Verify -> get a
+# one-time link -> web page checks VPN + IP -> pass = Verified role granted.
+#
+# PRIVACY BY DESIGN: raw IPs are NEVER stored. The page checks the live IP for
+# VPN/proxy, then discards it, keeping only a salted SHA-256 hash. Alt detection
+# works identically (same IP -> same hash) but a leak/subpoena of this data yields
+# nothing useful about any member. Only the hash + country are retained.
+# ─────────────────────────────────────────────────────────────────────────────
+VERIFY_CONFIG_FILE = MEMORY_DIR / "verify_config.json"
+VERIFY_DATA_FILE = MEMORY_DIR / "verify_data.json"      # user -> ip_hash record
+VERIFY_PENDING_FILE = MEMORY_DIR / "verify_pending.json"  # one-time tokens
+VERIFY_QUEUE_FILE = MEMORY_DIR / "verify_queue.json"      # dashboard -> bot handoff
+VERIFY_TOKEN_TTL = 900   # links expire in 15 min
+
+
+def _vload(path, default):
+    if path.exists():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default
+
+
+def _vsave(path, data):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.warning("verify save failed (%s): %s", path.name, e)
+
+
+def _verify_cfg(guild_id) -> dict:
+    data = _vload(VERIFY_CONFIG_FILE, {})
+    return data.setdefault(str(guild_id), {
+        "unverified_role": 0,
+        "verified_role": 0,
+        "channel_id": 0,
+        "block_vpn": True,
+        "embed": {
+            "title": "✅ Verify Yourself",
+            "description": ("Welcome. To get access to the server, hit the button below.\n\n"
+                            "You'll get a private link that checks you're not on a VPN and not "
+                            "an alt account. Takes 10 seconds."),
+            "color": "#3dff9a",
+            "image": "",
+            "thumbnail": "",
+            "footer": "One click. That's it.",
+        },
+        "message_id": 0,
+    })
+
+
+def _verify_cfg_save(guild_id, cfg):
+    data = _vload(VERIFY_CONFIG_FILE, {})
+    data[str(guild_id)] = cfg
+    _vsave(VERIFY_CONFIG_FILE, data)
+
+
+def _verify_base_url() -> str:
+    """Derive the public site root from the OAuth redirect env var."""
+    redir = os.environ.get("DISCORD_OAUTH_REDIRECT", "").strip()
+    if redir.endswith("/auth/callback"):
+        return redir[: -len("/auth/callback")]
+    return redir.rstrip("/")
+
+
+class VerifySetupView(discord.ui.View):
+    """Admin setup panel for the verification system."""
+    def __init__(self, guild_id: int, admin_id: int):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        self.admin_id = admin_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message("Not your setup panel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Set Roles", emoji="🎭", style=discord.ButtonStyle.primary)
+    async def set_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyRolesModal(self.guild_id))
+
+    @discord.ui.button(label="Set Channel", emoji="📺", style=discord.ButtonStyle.primary)
+    async def set_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyChannelModal(self.guild_id))
+
+    @discord.ui.button(label="Customize Embed", emoji="🎨", style=discord.ButtonStyle.secondary)
+    async def customize(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyEmbedModal(self.guild_id))
+
+    @discord.ui.button(label="Set Images", emoji="🖼️", style=discord.ButtonStyle.secondary)
+    async def set_images(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyImagesModal(self.guild_id))
+
+    @discord.ui.button(label="POST IT", emoji="🚀", style=discord.ButtonStyle.success, row=1)
+    async def post_it(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = _verify_cfg(self.guild_id)
+        missing = []
+        if not cfg.get("unverified_role"): missing.append("Unverified role")
+        if not cfg.get("verified_role"): missing.append("Verified role")
+        if not cfg.get("channel_id"): missing.append("Channel")
+        if missing:
+            await interaction.response.send_message(
+                "❌ Still missing: **" + ", ".join(missing) + "**", ephemeral=True)
+            return
+        if not _verify_base_url():
+            await interaction.response.send_message(
+                "❌ `DISCORD_OAUTH_REDIRECT` isn't set — the verify link needs it. Set it in Railway.",
+                ephemeral=True)
+            return
+        ch = interaction.guild.get_channel(int(cfg["channel_id"]))
+        if ch is None:
+            await interaction.response.send_message("❌ That channel no longer exists.", ephemeral=True)
+            return
+        try:
+            msg = await ch.send(embed=_build_verify_embed(cfg), view=VerifyView())
+            cfg["message_id"] = msg.id
+            _verify_cfg_save(self.guild_id, cfg)
+            await interaction.response.send_message(
+                f"✅ Verification panel posted in {ch.mention}. It's permanent and survives restarts.",
+                ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I can't post there — need Send Messages + Embed Links.", ephemeral=True)
+
+    @discord.ui.button(label="Refresh Status", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=_verify_status_embed(interaction.guild, self.guild_id), view=self)
+
+
+class VerifyRolesModal(discord.ui.Modal, title="Set Verification Roles"):
+    unverified = discord.ui.TextInput(label="Unverified role ID", placeholder="Right-click role → Copy ID", required=True)
+    verified = discord.ui.TextInput(label="Verified role ID", placeholder="Right-click role → Copy ID", required=True)
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        u, v = str(self.unverified).strip(), str(self.verified).strip()
+        if not u.isdigit() or not v.isdigit():
+            await interaction.response.send_message("❌ Role IDs must be numbers.", ephemeral=True)
+            return
+        ur = interaction.guild.get_role(int(u))
+        vr = interaction.guild.get_role(int(v))
+        if ur is None or vr is None:
+            await interaction.response.send_message("❌ Couldn't find one of those roles in this server.", ephemeral=True)
+            return
+        me = interaction.guild.me
+        if ur >= me.top_role or vr >= me.top_role:
+            await interaction.response.send_message(
+                "❌ Both roles must sit **below** my role, or I can't assign them.", ephemeral=True)
+            return
+        cfg = _verify_cfg(self.guild_id)
+        cfg["unverified_role"] = int(u)
+        cfg["verified_role"] = int(v)
+        _verify_cfg_save(self.guild_id, cfg)
+        await interaction.response.send_message(
+            f"✅ Unverified: {ur.mention} · Verified: {vr.mention}",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+class VerifyChannelModal(discord.ui.Modal, title="Set Verification Channel"):
+    channel = discord.ui.TextInput(label="Channel ID or link", placeholder="ID, or paste the channel link", required=True)
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.channel).strip()
+        m = re.search(r"/channels/\d+/(\d+)", raw)
+        cid = m.group(1) if m else re.sub(r"[<#>]", "", raw)
+        if not cid.isdigit():
+            await interaction.response.send_message("❌ Paste a channel ID or a channel link.", ephemeral=True)
+            return
+        ch = interaction.guild.get_channel(int(cid))
+        if ch is None:
+            await interaction.response.send_message("❌ No such channel in this server.", ephemeral=True)
+            return
+        cfg = _verify_cfg(self.guild_id)
+        cfg["channel_id"] = int(cid)
+        _verify_cfg_save(self.guild_id, cfg)
+        await interaction.response.send_message(f"✅ Verification channel: {ch.mention}", ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
+
+class VerifyEmbedModal(discord.ui.Modal, title="Customize Verification Embed"):
+    e_title = discord.ui.TextInput(label="Title", required=False, max_length=256)
+    e_desc = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=False, max_length=4000)
+    e_color = discord.ui.TextInput(label="Color (hex, e.g. #3dff9a)", required=False, max_length=7)
+    e_footer = discord.ui.TextInput(label="Footer", required=False, max_length=2048)
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+        cfg = _verify_cfg(guild_id)["embed"]
+        self.e_title.default = cfg.get("title", "")
+        self.e_desc.default = cfg.get("description", "")
+        self.e_color.default = cfg.get("color", "#3dff9a")
+        self.e_footer.default = cfg.get("footer", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = _verify_cfg(self.guild_id)
+        e = cfg["embed"]
+        e["title"] = str(self.e_title).strip() or e.get("title", "")
+        e["description"] = str(self.e_desc).strip() or e.get("description", "")
+        col = str(self.e_color).strip()
+        if col:
+            if not re.fullmatch(r"#?[0-9a-fA-F]{6}", col):
+                await interaction.response.send_message("❌ Color must be a hex like `#3dff9a`.", ephemeral=True)
+                return
+            e["color"] = col if col.startswith("#") else "#" + col
+        e["footer"] = str(self.e_footer).strip()
+        _verify_cfg_save(self.guild_id, cfg)
+        await interaction.response.send_message("✅ Embed text updated. Hit **POST IT** when ready.", ephemeral=True)
+
+
+class VerifyImagesModal(discord.ui.Modal, title="Set Embed Images"):
+    img = discord.ui.TextInput(label="Big image URL (banner, full width)", required=False,
+                               placeholder="https://… direct image link")
+    thumb = discord.ui.TextInput(label="Thumbnail URL (small, top-right)", required=False,
+                                 placeholder="https://… direct image link")
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+        e = _verify_cfg(guild_id)["embed"]
+        self.img.default = e.get("image", "")
+        self.thumb.default = e.get("thumbnail", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = _verify_cfg(self.guild_id)
+        e = cfg["embed"]
+        i, t = str(self.img).strip(), str(self.thumb).strip()
+        for label, val in (("Image", i), ("Thumbnail", t)):
+            if val and not val.startswith(("http://", "https://")):
+                await interaction.response.send_message(
+                    f"❌ {label} must be a direct link starting with http(s)://", ephemeral=True)
+                return
+        e["image"], e["thumbnail"] = i, t
+        _verify_cfg_save(self.guild_id, cfg)
+        await interaction.response.send_message(
+            "✅ Images set. _Must be **direct** image links (ending .png/.jpg/.gif) or they won't render._",
+            ephemeral=True)
+
+
+def _build_verify_embed(cfg: dict) -> discord.Embed:
+    e = cfg.get("embed", {})
+    try:
+        color = int(str(e.get("color", "#3dff9a")).lstrip("#"), 16)
+    except Exception:
+        color = 0x3DFF9A
+    embed = discord.Embed(
+        title=e.get("title") or "✅ Verify Yourself",
+        description=e.get("description") or "Click below to verify.",
+        color=color,
+    )
+    if e.get("image"):
+        embed.set_image(url=e["image"])
+    if e.get("thumbnail"):
+        embed.set_thumbnail(url=e["thumbnail"])
+    if e.get("footer"):
+        embed.set_footer(text=e["footer"])
+    return embed
+
+
+def _verify_status_embed(guild, guild_id: int) -> discord.Embed:
+    cfg = _verify_cfg(guild_id)
+    def _r(rid):
+        r = guild.get_role(int(rid)) if rid else None
+        return r.mention if r else "❌ _not set_"
+    ch = guild.get_channel(int(cfg["channel_id"])) if cfg.get("channel_id") else None
+    base = _verify_base_url() or "❌ _DISCORD_OAUTH_REDIRECT not set_"
+    embed = discord.Embed(
+        title="🛡️ Verification Setup",
+        description="Configure the gate, then hit **POST IT**.",
+        color=0x5865F2,
+    )
+    embed.add_field(name="🎭 Unverified role", value=_r(cfg.get("unverified_role")), inline=True)
+    embed.add_field(name="✅ Verified role", value=_r(cfg.get("verified_role")), inline=True)
+    embed.add_field(name="📺 Channel", value=ch.mention if ch else "❌ _not set_", inline=True)
+    embed.add_field(name="🛜 Block VPNs", value="✅ On" if cfg.get("block_vpn", True) else "🔴 Off", inline=True)
+    embed.add_field(name="🔗 Verify site", value=f"`{base}`", inline=False)
+    embed.add_field(
+        name="🔐 Privacy",
+        value="Raw IPs are **never stored** — only a salted hash + country. Alt detection still works.",
+        inline=False,
+    )
+    embed.set_footer(text="Roles must sit BELOW my role · new joins auto-get Unverified")
+    return embed
+
+
+class VerifyView(discord.ui.View):
+    """Persistent view — survives restarts via a fixed custom_id."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Verify Me", emoji="✅", style=discord.ButtonStyle.success,
+                       custom_id="jb_verify_button")
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = _verify_cfg(interaction.guild_id)
+        vr = interaction.guild.get_role(int(cfg.get("verified_role") or 0))
+        if vr and vr in interaction.user.roles:
+            await interaction.response.send_message("✅ You're already verified.", ephemeral=True)
+            return
+        base = _verify_base_url()
+        if not base:
+            await interaction.response.send_message(
+                "⚠️ Verification isn't configured yet — ping an admin.", ephemeral=True)
+            return
+        # Mint a one-time, short-lived token
+        token = secrets.token_urlsafe(32)
+        pend = _vload(VERIFY_PENDING_FILE, {})
+        # prune expired
+        now = time.time()
+        pend = {k: v for k, v in pend.items() if v.get("expires", 0) > now}
+        pend[token] = {
+            "user_id": str(interaction.user.id),
+            "guild_id": str(interaction.guild_id),
+            "expires": now + VERIFY_TOKEN_TTL,
+        }
+        _vsave(VERIFY_PENDING_FILE, pend)
+        link = f"{base}/verify/{token}"
+        await interaction.response.send_message(
+            f"### 🔐 Your private verification link\n{link}\n\n"
+            f"⏱️ Expires in **15 minutes** · single use · **don't share it.**\n\n"
+            f"_We check your connection for a VPN/proxy and for alt accounts. "
+            f"Your IP is **never stored** — only an anonymous fingerprint._",
+            ephemeral=True,
+        )
+
+
+async def _verify_queue_loop():
+    """Poll the queue the web page writes to, and apply role changes."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            queue = _vload(VERIFY_QUEUE_FILE, [])
+            if queue:
+                remaining = []
+                for item in queue:
+                    try:
+                        guild = client.get_guild(int(item["guild_id"]))
+                        if guild is None:
+                            continue
+                        member = guild.get_member(int(item["user_id"]))
+                        if member is None:
+                            continue
+                        cfg = _verify_cfg(guild.id)
+                        vr = guild.get_role(int(cfg.get("verified_role") or 0))
+                        ur = guild.get_role(int(cfg.get("unverified_role") or 0))
+                        if item.get("action") == "approve":
+                            if vr and vr not in member.roles:
+                                await member.add_roles(vr, reason="verified")
+                            if ur and ur in member.roles:
+                                await member.remove_roles(ur, reason="verified")
+                            log.info("verify: approved %s", member.id)
+                    except Exception as e:
+                        log.warning("verify queue item failed: %s", e)
+                _vsave(VERIFY_QUEUE_FILE, remaining)
+        except Exception as e:
+            log.warning("verify queue loop error: %s", e)
+        await asyncio.sleep(5)
+
+
+async def _handle_setupverify(message: discord.Message):
+    """ADMIN: _setupverify — configure & post the verification gate."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_owner or is_admin) or message.guild is None:
+        return
+    await message.channel.send(
+        embed=_verify_status_embed(message.guild, message.guild.id),
+        view=VerifySetupView(message.guild.id, message.author.id),
+    )
+
+
+async def _handle_verifylogs(message: discord.Message):
+    """ADMIN: _verifylogs — every verified user, with alt groups flagged."""
+    is_owner = message.author.id == SECRET_GIVE_OWNER_ID
+    is_admin = isinstance(message.author, discord.Member) and _is_admin(message.author)
+    if not (is_owner or is_admin) or message.guild is None:
+        return
+
+    data = _vload(VERIFY_DATA_FILE, {}).get("users", {})
+    if not data:
+        await message.channel.send("No verification records yet.")
+        return
+
+    # Group users by IP fingerprint — shared fingerprint = possible alts
+    groups = {}
+    for uid, rec in data.items():
+        groups.setdefault(rec.get("ip_hash", "?"), []).append((uid, rec))
+
+    alt_groups = {h: u for h, u in groups.items() if len(u) > 1}
+    solo = sum(1 for u in groups.values() if len(u) == 1)
+
+    embed = discord.Embed(
+        title="🛡️ Verification Log",
+        description=(f"**{len(data)}** verified · **{solo}** unique connections · "
+                     f"**{len(alt_groups)}** shared-connection group(s)"),
+        color=0xFF3B5C if alt_groups else 0x2ECC71,
+    )
+
+    if alt_groups:
+        lines = []
+        for h, users in list(alt_groups.items())[:10]:
+            names = []
+            for uid, rec in users:
+                m = message.guild.get_member(int(uid))
+                names.append(m.display_name if m else f"`{uid}`")
+            country = users[0][1].get("country", "?")
+            lines.append(f"🔗 **{' ↔ '.join(names)}**\n└ _{len(users)} accounts · {country} · `{h[:12]}…`_")
+        embed.add_field(
+            name=f"⚠️ Shared connections ({len(alt_groups)})",
+            value="\n".join(lines)[:1024],
+            inline=False,
+        )
+        embed.add_field(
+            name="🧠 Read this before you swing",
+            value=("Shared connection ≠ guilty. Family, partners, roommates, dorms, and **mobile "
+                   "carriers (CGNAT)** legitimately share IPs. Treat this as a lead, not a verdict."),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="✅ Clean", value="No shared connections detected.", inline=False)
+
+    recent = sorted(data.items(), key=lambda kv: kv[1].get("verified_at", 0), reverse=True)[:10]
+    rl = []
+    for uid, rec in recent:
+        m = message.guild.get_member(int(uid))
+        name = m.display_name if m else f"`{uid}`"
+        ts = int(rec.get("verified_at", 0))
+        rl.append(f"{name} · {rec.get('country','?')} · <t:{ts}:R>")
+    if rl:
+        embed.add_field(name="🕐 Recently verified", value="\n".join(rl)[:1024], inline=False)
+
+    embed.set_footer(text="Raw IPs are never stored — only salted hashes + country")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24529,6 +24992,12 @@ async def on_ready():
         asyncio.create_task(_ad_campaign_loop())
         asyncio.create_task(_hydrate_loop())
         asyncio.create_task(_tagrole_sweep_loop())
+        asyncio.create_task(_verify_queue_loop())
+        # Persistent verify button — re-registered so it works after restarts
+        try:
+            client.add_view(VerifyView())
+        except Exception as e:
+            log.warning("verify view register failed: %s", e)
         log.info("background loops started")
     else:
         log.info("reconnected — background loops already running, not relaunching")
@@ -27140,6 +27609,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("nitro", "jackpot", "nitropool"):
         await _handle_nitro(message, rest)
+        return True
+    if cmd_name in ("setupverify", "verifysetup", "setupverification"):
+        await _handle_setupverify(message)
+        return True
+    if cmd_name in ("verifylogs", "alts", "altcheck", "verifylog"):
+        await _handle_verifylogs(message)
         return True
     if cmd_name in ("venue", "venuedash", "myvenues"):
         await _handle_venuedash(message)
