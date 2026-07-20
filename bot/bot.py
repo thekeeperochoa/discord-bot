@@ -14526,7 +14526,13 @@ async def venues_command(interaction: discord.Interaction, user: discord.Member 
 
     total_hourly = 0
     total_pending = 0
-    for i, venue in enumerate(venues, start=1):
+    # Discord hard-caps embeds at 25 fields. Reserve one for TOTALS, so show up to
+    # 23 venues individually and fold any overflow into a single summary field.
+    VENUE_FIELD_CAP = 23
+    shown = venues[:VENUE_FIELD_CAP]
+    overflow = venues[VENUE_FIELD_CAP:]
+
+    for i, venue in enumerate(shown, start=1):
         info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?","max_staff":0})
         hourly = _venue_income_per_hour(venue)
         pending = _venue_pending_income(venue)
@@ -14551,6 +14557,28 @@ async def venues_command(interaction: discord.Interaction, user: discord.Member 
         )
         total_hourly += hourly
         total_pending += pending
+
+    # Count overflow venues toward totals, and list them compactly in one field
+    if overflow:
+        ov_hourly = 0
+        ov_pending = 0
+        ov_names = []
+        for venue in overflow:
+            info = VENUE_TYPES.get(venue["type"], {"emoji": "🏢"})
+            ov_hourly += _venue_income_per_hour(venue)
+            ov_pending += _venue_pending_income(venue)
+            ov_names.append(f"{info['emoji']} {venue['name']}")
+        total_hourly += ov_hourly
+        total_pending += ov_pending
+        listing = ", ".join(ov_names)
+        if len(listing) > 900:
+            listing = listing[:900] + f"… (+{len(overflow)} total)"
+        embed.add_field(
+            name=f"➕ {len(overflow)} more venues",
+            value=(f"{listing}\n_Combined: **{ov_hourly:,}**/hr · "
+                   f"**{ov_pending:,}** pending. Use `/collectvenue` to bank all of them._"),
+            inline=False,
+        )
 
     embed.add_field(
         name="📊 TOTALS",
@@ -18020,7 +18048,8 @@ async def _handle_venuedash(message: discord.Message):
         color=0x9B59B6,
     )
     total_net = 0
-    for i, v in enumerate(venues, 1):
+    # Discord caps embeds at 25 fields; show up to 24 and note any overflow.
+    for i, v in enumerate(venues[:24], 1):
         info = VENUE_TYPES.get(v["type"], {"emoji": "🏢", "name": "?"})
         rep = _venue_rep(v)
         gross = _venue_income_per_hour(v)
