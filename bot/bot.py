@@ -5052,15 +5052,6 @@ async def pay_command(interaction: discord.Interaction, user: discord.Member, am
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
 
-    # Anti-abuse: max single transfer based on sender balance to prevent silent farming
-    MAX_PAY_AMOUNT = 50_000
-    if amount > MAX_PAY_AMOUNT:
-        await interaction.response.send_message(
-            f"❌ Max single transfer is **{MAX_PAY_AMOUNT:,}** coins. Send multiple payments.",
-            ephemeral=True,
-        )
-        return
-
     # Anti-abuse: cooldown to prevent rapid alt-account farming
     pay_cd = economy.get_cooldown_remaining(sender.id, "pay")
     if pay_cd > 0:
