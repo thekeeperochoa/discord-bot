@@ -2345,7 +2345,9 @@ async def _spawn_random_event(channel, event_type: str):
     elif event_type == "math":
         a, b = random.randint(11, 99), random.randint(11, 99)
         op = random.choice(["+", "-", "*"])
-        answer = str(eval(f"{a}{op}{b}"))
+        # No eval — compute directly. (Inputs are bot-generated, but eval on
+        # string-built expressions is a bad habit; this can't execute code.)
+        answer = str({"+": a + b, "-": a - b, "*": a * b}[op])
         prompt = (
             f"# 🧮 MATH BLITZ!\n\n"
             f"First to type the answer wins:\n"

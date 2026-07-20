@@ -30,7 +30,13 @@ REDIRECT_URI = os.environ.get("DISCORD_OAUTH_REDIRECT", "")
 ADMIN_IDS = set(
     s.strip() for s in os.environ.get("DASHBOARD_ADMIN_IDS", "").split(",") if s.strip()
 )
-SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET", secrets.token_hex(32))
+SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET", "")
+if not SESSION_SECRET:
+    SESSION_SECRET = secrets.token_hex(32)
+    logging.getLogger(__name__).warning(
+        "DASHBOARD_SESSION_SECRET not set — using an ephemeral secret. Admin sessions "
+        "will drop on every restart. Set it in Railway for stable, secure sessions."
+    )
 # Must resolve to the SAME folder bot.py uses, or the two halves of the app read
 # different files. bot.py uses ROOT/"memory" where ROOT = <repo>/ — mirror that,
 # and only let an explicit env var override it.
@@ -64,6 +70,10 @@ app = Flask(__name__)
 app.secret_key = SESSION_SECRET
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Secure flag: the admin cookie must only travel over HTTPS. Toggleable via env
+# for local http testing, but defaults ON since production runs behind TLS.
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("DASHBOARD_INSECURE", "") != "1"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -201,8 +211,12 @@ def _verify_salt() -> str:
         new = secrets.token_hex(32)
         _SALT_FILE.write_text(new)
         return new
-    except Exception:
-        return "jb-fallback-salt"
+    except Exception as e:
+        # No weak, guessable fallback — derive from the session secret instead so
+        # the salt is still non-public even if the salt file is unreadable.
+        log.warning("verify salt file unavailable, deriving from session secret: %s", e)
+        import hashlib as _h
+        return _h.sha256(("salt-" + SESSION_SECRET).encode()).hexdigest()
 
 
 def _hash_ip(ip: str) -> str:
@@ -222,7 +236,7 @@ def _check_vpn(ip: str) -> dict:
     """Free proxy/VPN lookup via ip-api.com. Fails OPEN (never blocks on error)."""
     try:
         r = requests.get(
-            f"http://ip-api.com/json/{ip}",
+            f"https://ip-api.com/json/{ip}",
             params={"fields": "status,country,proxy,hosting"},
             timeout=6,
         )
@@ -286,8 +300,8 @@ def verify_page(token):
     now = datetime.now(timezone.utc).timestamp()
 
     if not entry:
-        log.warning("verify GET: token NOT FOUND. file=%s exists=%s tokens_on_disk=%d token=%s…",
-                    VERIFY_PENDING_FILE, VERIFY_PENDING_FILE.exists(), len(pend), token[:8])
+        log.warning("verify GET: token not found. file=%s exists=%s tokens_on_disk=%d",
+                    VERIFY_PENDING_FILE, VERIFY_PENDING_FILE.exists(), len(pend))
     elif entry.get("expires", 0) < now:
         log.warning("verify GET: token expired %.0fs ago", now - entry.get("expires", 0))
 
