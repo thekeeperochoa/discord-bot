@@ -4214,6 +4214,38 @@ SLOT_PAYOUT = {
     "💎": 1000, "7️⃣": 500, "⭐": 250, "🔔": 100,
     "🍀": 75, "🍇": 50, "🍒": 25, "🍋": 10,
 }
+# Per-symbol three-of-a-kind multipliers (rarer symbol = bigger payout)
+SLOT_TRIPLE_MULT = {
+    "💎": 50, "7️⃣": 25, "⭐": 15, "🔔": 10,
+    "🍀": 8, "🍇": 6, "🍒": 5, "🍋": 4,
+}
+# Weighted reel — high-value symbols land less often (real slot math)
+SLOT_WEIGHTS = {
+    "🍋": 22, "🍒": 20, "🍇": 16, "🍀": 13,
+    "🔔": 11, "⭐": 8, "7️⃣": 6, "💎": 4,
+}
+SLOT_JACKPOT_SEED = 25_000        # pot floor after a win
+SLOT_JACKPOT_CONTRIB = 0.30       # 30% of every losing bet feeds the pot
+SLOT_JACKPOT_SYMBOL = "💎"        # triple-💎 hits the progressive
+
+
+def _slot_weighted():
+    syms = list(SLOT_WEIGHTS.keys())
+    return random.choices(syms, weights=[SLOT_WEIGHTS[s] for s in syms], k=1)[0]
+
+
+def _slot_jackpot_get() -> int:
+    return int(economy._data.get("slots_jackpot", SLOT_JACKPOT_SEED))
+
+
+def _slot_jackpot_add(amount: int):
+    economy._data["slots_jackpot"] = _slot_jackpot_get() + int(amount)
+    economy._save()
+
+
+def _slot_jackpot_reset():
+    economy._data["slots_jackpot"] = SLOT_JACKPOT_SEED
+    economy._save()
 
 @tree.command(name="slots", description="Pull the lever! Bet coins to spin the slot machine.")
 @discord.app_commands.describe(bet="How many coins to bet (default 100)")
@@ -4243,16 +4275,18 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
         except Exception:
             pass
 
-    # Determine final result first (~12% jackpot, 25% pair, rest no-match)
+    # Determine final result (weighted so big symbols are rare)
     roll = random.random()
-    if roll < 0.12:
-        # Jackpot — three of a kind
-        s = random.choice(SLOT_SYMBOLS)
+    if roll < 0.06:
+        # Triple — symbol weighted toward lower value (💎 triple is rare)
+        s = _slot_weighted()
         final_reels = [s, s, s]
-    elif roll < 0.37:
+    elif roll < 0.34:
         # Pair somewhere
-        s = random.choice(SLOT_SYMBOLS)
-        odd = random.choice([x for x in SLOT_SYMBOLS if x != s])
+        s = _slot_weighted()
+        odd = _slot_weighted()
+        while odd == s:
+            odd = _slot_weighted()
         positions = [0, 1, 2]
         random.shuffle(positions)
         final_reels = ["", "", ""]
@@ -4261,74 +4295,116 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
         final_reels[positions[2]] = odd
     else:
         # All different
-        final_reels = random.sample(SLOT_SYMBOLS, 3)
+        final_reels = []
+        while len(final_reels) < 3:
+            s = _slot_weighted()
+            if s not in final_reels:
+                final_reels.append(s)
 
-    def render(reels, header="🎰 SLOT MACHINE 🎰"):
+    pot = _slot_jackpot_get()
+
+    def render(reels, header="🎰 SLOT MACHINE 🎰", tag=""):
         return (
-            f"## {header}\n\n"
+            f"## {header}\n"
+            f"💰 Progressive Jackpot: **{_slot_jackpot_get():,}**\n\n"
             f"┏━━━━━━━━━━━━━━━┓\n"
-            f"┃   {reels[0]}   {reels[1]}   {reels[2]}   ┃\n"
+            f"┃   {reels[0] or '⬛'}   {reels[1] or '⬛'}   {reels[2] or '⬛'}   ┃\n"
             f"┗━━━━━━━━━━━━━━━┛\n"
-            f"      ⬆ ⬆ ⬆\n"
-            f"   {user.mention}"
+            f"      ⬆  ⬆  ⬆\n"
+            f"{tag}"
+            f"   {user.mention} · bet {bet:,}"
         )
 
-    await edit(render(["🎰","🎰","🎰"], "🎰 SLOT MACHINE 🎰"))
-    await asyncio.sleep(0.8)
+    await edit(render(["🎰","🎰","🎰"]))
+    await asyncio.sleep(0.7)
 
-    # Spin all three
-    for _ in range(8):
-        spinning = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
-        await edit(render(spinning, "🎰 SPINNING 🎰"))
-        await asyncio.sleep(0.18)
+    # Blur spin
+    for _ in range(7):
+        await edit(render([_slot_weighted() for _ in range(3)], "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.16)
 
     # Stop reel 1
-    for _ in range(5):
-        await edit(render([final_reels[0], random.choice(SLOT_SYMBOLS), random.choice(SLOT_SYMBOLS)], "🎰 SPINNING 🎰"))
-        await asyncio.sleep(0.18)
-    # Stop reel 2
-    for _ in range(5):
-        await edit(render([final_reels[0], final_reels[1], random.choice(SLOT_SYMBOLS)], "🎰 SPINNING 🎰"))
-        await asyncio.sleep(0.18)
+    for _ in range(4):
+        await edit(render([final_reels[0], _slot_weighted(), _slot_weighted()], "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.16)
+
+    # Stop reel 2 — this is where near-miss tension lives
+    for _ in range(4):
+        await edit(render([final_reels[0], final_reels[1], _slot_weighted()], "🎰 SPINNING 🎰"))
+        await asyncio.sleep(0.16)
+
+    # If first two match, build suspense before the third drops
+    two_match = final_reels[0] == final_reels[1]
+    if two_match:
+        await edit(render([final_reels[0], final_reels[1], "❓"], "😰 TWO MATCH... 😰"))
+        await asyncio.sleep(1.1)
+
     # Stop reel 3
     await edit(render(final_reels, "🎰 SPINNING 🎰"))
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(0.5)
 
-    # Result — payouts are multiplied by the bet
-    if final_reels[0] == final_reels[1] == final_reels[2]:
-        # Jackpot: bet × 10 (or × 20 for diamond)
+    # ── Result ──
+    is_triple = final_reels[0] == final_reels[1] == final_reels[2]
+    is_pair = (not is_triple) and (
+        final_reels[0] == final_reels[1] or final_reels[1] == final_reels[2] or final_reels[0] == final_reels[2]
+    )
+
+    if is_triple:
         symbol = final_reels[0]
-        multiplier = 20 if symbol == "💎" else (10 if symbol == "7️⃣" else 7)
-        winnings = bet * multiplier
-        new_bal = economy.add(user.id, winnings, "slots jackpot")
-        economy.record_win(user.id)
-        result = (
-            f"## 🎉 JACKPOT! 🎉\n\n"
-            f"{user.mention} hit **3x {symbol}** ({multiplier}x payout)\n"
-            f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
-            f"Balance: **{new_bal:,}**"
-        )
-        await trigger_event(user.id, "slots_jackpot", channel=interaction.channel)
-        if symbol == "💎":
+        if symbol == SLOT_JACKPOT_SYMBOL:
+            # 💎💎💎 → PROGRESSIVE JACKPOT
+            jackpot = _slot_jackpot_get()
+            winnings = jackpot + bet * SLOT_TRIPLE_MULT[symbol]
+            new_bal = economy.add(user.id, winnings, "slots PROGRESSIVE jackpot")
+            economy.record_win(user.id)
+            _slot_jackpot_reset()
+            result = (
+                f"# 💎💎💎 PROGRESSIVE JACKPOT!!! 💎💎💎\n\n"
+                f"{user.mention} HIT THE BIG ONE.\n"
+                f"Won {COIN_EMOJI} **{winnings:,}** coins "
+                f"_(pot of {jackpot:,} + {bet * SLOT_TRIPLE_MULT[symbol]:,})_!\n"
+                f"Balance: **{new_bal:,}**\n\n"
+                f"_The jackpot resets to {SLOT_JACKPOT_SEED:,}._"
+            )
+            try:
+                await interaction.channel.send(
+                    f"🚨💎 **{user.mention} JUST HIT THE {jackpot:,} PROGRESSIVE JACKPOT ON SLOTS!** 💎🚨",
+                    allowed_mentions=discord.AllowedMentions(users=[user]),
+                )
+            except Exception:
+                pass
             await trigger_event(user.id, "slots_diamonds", channel=interaction.channel)
+        else:
+            multiplier = SLOT_TRIPLE_MULT.get(symbol, 5)
+            winnings = bet * multiplier
+            new_bal = economy.add(user.id, winnings, "slots triple")
+            economy.record_win(user.id)
+            result = (
+                f"## 🎉 TRIPLE {symbol}! 🎉\n\n"
+                f"{user.mention} hit **3x {symbol}** ({multiplier}x payout)\n"
+                f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
+                f"Balance: **{new_bal:,}**"
+            )
+            await trigger_event(user.id, "slots_jackpot", channel=interaction.channel)
         await trigger_balance_check(user.id, channel=interaction.channel)
-    elif final_reels[0] == final_reels[1] or final_reels[1] == final_reels[2] or final_reels[0] == final_reels[2]:
-        # Pair: bet × 1.5 (small profit)
+
+    elif is_pair:
         pair_symbol = max(set(final_reels), key=final_reels.count)
-        winnings = int(bet * 1.5)
+        # Pair payout scales a bit with the symbol's value
+        pair_mult = 1.5 + (SLOT_TRIPLE_MULT.get(pair_symbol, 5) / 50)
+        winnings = int(bet * pair_mult)
         new_bal = economy.add(user.id, winnings, "slots pair")
         economy.record_win(user.id)
         result = (
             f"## ✨ PAIR! ✨\n\n"
-            f"{user.mention} hit **2x {pair_symbol}** (1.5x payout)\n"
+            f"{user.mention} hit **2x {pair_symbol}** ({pair_mult:.1f}x payout)\n"
             f"Won {COIN_EMOJI} **{winnings:,}** coins!\n"
             f"Balance: **{new_bal:,}**"
         )
     else:
-        # Apply slots luck perk for retroactive pair check
+        # Loss — feed the progressive jackpot
         slots_luck_pct = get_perk(user.id, "slots_luck_pct")
         if slots_luck_pct and random.randint(1, 100) <= slots_luck_pct:
-            # Pity pair payout
             winnings = int(bet * 1.5)
             new_bal = economy.add(user.id, winnings, "slots luck pity")
             economy.record_win(user.id)
@@ -4340,11 +4416,20 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
             )
         else:
             economy.record_loss(user.id)
+            _slot_jackpot_add(int(bet * SLOT_JACKPOT_CONTRIB))
             new_bal = economy.balance(user.id)
+            # Near-miss flavor when two matched but the third missed
+            if two_match:
+                headline = "## 😭 SO CLOSE 😭"
+                extra = f"\n_Two {final_reels[0]} but the third landed {final_reels[2]}. Agony._"
+            else:
+                headline = "## 💸 NO MATCH 💸"
+                extra = ""
             result = (
-                f"## 💸 NO MATCH 💸\n\n"
-                f"{user.mention} lost **{bet:,}** coins.\n"
-                f"Balance: **{new_bal:,}**"
+                f"{headline}\n\n"
+                f"{user.mention} lost **{bet:,}** coins.{extra}\n"
+                f"Balance: **{new_bal:,}**\n"
+                f"_Your bet fed the jackpot — now **{_slot_jackpot_get():,}**._"
             )
 
     final_display = render(final_reels, "🎰 RESULT 🎰") + "\n\n" + result
@@ -4354,6 +4439,7 @@ async def slots_command(interaction: discord.Interaction, bet: int = 100):
         pass
 
 
+# ── ⚖️ /court ────────────────────────────────────────────────────────────────
 # ── ⚖️ /court ───────────────────────────────────────────────────────────────
 # ── 💰 Economy commands ──────────────────────────────────────────────────────
 COIN_EMOJI = "💰"
@@ -5683,6 +5769,16 @@ def _hand_value(hand: list) -> int:
     return total
 
 
+def _card_val(card) -> int:
+    """Blackjack value of a single card's rank (for split-matching). J/Q/K = 10, A = 11."""
+    rank = card[0]
+    if rank in ("J", "Q", "K"):
+        return 10
+    if rank == "A":
+        return 11
+    return int(rank)
+
+
 def _render_hand(hand: list, hide_first: bool = False) -> str:
     cards = []
     for i, (r, s) in enumerate(hand):
@@ -5706,9 +5802,12 @@ def _save_blackjack():
         for uid, game in active_blackjack.items():
             serializable[str(uid)] = {
                 "deck": [list(c) for c in game["deck"]],
-                "player": [list(c) for c in game["player"]],
                 "dealer": [list(c) for c in game["dealer"]],
                 "bet": game.get("bet", 0),
+                "hands": [{"cards": [list(c) for c in h["cards"]], "bet": h["bet"],
+                           "done": h.get("done", False), "doubled": h.get("doubled", False)}
+                          for h in game.get("hands", [])],
+                "insurance": game.get("insurance", 0),
             }
         with open(BLACKJACK_FILE, "w") as f:
             json.dump(serializable, f)
@@ -5730,10 +5829,14 @@ def _refund_interrupted_blackjack():
         saved = {}
     refunded = 0
     for uid, game in saved.items():
-        bet = game.get("bet", 0)
-        if bet > 0:
+        hands = game.get("hands")
+        if hands:
+            stake = sum(h.get("bet", 0) for h in hands) + game.get("insurance", 0)
+        else:
+            stake = game.get("bet", 0)  # legacy pre-upgrade shape
+        if stake > 0:
             try:
-                economy.add(int(uid), bet, "blackjack interrupted refund")
+                economy.add(int(uid), stake, "blackjack interrupted refund")
                 refunded += 1
             except Exception:
                 pass
@@ -5745,6 +5848,111 @@ def _refund_interrupted_blackjack():
     except Exception:
         pass
     active_blackjack.clear()
+
+
+def _bj_render(game, *, reveal_dealer=False, header_extra="") -> str:
+    """Render the full blackjack table, including split hands if present."""
+    bet = game.get("bet", 0)
+    lines = [f"🃏 **BLACKJACK** — Bet: {bet:,}{header_extra}", ""]
+    if reveal_dealer:
+        dt = _hand_value(game["dealer"])
+        lines.append(f"**Dealer:** {_render_hand(game['dealer'])} = **{dt}**")
+    else:
+        lines.append(f"**Dealer:** {_render_hand(game['dealer'], hide_first=True)} = ?")
+    lines.append("")
+    hands = game["hands"]
+    active = game.get("active_hand", 0)
+    for i, h in enumerate(hands):
+        v = _hand_value(h["cards"])
+        marker = " ⬅️" if (len(hands) > 1 and i == active and not reveal_dealer) else ""
+        label = f"**Hand {i+1}:**" if len(hands) > 1 else "**You:**"
+        status = ""
+        if v > 21:
+            status = " 💥 BUST"
+        elif h.get("done") and h.get("doubled"):
+            status = " (doubled)"
+        lines.append(f"{label} {_render_hand(h['cards'])} = **{v}**{status}{marker}")
+    return "\n".join(lines)
+
+
+async def _bj_settle(interaction, view, game):
+    """Dealer plays out and all player hands resolve. Handles multi-hand + doubles."""
+    uid = view.user_id
+    # Dealer draws to 17 (only needed if any hand is still standing, not all bust)
+    any_live = any(_hand_value(h["cards"]) <= 21 for h in game["hands"])
+    if any_live:
+        while _hand_value(game["dealer"]) < 17:
+            game["dealer"].append(game["deck"].pop())
+    dealer_total = _hand_value(game["dealer"])
+
+    total_returned = 0
+    total_staked = 0
+    result_lines = []
+    won_any = False
+    for i, h in enumerate(game["hands"]):
+        stake = h["bet"]
+        total_staked += stake
+        pv = _hand_value(h["cards"])
+        tag = f"Hand {i+1}: " if len(game["hands"]) > 1 else ""
+        if pv > 21:
+            result_lines.append(f"{tag}💥 bust — lost {stake:,}")
+        elif dealer_total > 21 or pv > dealer_total:
+            total_returned += stake * 2
+            won_any = True
+            result_lines.append(f"{tag}🎉 win +{stake:,}")
+        elif pv == dealer_total:
+            total_returned += stake
+            result_lines.append(f"{tag}🤝 push")
+        else:
+            result_lines.append(f"{tag}💀 lose {stake:,}")
+
+    # Insurance settles: pays 2:1 if dealer has natural blackjack
+    ins = game.get("insurance", 0)
+    if ins:
+        dealer_natural = len(game["dealer"]) == 2 and dealer_total == 21
+        if dealer_natural:
+            total_returned += ins * 3  # your insurance back + 2:1
+            result_lines.append(f"🛡️ insurance paid +{ins*2:,}")
+        else:
+            result_lines.append(f"🛡️ insurance lost {ins:,}")
+
+    if uid in active_blackjack:
+        del active_blackjack[uid]
+    _save_blackjack()
+
+    if total_returned > 0:
+        economy.add(uid, total_returned, "blackjack payout")
+    net = total_returned - total_staked - game.get("insurance", 0)
+    if won_any or net > 0:
+        economy.record_win(uid)
+        try:
+            track_quest_progress(uid, "games_won")
+            add_tournament_score(uid, games_won=1)
+        except Exception:
+            pass
+    else:
+        economy.record_loss(uid)
+    try:
+        track_quest_progress(uid, "games_played")
+        if net > 0:
+            track_quest_progress(uid, "coins_earned", net)
+    except Exception:
+        pass
+
+    new_bal = economy.balance(uid)
+    verdict = "🎉 **NET WIN**" if net > 0 else ("🤝 **BREAK EVEN**" if net == 0 else "💀 **NET LOSS**")
+    body = (
+        _bj_render(game, reveal_dealer=True) + "\n\n"
+        + " · ".join(result_lines) + "\n\n"
+        + f"{verdict}: {'+' if net >= 0 else ''}{net:,}\n"
+        + f"Balance: **{new_bal:,}**"
+    )
+    view.disable_all()
+    await interaction.response.edit_message(content=body, view=view)
+    try:
+        await trigger_balance_check(uid, channel=interaction.channel)
+    except Exception:
+        pass
 
 
 class BlackjackView(discord.ui.View):
@@ -5759,117 +5967,148 @@ class BlackjackView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🎯")
-    async def hit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._hit(interaction)
-
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success, emoji="✋")
-    async def stand_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._stand(interaction)
-
-    async def _hit(self, interaction: discord.Interaction):
-        game = active_blackjack.get(self.user_id)
-        if not game:
-            await interaction.response.send_message("Game not found.", ephemeral=True)
-            return
-        # Draw a card
-        card = game["deck"].pop()
-        game["player"].append(card)
-        player_total = _hand_value(game["player"])
-
-        if player_total > 21:
-            # Bust
-            del active_blackjack[self.user_id]
-            _save_blackjack()
-            economy.record_loss(self.user_id)
-            new_bal = economy.balance(self.user_id)
-            self.disable_all()
-            await interaction.response.edit_message(
-                content=(
-                    f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
-                    f"**Dealer:** {_render_hand(game['dealer'])}\n"
-                    f"**You:** {_render_hand(game['player'])} = **{player_total}**\n\n"
-                    f"## 💥 BUST!\n"
-                    f"Lost **{self.bet:,}** coins.\n"
-                    f"Balance: **{new_bal:,}**"
-                ),
-                view=self,
-            )
-            return
-
-        # Continue
-        _save_blackjack()
-        await interaction.response.edit_message(
-            content=(
-                f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
-                f"**Dealer:** {_render_hand(game['dealer'], hide_first=True)} = ?\n"
-                f"**You:** {_render_hand(game['player'])} = **{player_total}**"
-            ),
-            view=self,
+    def _sync_buttons(self, game):
+        """Enable/disable action buttons based on the current hand's legality."""
+        hand = game["hands"][game["active_hand"]]
+        cards = hand["cards"]
+        first_move = len(cards) == 2 and not hand.get("done")
+        bal = economy.balance(self.user_id)
+        can_double = first_move and bal >= hand["bet"]
+        # split: two cards of equal rank-value, single hand so far, funds available
+        can_split = (
+            first_move and len(game["hands"]) == 1
+            and _card_val(cards[0]) == _card_val(cards[1])
+            and bal >= hand["bet"]
         )
+        # insurance: dealer shows an Ace, offered once, before any other move
+        dealer_ace = game["dealer"][1][0] == "A" if len(game["dealer"]) >= 2 else False
+        can_insure = (
+            dealer_ace and not game.get("insurance_offered")
+            and first_move and len(game["hands"]) == 1
+            and bal >= hand["bet"] // 2
+        )
+        for child in self.children:
+            cid = getattr(child, "custom_id", "")
+            if cid == "bj_double":
+                child.disabled = not can_double
+            elif cid == "bj_split":
+                child.disabled = not can_split
+            elif cid == "bj_insure":
+                child.disabled = not can_insure
 
-    async def _stand(self, interaction: discord.Interaction):
-        game = active_blackjack.get(self.user_id)
-        if not game:
-            await interaction.response.send_message("Game not found.", ephemeral=True)
-            return
-
-        # Dealer plays
-        while _hand_value(game["dealer"]) < 17:
-            game["dealer"].append(game["deck"].pop())
-
-        player_total = _hand_value(game["player"])
-        dealer_total = _hand_value(game["dealer"])
-        del active_blackjack[self.user_id]
+    async def _refresh(self, interaction, game):
+        self._sync_buttons(game)
         _save_blackjack()
+        await interaction.response.edit_message(content=_bj_render(game), view=self)
 
-        # Resolve
-        outcome = ""
-        winnings = 0
-        if dealer_total > 21:
-            winnings = self.bet * 2
-            outcome = "## 🎉 DEALER BUSTS! YOU WIN!"
-            economy.record_win(self.user_id)
-        elif player_total > dealer_total:
-            winnings = self.bet * 2
-            outcome = "## 🎉 YOU WIN!"
-            economy.record_win(self.user_id)
-        elif player_total == dealer_total:
-            winnings = self.bet  # push, get bet back
-            outcome = "## 🤝 PUSH (tie). Bet refunded."
+    async def _advance_or_settle(self, interaction, game):
+        """Move to the next unfinished hand, or settle if all are done."""
+        hands = game["hands"]
+        # find next hand that isn't done and isn't bust
+        nxt = None
+        for i in range(game["active_hand"] + 1, len(hands)):
+            if not hands[i].get("done") and _hand_value(hands[i]["cards"]) <= 21:
+                nxt = i
+                break
+        if nxt is not None:
+            game["active_hand"] = nxt
+            # deal the split hand its second card if it only has one
+            if len(hands[nxt]["cards"]) == 1:
+                hands[nxt]["cards"].append(game["deck"].pop())
+            await self._refresh(interaction, game)
         else:
-            winnings = 0
-            outcome = "## 💀 DEALER WINS"
-            economy.record_loss(self.user_id)
+            await _bj_settle(interaction, self, game)
 
-        if winnings > 0:
-            economy.add(self.user_id, winnings, "blackjack")
-        new_bal = economy.balance(self.user_id)
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🎯", custom_id="bj_hit")
+    async def hit_button(self, interaction, button):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        hand = game["hands"][game["active_hand"]]
+        hand["cards"].append(game["deck"].pop())
+        if _hand_value(hand["cards"]) >= 21:
+            hand["done"] = True
+            await self._advance_or_settle(interaction, game)
+        else:
+            await self._refresh(interaction, game)
 
-        self.disable_all()
-        await interaction.response.edit_message(
-            content=(
-                f"🃏 **BLACKJACK** — Bet: {self.bet:,}\n\n"
-                f"**Dealer:** {_render_hand(game['dealer'])} = **{dealer_total}**\n"
-                f"**You:** {_render_hand(game['player'])} = **{player_total}**\n\n"
-                f"{outcome}\n"
-                f"{('Won **' + format(winnings, ',') + '** coins.') if winnings > self.bet else ('Lost **' + format(self.bet, ',') + '** coins.') if winnings == 0 else 'Bet refunded.'}\n"
-                f"Balance: **{new_bal:,}**"
-            ),
-            view=self,
-        )
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success, emoji="✋", custom_id="bj_stand")
+    async def stand_button(self, interaction, button):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        game["hands"][game["active_hand"]]["done"] = True
+        await self._advance_or_settle(interaction, game)
+
+    @discord.ui.button(label="Double", style=discord.ButtonStyle.danger, emoji="⏫", custom_id="bj_double")
+    async def double_button(self, interaction, button):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        hand = game["hands"][game["active_hand"]]
+        if economy.balance(self.user_id) < hand["bet"]:
+            await interaction.response.send_message("Not enough coins to double.", ephemeral=True)
+            return
+        economy.add(self.user_id, -hand["bet"], "blackjack double")
+        hand["bet"] *= 2
+        hand["doubled"] = True
+        hand["cards"].append(game["deck"].pop())  # exactly one card
+        hand["done"] = True
+        await self._advance_or_settle(interaction, game)
+
+    @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary, emoji="✂️", custom_id="bj_split")
+    async def split_button(self, interaction, button):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        hand = game["hands"][0]
+        if len(game["hands"]) != 1 or _card_val(hand["cards"][0]) != _card_val(hand["cards"][1]):
+            await interaction.response.send_message("Can't split this hand.", ephemeral=True)
+            return
+        if economy.balance(self.user_id) < hand["bet"]:
+            await interaction.response.send_message("Not enough coins to split.", ephemeral=True)
+            return
+        economy.add(self.user_id, -hand["bet"], "blackjack split")
+        c1, c2 = hand["cards"]
+        # two hands, each keeps one card; first gets a fresh second card now
+        game["hands"] = [
+            {"cards": [c1, game["deck"].pop()], "bet": hand["bet"], "done": False},
+            {"cards": [c2], "bet": hand["bet"], "done": False},
+        ]
+        game["active_hand"] = 0
+        await self._refresh(interaction, game)
+
+    @discord.ui.button(label="Insure", style=discord.ButtonStyle.secondary, emoji="🛡️", custom_id="bj_insure")
+    async def insure_button(self, interaction, button):
+        game = active_blackjack.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        cost = game["hands"][0]["bet"] // 2
+        if economy.balance(self.user_id) < cost:
+            await interaction.response.send_message("Not enough coins for insurance.", ephemeral=True)
+            return
+        economy.add(self.user_id, -cost, "blackjack insurance")
+        game["insurance"] = cost
+        game["insurance_offered"] = True
+        await self._refresh(interaction, game)
 
     def disable_all(self):
         for child in self.children:
             child.disabled = True
 
     async def on_timeout(self):
-        # If a game is still active, refund bet
-        if self.user_id in active_blackjack:
-            economy.add(self.user_id, self.bet, "blackjack timeout refund")
+        game = active_blackjack.get(self.user_id)
+        if game:
+            # refund all staked coins (original + any splits/doubles/insurance)
+            refund = sum(h["bet"] for h in game["hands"]) + game.get("insurance", 0)
+            economy.add(self.user_id, refund, "blackjack timeout refund")
             del active_blackjack[self.user_id]
             _save_blackjack()
-
 
 @tree.command(name="blackjack", description="Play blackjack against the dealer.")
 @discord.app_commands.describe(bet="How many coins to bet")
@@ -5895,7 +6134,15 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
     random.shuffle(deck)
     player = [deck.pop(), deck.pop()]
     dealer = [deck.pop(), deck.pop()]
-    active_blackjack[user.id] = {"deck": deck, "player": player, "dealer": dealer, "bet": bet}
+    active_blackjack[user.id] = {
+        "deck": deck,
+        "dealer": dealer,
+        "bet": bet,
+        "hands": [{"cards": player, "bet": bet, "done": False}],
+        "active_hand": 0,
+        "insurance": 0,
+        "insurance_offered": False,
+    }
     _save_blackjack()
 
     player_total = _hand_value(player)
@@ -5926,12 +6173,14 @@ async def blackjack_command(interaction: discord.Interaction, bet: int):
         add_tournament_score(user.id, coins_earned=winnings, games_won=1)
         return
 
+    game = active_blackjack[user.id]
     view = BlackjackView(user.id, bet)
+    view._sync_buttons(game)
     await interaction.response.send_message(
-        f"🃏 **BLACKJACK** — Bet: {bet:,}\n\n"
-        f"**Dealer:** {_render_hand(dealer, hide_first=True)} = ?\n"
-        f"**You:** {_render_hand(player)} = **{player_total}**\n\n"
-        f"Hit or Stand?",
+        _bj_render(game) + "\n\nHit, Stand, Double" +
+        (", Split" if len(game["hands"][0]["cards"]) == 2 and
+         _card_val(player[0]) == _card_val(player[1]) else "") +
+        ("or Insure?" if dealer[1][0] == "A" else "?"),
         view=view,
     )
 
@@ -15606,7 +15855,8 @@ def _customcmd_reserved_names() -> set:
         pass
     # hard-block dangerous/owner names
     names |= {"give", "grant", "mint", "makecommand", "editcommand", "delcommand",
-              "deletecommand", "mycommands", "commandlist", "customcommands"}
+              "deletecommand", "mycommands", "commandlist", "customcommands",
+              "roulette", "roul", "spin", "bet", "place"}
     return names
 
 
@@ -18118,6 +18368,209 @@ async def _handle_venue_pr(message: discord.Message, rest: str):
         f"paid **{cost:,}** for **+{points} rep**.\n"
         f"Reputation now **{_venue_rep(v)}/100** ({_venue_rep_label(_venue_rep(v))})."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎡 ROULETTE — a shared table. One person opens a spin with _roulette, others
+# join with _bet <amount> <target> during a betting window, then the wheel spins
+# and everyone settles together. European single-zero wheel (0-36).
+# Bets: red/black, odd/even, high(19-36)/low(1-18), dozens (1st/2nd/3rd),
+# columns (col1/col2/col3), or a straight-up number (0-36, pays 35:1).
+# ─────────────────────────────────────────────────────────────────────────────
+ROULETTE_RED = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+ROULETTE_WHEEL_ORDER = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26]
+ROULETTE_BET_WINDOW = 30  # seconds to place bets
+
+# guild_id/channel_id -> open table
+_roulette_tables: dict = {}
+
+ROULETTE_PAYOUTS = {
+    # name: (payout multiplier, predicate(number)->bool)
+    "red":   (2, lambda n: n in ROULETTE_RED),
+    "black": (2, lambda n: n != 0 and n not in ROULETTE_RED),
+    "odd":   (2, lambda n: n != 0 and n % 2 == 1),
+    "even":  (2, lambda n: n != 0 and n % 2 == 0),
+    "low":   (2, lambda n: 1 <= n <= 18),
+    "high":  (2, lambda n: 19 <= n <= 36),
+    "1st12": (3, lambda n: 1 <= n <= 12),
+    "2nd12": (3, lambda n: 13 <= n <= 24),
+    "3rd12": (3, lambda n: 25 <= n <= 36),
+    "col1":  (3, lambda n: n != 0 and n % 3 == 1),
+    "col2":  (3, lambda n: n != 0 and n % 3 == 2),
+    "col3":  (3, lambda n: n != 0 and n % 3 == 0),
+}
+# aliases players might type
+ROULETTE_ALIASES = {
+    "1st": "1st12", "2nd": "2nd12", "3rd": "3rd12",
+    "first": "1st12", "second": "2nd12", "third": "3rd12",
+    "1-18": "low", "19-36": "high", "column1": "col1", "column2": "col2", "column3": "col3",
+}
+
+
+def _roulette_key(message):
+    return f"{message.guild.id}:{message.channel.id}"
+
+
+def _roulette_color(n: int) -> str:
+    if n == 0:
+        return "🟢"
+    return "🔴" if n in ROULETTE_RED else "⚫"
+
+
+def _parse_roulette_target(raw: str):
+    """Return a normalized target ('red','col2','17',...) or None if invalid."""
+    t = raw.lower().strip()
+    t = ROULETTE_ALIASES.get(t, t)
+    if t in ROULETTE_PAYOUTS:
+        return t
+    if t.isdigit() and 0 <= int(t) <= 36:
+        return str(int(t))
+    return None
+
+
+def _roulette_target_label(t: str) -> str:
+    labels = {
+        "red": "🔴 Red", "black": "⚫ Black", "odd": "Odd", "even": "Even",
+        "low": "Low (1-18)", "high": "High (19-36)",
+        "1st12": "1st 12", "2nd12": "2nd 12", "3rd12": "3rd 12",
+        "col1": "Column 1", "col2": "Column 2", "col3": "Column 3",
+    }
+    if t in labels:
+        return labels[t]
+    return f"Number {t}"
+
+
+async def _handle_roulette(message: discord.Message, rest: str):
+    """Open a roulette table and run the spin after a betting window."""
+    key = _roulette_key(message)
+    if key in _roulette_tables:
+        await message.channel.send("🎡 A roulette round is already open here — place bets with `_bet <amount> <target>`.")
+        return
+
+    table = {"bets": {}, "opener": message.author.id, "closes": time.time() + ROULETTE_BET_WINDOW}
+    _roulette_tables[key] = table
+
+    embed = discord.Embed(
+        title="🎡 ROULETTE — place your bets!",
+        description=(
+            f"Betting is open for **{ROULETTE_BET_WINDOW} seconds**.\n"
+            f"Bet with: `_bet <amount> <target>`\n\n"
+            "**Even money (2x):** red · black · odd · even · low · high\n"
+            "**2:1 (3x):** 1st12 · 2nd12 · 3rd12 · col1 · col2 · col3\n"
+            "**35:1 (36x):** any number 0-36 straight up\n\n"
+            "_Example: `_bet 500 red` or `_bet 1000 17`_"
+        ),
+        color=0x2ECC71,
+    )
+    embed.set_footer(text=f"Wheel spins in {ROULETTE_BET_WINDOW}s · opened by {message.author.display_name}")
+    await message.channel.send(embed=embed)
+
+    await asyncio.sleep(ROULETTE_BET_WINDOW)
+
+    table = _roulette_tables.pop(key, None)
+    if not table or not table["bets"]:
+        await message.channel.send("🎡 No bets placed — table closed.")
+        return
+
+    # Spin animation
+    result = random.randint(0, 36)
+    spin_msg = await message.channel.send("🎡 **No more bets!** The wheel is spinning...")
+    idx = ROULETTE_WHEEL_ORDER.index(result)
+    # show a few teasing positions ending on the result
+    for step in range(6):
+        n = ROULETTE_WHEEL_ORDER[(idx - (5 - step)) % len(ROULETTE_WHEEL_ORDER)]
+        try:
+            await spin_msg.edit(content=f"🎡 Spinning... {_roulette_color(n)} **{n}**")
+        except Exception:
+            pass
+        await asyncio.sleep(0.4 + step * 0.12)
+
+    try:
+        await spin_msg.edit(content=f"🎡 The ball lands on {_roulette_color(result)} **{result}**!")
+    except Exception:
+        pass
+
+    # Settle every bet
+    lines = []
+    winners = 0
+    for uid, bets in table["bets"].items():
+        member = message.guild.get_member(uid)
+        name = member.display_name if member else f"User {uid}"
+        user_net = 0
+        for target, amount in bets:
+            if target.isdigit():
+                won = int(target) == result
+                mult = 36
+            else:
+                mult, pred = ROULETTE_PAYOUTS[target]
+                won = pred(result)
+            if won:
+                payout = amount * mult
+                economy.add(uid, payout, "roulette win")
+                user_net += payout - amount
+                winners += 1
+            else:
+                user_net -= amount
+        # record W/L on net
+        if user_net > 0:
+            economy.record_win(uid)
+            sign = f"🎉 +{user_net:,}"
+        elif user_net == 0:
+            sign = "🤝 even"
+        else:
+            economy.record_loss(uid)
+            sign = f"💸 {user_net:,}"
+        lines.append(f"{name}: {sign}")
+
+    result_embed = discord.Embed(
+        title=f"🎡 Result: {_roulette_color(result)} {result}",
+        description="\n".join(lines[:25]) or "No bets.",
+        color=0xE74C3C if result in ROULETTE_RED else (0x2ECC71 if result == 0 else 0x111111),
+    )
+    result_embed.set_footer(text="Open another round with _roulette")
+    await message.channel.send(embed=result_embed)
+
+
+async def _handle_roulette_bet(message: discord.Message, rest: str):
+    """Place a bet on the open roulette table in this channel."""
+    key = _roulette_key(message)
+    table = _roulette_tables.get(key)
+    if not table:
+        await message.channel.send("No roulette round is open here. Start one with `_roulette`.")
+        return
+    if time.time() > table["closes"]:
+        await message.channel.send("⏱️ Betting just closed on this round.")
+        return
+
+    parts = (rest or "").split()
+    if len(parts) < 2:
+        await message.channel.send("Usage: `_bet <amount> <target>` — e.g. `_bet 500 red` or `_bet 250 17`")
+        return
+    # amount can be first or second token; try to be forgiving
+    amount_raw, target_raw = parts[0], parts[1]
+    if not amount_raw.isdigit() and target_raw.isdigit():
+        amount_raw, target_raw = target_raw, amount_raw
+    if not amount_raw.isdigit():
+        await message.channel.send("Amount must be a positive number.")
+        return
+    amount = int(amount_raw)
+    target = _parse_roulette_target(target_raw)
+    if amount <= 0:
+        await message.channel.send("Amount must be positive.")
+        return
+    if target is None:
+        await message.channel.send("Invalid target. Use red/black/odd/even/low/high, a dozen (1st12), a column (col1), or a number 0-36.")
+        return
+    if economy.balance(message.author.id) < amount:
+        await message.channel.send(f"❌ You only have **{economy.balance(message.author.id):,}** coins.")
+        return
+
+    economy.add(message.author.id, -amount, "roulette bet")
+    table["bets"].setdefault(message.author.id, []).append((target, amount))
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        await message.channel.send(f"✅ {message.author.mention} bet **{amount:,}** on **{_roulette_target_label(target)}**.")
 
 
 async def _handle_nitro(message: discord.Message, rest: str):
@@ -27645,6 +28098,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("servers", "guilds", "serverlist"):
         await _handle_servers(message)
+        return True
+    if cmd_name in ("roulette", "roul", "spin"):
+        await _handle_roulette(message, rest)
+        return True
+    if cmd_name in ("bet", "place"):
+        await _handle_roulette_bet(message, rest)
         return True
     if cmd_name in ("nitro", "jackpot", "nitropool"):
         await _handle_nitro(message, rest)
