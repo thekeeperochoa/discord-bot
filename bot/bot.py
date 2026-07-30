@@ -14525,7 +14525,49 @@ LIQUOR_TYPES = {
     "premium": {"emoji": "🍷", "name": "Premium",      "cost_per_bottle": 200, "revenue_per_bottle": 500,  "tier_min": 1},
     "top_shelf": {"emoji": "🥃", "name": "Top Shelf",  "cost_per_bottle": 500, "revenue_per_bottle": 1_400, "tier_min": 2},
     "bottle_service": {"emoji": "🍾", "name": "Bottle Service", "cost_per_bottle": 1_500, "revenue_per_bottle": 5_000, "tier_min": 3},
+    # 🌫️ Bootleg — half cost, double profit margin, but stocking it spikes your
+    # raid/inspection risk while it sits in the venue. The greed lever.
+    "bootleg": {"emoji": "🌫️", "name": "Bootleg Hooch", "cost_per_bottle": 60, "revenue_per_bottle": 260, "tier_min": 1, "bootleg": True},
 }
+
+# ── 📈 LIQUOR MARKET — prices swing on a timer so *when* you buy matters ──
+LIQUOR_MARKET_FILE = MEMORY_DIR / "liquor_market.json"
+LIQUOR_MARKET_INTERVAL = 6 * 3600   # prices re-roll every 6 hours
+LIQUOR_MARKET_SWING = 0.30          # ±30%
+BOOTLEG_EXTRA_RISK = 0.18           # added to a venue's event chance while bootleg is stocked
+BULK_DISCOUNT_THRESHOLD = 100       # bottles
+BULK_DISCOUNT_PCT = 0.10            # 10% off the whole order at/above threshold
+
+
+def _load_liquor_market() -> dict:
+    now = time.time()
+    data = {}
+    if LIQUOR_MARKET_FILE.exists():
+        try:
+            data = json.load(open(LIQUOR_MARKET_FILE))
+        except Exception:
+            data = {}
+    # Re-roll if stale or empty
+    if now - data.get("rolled_at", 0) > LIQUOR_MARKET_INTERVAL or "prices" not in data:
+        prices = {}
+        for k in LIQUOR_TYPES:
+            prices[k] = round(random.uniform(1 - LIQUOR_MARKET_SWING, 1 + LIQUOR_MARKET_SWING), 2)
+        data = {"rolled_at": now, "prices": prices}
+        try:
+            json.dump(data, open(LIQUOR_MARKET_FILE, "w"))
+        except Exception:
+            pass
+    return data
+
+
+def _liquor_price_mult(l_key: str) -> float:
+    return _load_liquor_market().get("prices", {}).get(l_key, 1.0)
+
+
+def _market_arrow(mult: float) -> str:
+    if mult <= 0.85: return "📉 CHEAP"
+    if mult >= 1.15: return "📈 PRICEY"
+    return "➖ normal"
 
 NIGHTLIFE_COLLECT_COOLDOWN_MIN = 60  # 1 hour cooldown on collecting per venue
 NIGHTLIFE_MAX_IDLE_HOURS = 18
@@ -14863,7 +14905,26 @@ async def collectvenue_command(interaction: discord.Interaction):
                 continue
             # Sell up to 20% of stock per collection (with a sane cap)
             sold = min(bottles, max(1, int(bottles * 0.2)))
-            liquor_bonus += sold * (liq_info["revenue_per_bottle"] - liq_info["cost_per_bottle"])
+            per_bottle = liq_info["revenue_per_bottle"] - liq_info["cost_per_bottle"]
+
+            # 🥃 Hot batch (supplier mixup) sells at +50%; 💧 bad batch at −40%
+            hot = venue.get("_liquor_hot", 0)
+            bad = venue.get("_liquor_bad", 0)
+            rev_mult = 1.0
+            if hot > 0:
+                rev_mult += 0.5
+                venue["_liquor_hot"] = max(0, hot - sold)
+            elif bad > 0:
+                rev_mult -= 0.4
+                venue["_liquor_bad"] = max(0, bad - sold)
+
+            # 🔥 House special: featured liquor earns +40% but sells faster
+            special = venue.get("house_special", {})
+            if special.get("liquor") == liq_key and special.get("until", 0) > time.time():
+                rev_mult += 0.4
+                sold = min(bottles, sold + max(1, int(bottles * 0.1)))
+
+            liquor_bonus += int(sold * per_bottle * rev_mult)
             venue["liquor"][liq_key] = bottles - sold
 
         # 💸 Overhead: rent + payroll for the hours since last collection
@@ -15069,7 +15130,14 @@ async def stockliquor_command(
         )
         return
 
-    total_cost = liq_info["cost_per_bottle"] * bottles
+    # 📈 Market-adjusted price + 🎁 bulk discount
+    market_mult = _liquor_price_mult(l_key)
+    unit_cost = int(liq_info["cost_per_bottle"] * market_mult)
+    total_cost = unit_cost * bottles
+    bulk = bottles >= BULK_DISCOUNT_THRESHOLD
+    if bulk:
+        total_cost = int(total_cost * (1 - BULK_DISCOUNT_PCT))
+
     if economy.balance(user.id) < total_cost:
         await interaction.response.send_message(
             f"❌ Need **{total_cost:,}** coins. You have **{economy.balance(user.id):,}**.",
@@ -15078,14 +15146,58 @@ async def stockliquor_command(
         return
 
     economy.add(user.id, -total_cost, f"liquor: {l_key}")
-    biz.setdefault("liquor", {})[l_key] = biz["liquor"].get(l_key, 0) + bottles
+
+    # ── 🚚 THE SUPPLIER RUN — how the shipment actually goes down ──
+    # (key, weight, headline, effect)  effect mutates bottles_added / refund
+    delivered = bottles
+    refund = 0
+    bonus_note = ""
+    roll = random.random()
+    run_lines = []
+
+    if roll < 0.55:
+        # Clean delivery
+        run_lines.append("🚚 Clean delivery — everything showed up as ordered.")
+    elif roll < 0.68:
+        # Bulk hookup: +20% free bottles
+        extra = max(1, int(bottles * 0.20))
+        delivered += extra
+        run_lines.append(f"📦 **Bulk hookup!** The supplier tossed in **{extra} free bottles**.")
+    elif roll < 0.78:
+        # Fell off a truck: mystery free premium crate
+        crate = random.randint(3, 10)
+        biz.setdefault("liquor", {})["premium"] = biz["liquor"].get("premium", 0) + crate
+        run_lines.append(f"🎁 **Fell off a truck** — a mystery crate of **{crate} Premium bottles** appeared. Don't ask.")
+    elif roll < 0.86:
+        # Premium mixup: this order upgraded to next tier revenue (mark bottles as upgraded)
+        run_lines.append("🥃 **Supplier mixup** — they sent a better batch than you paid for. These'll sell hot.")
+        biz["_liquor_hot"] = biz.get("_liquor_hot", 0) + delivered  # sells at bonus revenue on collect
+    elif roll < 0.94:
+        # Shipment seized: lose a cut of bottles (REAL RISK)
+        seized = max(1, int(delivered * random.uniform(0.25, 0.5)))
+        delivered -= seized
+        run_lines.append(f"🚔 **Shipment seized!** Customs took **{seized} bottles** at the dock. You eat the loss.")
+    else:
+        # Watered down: bad batch sells at reduced revenue (REAL RISK)
+        biz["_liquor_bad"] = biz.get("_liquor_bad", 0) + delivered
+        run_lines.append("💧 **Watered-down batch** — quality's trash. These'll move at a discount. Brutal.")
+
+    biz.setdefault("liquor", {})[l_key] = biz["liquor"].get(l_key, 0) + max(0, delivered)
     _save_nightlife(data)
 
-    expected_revenue = bottles * liq_info["revenue_per_bottle"]
+    expected_revenue = max(0, delivered) * liq_info["revenue_per_bottle"]
     expected_profit = expected_revenue - total_cost
+
+    price_tag = f"{_market_arrow(market_mult)} ({unit_cost:,}/bottle)"
+    bulk_tag = f" · 🎁 bulk −{int(BULK_DISCOUNT_PCT*100)}%" if bulk else ""
+    bootleg_tag = "\n⚠️ _Bootleg raises your raid/inspection risk while it's stocked._" if liq_info.get("bootleg") else ""
+
     await interaction.response.send_message(
-        f"🍾 Stocked **{bottles} bottles** of {liq_info['emoji']} **{liq_info['name']}** at **{biz['name']}**.\n"
-        f"💸 Cost: {total_cost:,} • Expected revenue: ~{expected_revenue:,} (+{expected_profit:,} profit)\n"
+        f"🍾 Ordered **{bottles} bottles** of {liq_info['emoji']} **{liq_info['name']}** for **{biz['name']}**.\n"
+        f"💸 Paid **{total_cost:,}** · {price_tag}{bulk_tag}\n\n"
+        + "\n".join(run_lines) +
+        f"\n\n📦 Landed in stock: **{max(0, delivered)} bottles** · ~**{expected_revenue:,}** revenue on collect"
+        f"{bootleg_tag}\n"
         f"_Bottles sell automatically when you `/collectvenue`._"
     )
 
@@ -15106,7 +15218,11 @@ async def nightlife_events_scheduler():
                 for venue in venues:
                     if venue.get("closed_until", 0) > time.time():
                         continue
-                    if random.random() > NIGHTLIFE_RISK_CHANCE:
+                    # 🌫️ Bootleg stock spikes this venue's event chance
+                    risk = NIGHTLIFE_RISK_CHANCE
+                    if venue.get("liquor", {}).get("bootleg", 0) > 0:
+                        risk += BOOTLEG_EXTRA_RISK
+                    if random.random() > risk:
                         continue
                     info = VENUE_TYPES.get(venue["type"], {"emoji":"🏢","name":"?"})
 
@@ -18321,6 +18437,96 @@ async def _handle_venuedash(message: discord.Message):
         )
     embed.set_footer(text=f"Net {total_net:,}/hr across {len(venues)} venue(s) · _pr <slot> to buy reputation")
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+HOUSE_SPECIAL_COST = 3000        # coins to feature a drink
+HOUSE_SPECIAL_HOURS = 24         # how long the special runs
+
+
+async def _handle_liquormarket(message: discord.Message):
+    """_liquormarket — show current liquor prices so players can buy the dips."""
+    market = _load_liquor_market()
+    prices = market.get("prices", {})
+    rolled = market.get("rolled_at", 0)
+    next_roll = int(rolled + LIQUOR_MARKET_INTERVAL)
+
+    embed = discord.Embed(
+        title="📈 The Liquor Market",
+        description="Prices swing ±30% every 6 hours. Stock up when it's cheap.",
+        color=0x00F0FF,
+    )
+    for k, info in LIQUOR_TYPES.items():
+        mult = prices.get(k, 1.0)
+        unit = int(info["cost_per_bottle"] * mult)
+        if mult <= 0.85:
+            trend = "🟢 CHEAP — buy now"
+        elif mult >= 1.15:
+            trend = "🔴 SPIKED — hold off"
+        else:
+            trend = "⚪ steady"
+        boot = " 🌫️" if info.get("bootleg") else ""
+        embed.add_field(
+            name=f"{info['emoji']} {info['name']}{boot}",
+            value=f"**{unit:,}**/bottle · {trend}\n_(sells for {info['revenue_per_bottle']:,})_",
+            inline=True,
+        )
+    embed.set_footer(text=f"Prices re-roll · next shift <t:{next_roll}:R>")
+    await message.channel.send(embed=embed)
+
+
+async def _handle_housespecial(message: discord.Message, rest: str):
+    """_special <slot> <liquor> — feature a drink for 24h: +40% revenue on it,
+    but it sells out faster. Costs coins to run."""
+    uid = str(message.author.id)
+    data = _load_nightlife()
+    venues = data.get("users", {}).get(uid, [])
+    if not venues:
+        await message.channel.send("You don't own any venues. `/buyvenue` first.")
+        return
+    parts = (rest or "").split()
+    if len(parts) < 2 or not parts[0].isdigit():
+        liq_list = " · ".join(f"`{k}`" for k in LIQUOR_TYPES)
+        await message.channel.send(
+            f"Usage: `_special <slot> <liquor>` — feature a drink for **{HOUSE_SPECIAL_HOURS}h** "
+            f"(+40% revenue, sells faster). Cost: **{HOUSE_SPECIAL_COST:,}**.\n"
+            f"Slots come from `_venue`. Liquors: {liq_list}"
+        )
+        return
+    slot = int(parts[0])
+    l_key = parts[1].lower()
+    if not (1 <= slot <= len(venues)):
+        await message.channel.send(f"You have {len(venues)} venue(s). Pick 1-{len(venues)}.")
+        return
+    if l_key not in LIQUOR_TYPES:
+        await message.channel.send(f"Unknown liquor `{l_key}`. Options: " + ", ".join(f"`{k}`" for k in LIQUOR_TYPES))
+        return
+    v = venues[slot - 1]
+    cur = v.get("house_special", {})
+    if cur.get("until", 0) > time.time():
+        mins = int((cur["until"] - time.time()) / 60)
+        await message.channel.send(
+            f"🔥 **{v['name']}** already has a special running ({cur.get('liquor')}) for another ~{mins} min."
+        )
+        return
+    if economy.balance(message.author.id) < HOUSE_SPECIAL_COST:
+        await message.channel.send(
+            f"❌ A house special costs **{HOUSE_SPECIAL_COST:,}**. You have **{economy.balance(message.author.id):,}**."
+        )
+        return
+    economy.add(message.author.id, -HOUSE_SPECIAL_COST, "house special")
+    v["house_special"] = {"liquor": l_key, "until": time.time() + HOUSE_SPECIAL_HOURS * 3600}
+    _save_nightlife(data)
+    try:
+        track_economy_event("spent", HOUSE_SPECIAL_COST)
+    except Exception:
+        pass
+    info = LIQUOR_TYPES[l_key]
+    vinfo = VENUE_TYPES.get(v["type"], {"emoji": "🏢"})
+    await message.channel.send(
+        f"🔥 {vinfo['emoji']} **{v['name']}** now features the **{info['emoji']} {info['name']}** special!\n"
+        f"**+40% revenue** on it for **{HOUSE_SPECIAL_HOURS}h** — but it'll sell out faster, so keep it stocked. "
+        f"The whole city's talking about it. 🗣️"
+    )
 
 
 async def _handle_venue_pr(message: discord.Message, rest: str):
