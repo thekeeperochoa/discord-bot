@@ -28326,6 +28326,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("pr", "prcampaign", "repfix"):
         await _handle_venue_pr(message, rest)
         return True
+    if cmd_name in ("liquormarket", "liquorprices", "market"):
+        await _handle_liquormarket(message)
+        return True
+    if cmd_name in ("special", "housespecial", "signature"):
+        await _handle_housespecial(message, rest)
+        return True
     if cmd_name in ("freedrip", "dripfree", "freewindow"):
         await _handle_freedrip(message, rest)
         return True
