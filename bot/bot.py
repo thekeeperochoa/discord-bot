@@ -11298,18 +11298,27 @@ async def collectbusiness_command(interaction: discord.Interaction):
 
 
 # ── /hire ────────────────────────────────────────────────────────────────────
-@tree.command(name="hire", description="Hire another user to work at one of your businesses.")
-@discord.app_commands.describe(employee="Who to hire", business_type="Which business")
+@tree.command(name="hire", description="Hire another user to work at one or all of your businesses.")
+@discord.app_commands.describe(
+    employee="Who to hire",
+    business_type="Which business",
+    scope="Hire into just one business, or into every business of this type you own",
+)
 @discord.app_commands.choices(
     business_type=[
         discord.app_commands.Choice(name=f"{b['emoji']} {b['name']}", value=k)
         for k, b in BUSINESS_TYPES.items()
-    ]
+    ],
+    scope=[
+        discord.app_commands.Choice(name="🎯 Just one business", value="one"),
+        discord.app_commands.Choice(name="📦 Every business of this type I own", value="type"),
+    ],
 )
 async def hire_command(
     interaction: discord.Interaction,
     employee: discord.Member,
     business_type: discord.app_commands.Choice[str],
+    scope: discord.app_commands.Choice[str] = None,
 ):
     owner = interaction.user
     if employee.id == owner.id:
@@ -11332,6 +11341,33 @@ async def hire_command(
         return
 
     info = BUSINESS_TYPES[biz_type]
+    scope_val = scope.value if scope else "one"
+
+    # ── 📦 BULK: hire this person into every business of this type with an open slot ──
+    if scope_val == "type":
+        hired_into = []
+        for b in matching:
+            if len(b.get("employees", [])) < info["max_employees"] and employee.id not in b.get("employees", []):
+                b.setdefault("employees", []).append(employee.id)
+                hired_into.append(b)
+        if not hired_into:
+            await interaction.response.send_message(
+                f"All your {info['name']}s are fully staffed or already employ {employee.mention}.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        _save_businesses(data)
+        await interaction.response.send_message(
+            f"👥 {employee.mention} was hired at **{len(hired_into)}** of {owner.mention}'s "
+            f"{info['emoji']} **{info['name']}s**!\n"
+            f"💼 Employees boost income by **15% each**.\n"
+            f"💰 They'll earn a share when {owner.display_name} runs `/collectbusiness`.",
+            allowed_mentions=discord.AllowedMentions(users=[employee]),
+        )
+        return
+
+    # ── 🎯 SINGLE (default): first business of this type with room ──
     biz = None
     for b in matching:
         if len(b.get("employees", [])) < info["max_employees"] and employee.id not in b.get("employees", []):
@@ -14988,8 +15024,13 @@ async def collectvenue_command(interaction: discord.Interaction):
 
 
 # ── /hirestaff ───────────────────────────────────────────────────────────────
-@tree.command(name="hirestaff", description="Hire a staff role at one of your venues.")
-@discord.app_commands.describe(venue_type="Which venue type to staff", role="Staff role", slot="If you own more than one of this type, the #N from /venues")
+@tree.command(name="hirestaff", description="Hire a staff role at one or all of your venues.")
+@discord.app_commands.describe(
+    venue_type="Which venue type to staff",
+    role="Staff role",
+    scope="Hire at just one venue, or at every venue of this type you own",
+    slot="If hiring at one and you own several of this type, the #N from /venues",
+)
 @discord.app_commands.choices(
     venue_type=[
         discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
@@ -15001,12 +15042,17 @@ async def collectvenue_command(interaction: discord.Interaction):
             value=k,
         )
         for k, r in STAFF_ROLES.items()
-    ]
+    ],
+    scope=[
+        discord.app_commands.Choice(name="🎯 Just one venue", value="one"),
+        discord.app_commands.Choice(name="📦 Every venue of this type I own", value="type"),
+    ],
 )
 async def hirestaff_command(
     interaction: discord.Interaction,
     venue_type: discord.app_commands.Choice[str],
     role: discord.app_commands.Choice[str],
+    scope: discord.app_commands.Choice[str] = None,
     slot: int = None,
 ):
     user = interaction.user
@@ -15017,16 +15063,66 @@ async def hirestaff_command(
         return
 
     role_info = STAFF_ROLES[r_key]
+    data = _load_nightlife()
+    venues = data["users"].get(str(user.id), [])
+    info = VENUE_TYPES.get(v_type, {})
+    max_staff = info.get("max_staff", 0)
+
+    if not any(v["type"] == v_type for v in venues):
+        await interaction.response.send_message(
+            f"❌ You don't own a {info.get('name', v_type)}.", ephemeral=True
+        )
+        return
+
+    scope_val = scope.value if scope else "one"
+
+    # ── 📦 BULK: add this role to every venue of this type that still has room ──
+    if scope_val == "type":
+        with_room = [v for v in venues if v["type"] == v_type and len(v.get("staff", [])) < max_staff]
+        if not with_room:
+            await interaction.response.send_message(
+                f"❌ All your {info.get('name', v_type)}s are already at max staff.", ephemeral=True
+            )
+            return
+        total_cost = role_info["cost"] * len(with_room)
+        # All-or-nothing so you never end up half-staffed with a mystery balance.
+        if economy.balance(user.id) < total_cost:
+            await interaction.response.send_message(
+                f"❌ Adding a {role_info['emoji']} **{role_info['name']}** to all **{len(with_room)}** "
+                f"eligible {info.get('name', v_type)}s costs **{total_cost:,}** "
+                f"(**{role_info['cost']:,}** each). You have **{economy.balance(user.id):,}**.",
+                ephemeral=True,
+            )
+            return
+
+        economy.add(user.id, -total_cost, f"hire {r_key} x{len(with_room)}")
+        for v in with_room:
+            v.setdefault("staff", []).append(r_key)
+        _save_nightlife(data)
+
+        lines = [
+            f"{VENUE_TYPES.get(v['type'], {'emoji': '🏢'})['emoji']} **{v['name']}** — now {_venue_income_per_hour(v):,}/hr"
+            for v in with_room
+        ]
+        msg = (
+            f"👥 Hired a {role_info['emoji']} **{role_info['name']}** at all **{len(with_room)}** "
+            f"eligible {info.get('name', v_type)}s.\n"
+            f"💸 Paid **{total_cost:,}** total.\n\n" + "\n".join(lines)
+        )
+        if len(msg) > 2000:
+            msg = (
+                f"👥 Hired a {role_info['emoji']} **{role_info['name']}** at **{len(with_room)}** "
+                f"{info.get('name', v_type)}s for **{total_cost:,}** total."
+            )
+        await interaction.response.send_message(msg)
+        return
+
+    # ── 🎯 SINGLE VENUE (default) ──
     if economy.balance(user.id) < role_info["cost"]:
         await interaction.response.send_message(
             f"❌ Hiring a {role_info['name']} costs **{role_info['cost']:,}** coins.", ephemeral=True
         )
         return
-
-    data = _load_nightlife()
-    venues = data["users"].get(str(user.id), [])
-    info = VENUE_TYPES.get(v_type, {})
-    max_staff = info.get("max_staff", 0)
 
     if slot is not None:
         # Target the specific venue in that slot
@@ -15048,7 +15144,8 @@ async def hirestaff_command(
             if len(with_room) > 1:
                 slot_list = ", ".join(f"#{i+1} ({v['name']})" for i, v in with_room)
                 await interaction.response.send_message(
-                    f"❓ You own **{len(matches)}** of those with room. Add a slot to pick one: {slot_list}.",
+                    f"❓ You own **{len(matches)}** of those with room. Add a slot to pick one — "
+                    f"or set `scope` to **📦 Every venue of this type I own** to staff them all: {slot_list}.",
                     ephemeral=True,
                 )
                 return
@@ -15073,9 +15170,63 @@ async def hirestaff_command(
     )
 
 
+def _apply_supplier_run(biz: dict, l_key: str, bottles: int):
+    """Roll a single supplier delivery of `bottles` of `l_key` into `biz`.
+
+    Mutates `biz` in place: adds the delivered stock, plus any freebie crate /
+    hot-batch / bad-batch side effects. Returns (delivered, run_lines) where
+    `delivered` is the count that actually landed in stock (>= 0) and
+    `run_lines` is a list of headline strings describing what happened.
+
+    This is the single source of truth for a shipment outcome — both the
+    single-venue and the bulk (`scope: type`) paths of /stockliquor call it,
+    so the two can never drift apart.
+    """
+    delivered = bottles
+    roll = random.random()
+    run_lines = []
+
+    if roll < 0.55:
+        # Clean delivery
+        run_lines.append("🚚 Clean delivery — everything showed up as ordered.")
+    elif roll < 0.68:
+        # Bulk hookup: +20% free bottles
+        extra = max(1, int(bottles * 0.20))
+        delivered += extra
+        run_lines.append(f"📦 **Bulk hookup!** The supplier tossed in **{extra} free bottles**.")
+    elif roll < 0.78:
+        # Fell off a truck: mystery free premium crate
+        crate = random.randint(3, 10)
+        biz.setdefault("liquor", {})["premium"] = biz["liquor"].get("premium", 0) + crate
+        run_lines.append(f"🎁 **Fell off a truck** — a mystery crate of **{crate} Premium bottles** appeared. Don't ask.")
+    elif roll < 0.86:
+        # Premium mixup: this order sells at bonus revenue on collect
+        run_lines.append("🥃 **Supplier mixup** — they sent a better batch than you paid for. These'll sell hot.")
+        biz["_liquor_hot"] = biz.get("_liquor_hot", 0) + delivered
+    elif roll < 0.94:
+        # Shipment seized: lose a cut of bottles (REAL RISK)
+        seized = max(1, int(delivered * random.uniform(0.25, 0.5)))
+        delivered -= seized
+        run_lines.append(f"🚔 **Shipment seized!** Customs took **{seized} bottles** at the dock. You eat the loss.")
+    else:
+        # Watered down: bad batch sells at reduced revenue (REAL RISK)
+        biz["_liquor_bad"] = biz.get("_liquor_bad", 0) + delivered
+        run_lines.append("💧 **Watered-down batch** — quality's trash. These'll move at a discount. Brutal.")
+
+    delivered = max(0, delivered)
+    biz.setdefault("liquor", {})[l_key] = biz["liquor"].get(l_key, 0) + delivered
+    return delivered, run_lines
+
+
 # ── /stockliquor ─────────────────────────────────────────────────────────────
-@tree.command(name="stockliquor", description="Stock liquor at one of your venues for bonus revenue.")
-@discord.app_commands.describe(venue_type="Which venue type", liquor="Which liquor", bottles="How many bottles", slot="If you own more than one of this type, the #N from /venues")
+@tree.command(name="stockliquor", description="Stock liquor at one or all of your venues for bonus revenue.")
+@discord.app_commands.describe(
+    venue_type="Which venue type",
+    liquor="Which liquor",
+    bottles="How many bottles (per venue)",
+    scope="Stock just one venue, or every venue of this type you own",
+    slot="If stocking one and you own several of this type, the #N from /venues",
+)
 @discord.app_commands.choices(
     venue_type=[
         discord.app_commands.Choice(name=f"{v['emoji']} {v['name']}", value=k)
@@ -15087,13 +15238,18 @@ async def hirestaff_command(
             value=k,
         )
         for k, l in LIQUOR_TYPES.items()
-    ]
+    ],
+    scope=[
+        discord.app_commands.Choice(name="🎯 Just one venue", value="one"),
+        discord.app_commands.Choice(name="📦 Every venue of this type I own", value="type"),
+    ],
 )
 async def stockliquor_command(
     interaction: discord.Interaction,
     venue_type: discord.app_commands.Choice[str],
     liquor: discord.app_commands.Choice[str],
     bottles: int,
+    scope: discord.app_commands.Choice[str] = None,
     slot: int = None,
 ):
     user = interaction.user
@@ -15120,6 +15276,80 @@ async def stockliquor_command(
 
     data = _load_nightlife()
     venues = data["users"].get(str(user.id), [])
+    matches = [v for v in venues if v["type"] == v_type]
+    if not matches:
+        await interaction.response.send_message(
+            f"❌ You don't own a {venue_info.get('name', v_type)}.", ephemeral=True
+        )
+        return
+
+    # 📈 Market-adjusted price + 🎁 bulk discount (per-venue order)
+    market_mult = _liquor_price_mult(l_key)
+    unit_cost = int(liq_info["cost_per_bottle"] * market_mult)
+    per_venue_cost = unit_cost * bottles
+    bulk = bottles >= BULK_DISCOUNT_THRESHOLD
+    if bulk:
+        per_venue_cost = int(per_venue_cost * (1 - BULK_DISCOUNT_PCT))
+
+    price_tag = f"{_market_arrow(market_mult)} ({unit_cost:,}/bottle)"
+    bulk_tag = f" · 🎁 bulk −{int(BULK_DISCOUNT_PCT*100)}%" if bulk else ""
+    bootleg_tag = "\n⚠️ _Bootleg raises your raid/inspection risk while it's stocked._" if liq_info.get("bootleg") else ""
+
+    scope_val = scope.value if scope else "one"
+
+    # ── 📦 BULK: stock every venue of this type in one order ──
+    if scope_val == "type":
+        total_cost = per_venue_cost * len(matches)
+        # All-or-nothing: we don't want to leave you with a half-stocked empire
+        # and a surprise balance. If you can't cover the whole run, nothing ships.
+        if economy.balance(user.id) < total_cost:
+            await interaction.response.send_message(
+                f"❌ Stocking **{bottles} bottles** into all **{len(matches)}** of your "
+                f"{venue_info.get('name', v_type)}s costs **{total_cost:,}** "
+                f"(**{per_venue_cost:,}** each). You have **{economy.balance(user.id):,}**.",
+                ephemeral=True,
+            )
+            return
+
+        economy.add(user.id, -total_cost, f"liquor bulk: {l_key} x{len(matches)}")
+
+        total_delivered = 0
+        per_lines = []
+        event_notes = []
+        for v in matches:
+            delivered, run_lines = _apply_supplier_run(v, l_key, bottles)
+            total_delivered += delivered
+            vinfo = VENUE_TYPES.get(v["type"], {"emoji": "🏢"})
+            per_lines.append(f"{vinfo['emoji']} **{v['name']}** — +{delivered} bottles")
+            # Only surface the *interesting* deliveries (freebies, seizures, etc.)
+            for ln in run_lines:
+                if "Clean delivery" not in ln:
+                    event_notes.append(f"• **{v['name']}**: {ln}")
+        _save_nightlife(data)
+
+        expected_revenue = total_delivered * liq_info["revenue_per_bottle"]
+
+        header = (
+            f"🍾 **Bulk order** — **{bottles} bottles** of {liq_info['emoji']} **{liq_info['name']}** "
+            f"into all **{len(matches)}** of your {venue_info.get('name', v_type)}s.\n"
+            f"💸 Paid **{total_cost:,}** total · {price_tag}{bulk_tag}"
+        )
+        footer = (
+            f"\n\n📦 Total landed: **{total_delivered} bottles** · "
+            f"~**{expected_revenue:,}** revenue on collect{bootleg_tag}\n"
+            f"_Bottles sell automatically when you `/collectvenue`._"
+        )
+        events_block = ("\n\n**🚚 Supplier runs:**\n" + "\n".join(event_notes)) if event_notes else ""
+        msg = header + "\n\n" + "\n".join(per_lines) + events_block + footer
+        if len(msg) > 2000:
+            # Too many venues to itemize — fall back to just the totals.
+            msg = header + footer
+            if len(msg) > 2000:
+                msg = msg[:1990] + "..."
+        await interaction.response.send_message(msg)
+        return
+
+    # ── 🎯 SINGLE VENUE (default) ──
     idx, biz, err = _resolve_venue(venues, v_type, slot)
     if err:
         await interaction.response.send_message(err, ephemeral=True)
@@ -15130,14 +15360,7 @@ async def stockliquor_command(
         )
         return
 
-    # 📈 Market-adjusted price + 🎁 bulk discount
-    market_mult = _liquor_price_mult(l_key)
-    unit_cost = int(liq_info["cost_per_bottle"] * market_mult)
-    total_cost = unit_cost * bottles
-    bulk = bottles >= BULK_DISCOUNT_THRESHOLD
-    if bulk:
-        total_cost = int(total_cost * (1 - BULK_DISCOUNT_PCT))
-
+    total_cost = per_venue_cost
     if economy.balance(user.id) < total_cost:
         await interaction.response.send_message(
             f"❌ Need **{total_cost:,}** coins. You have **{economy.balance(user.id):,}**.",
@@ -15146,57 +15369,16 @@ async def stockliquor_command(
         return
 
     economy.add(user.id, -total_cost, f"liquor: {l_key}")
-
-    # ── 🚚 THE SUPPLIER RUN — how the shipment actually goes down ──
-    # (key, weight, headline, effect)  effect mutates bottles_added / refund
-    delivered = bottles
-    refund = 0
-    bonus_note = ""
-    roll = random.random()
-    run_lines = []
-
-    if roll < 0.55:
-        # Clean delivery
-        run_lines.append("🚚 Clean delivery — everything showed up as ordered.")
-    elif roll < 0.68:
-        # Bulk hookup: +20% free bottles
-        extra = max(1, int(bottles * 0.20))
-        delivered += extra
-        run_lines.append(f"📦 **Bulk hookup!** The supplier tossed in **{extra} free bottles**.")
-    elif roll < 0.78:
-        # Fell off a truck: mystery free premium crate
-        crate = random.randint(3, 10)
-        biz.setdefault("liquor", {})["premium"] = biz["liquor"].get("premium", 0) + crate
-        run_lines.append(f"🎁 **Fell off a truck** — a mystery crate of **{crate} Premium bottles** appeared. Don't ask.")
-    elif roll < 0.86:
-        # Premium mixup: this order upgraded to next tier revenue (mark bottles as upgraded)
-        run_lines.append("🥃 **Supplier mixup** — they sent a better batch than you paid for. These'll sell hot.")
-        biz["_liquor_hot"] = biz.get("_liquor_hot", 0) + delivered  # sells at bonus revenue on collect
-    elif roll < 0.94:
-        # Shipment seized: lose a cut of bottles (REAL RISK)
-        seized = max(1, int(delivered * random.uniform(0.25, 0.5)))
-        delivered -= seized
-        run_lines.append(f"🚔 **Shipment seized!** Customs took **{seized} bottles** at the dock. You eat the loss.")
-    else:
-        # Watered down: bad batch sells at reduced revenue (REAL RISK)
-        biz["_liquor_bad"] = biz.get("_liquor_bad", 0) + delivered
-        run_lines.append("💧 **Watered-down batch** — quality's trash. These'll move at a discount. Brutal.")
-
-    biz.setdefault("liquor", {})[l_key] = biz["liquor"].get(l_key, 0) + max(0, delivered)
+    delivered, run_lines = _apply_supplier_run(biz, l_key, bottles)
     _save_nightlife(data)
 
-    expected_revenue = max(0, delivered) * liq_info["revenue_per_bottle"]
-    expected_profit = expected_revenue - total_cost
-
-    price_tag = f"{_market_arrow(market_mult)} ({unit_cost:,}/bottle)"
-    bulk_tag = f" · 🎁 bulk −{int(BULK_DISCOUNT_PCT*100)}%" if bulk else ""
-    bootleg_tag = "\n⚠️ _Bootleg raises your raid/inspection risk while it's stocked._" if liq_info.get("bootleg") else ""
+    expected_revenue = delivered * liq_info["revenue_per_bottle"]
 
     await interaction.response.send_message(
         f"🍾 Ordered **{bottles} bottles** of {liq_info['emoji']} **{liq_info['name']}** for **{biz['name']}**.\n"
         f"💸 Paid **{total_cost:,}** · {price_tag}{bulk_tag}\n\n"
         + "\n".join(run_lines) +
-        f"\n\n📦 Landed in stock: **{max(0, delivered)} bottles** · ~**{expected_revenue:,}** revenue on collect"
+        f"\n\n📦 Landed in stock: **{delivered} bottles** · ~**{expected_revenue:,}** revenue on collect"
         f"{bootleg_tag}\n"
         f"_Bottles sell automatically when you `/collectvenue`._"
     )
