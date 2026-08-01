@@ -432,6 +432,34 @@ def _find_member_anywhere(user_id: int):
     return None
 
 
+def _is_member(guild, user_id) -> bool:
+    """True if user_id is CURRENTLY in the server (left / kicked / banned -> False).
+
+    Used to hide departed users from leaderboards and public notifications WITHOUT
+    deleting anything — their saved economy record stays fully intact, and they
+    reappear automatically the moment they rejoin (no flag to flip, nothing to
+    restore). This reads the member cache (the members intent + chunk-on-startup
+    are enabled), exactly the mechanism the rest of the bot already relies on for
+    its get_member lookups — every leaderboard here already calls get_member and
+    only differs in that it used to render a "User <id>" placeholder for a missing
+    member instead of hiding them.
+
+    Fails OPEN (returns True) if the lookup errors, so a transient glitch can never
+    hide an active player. When no specific guild is supplied (e.g. a background
+    task), it checks every guild the bot is in.
+    """
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return True
+    try:
+        if guild is not None:
+            return guild.get_member(uid) is not None
+        return _find_member_anywhere(uid) is not None
+    except Exception:
+        return True
+
+
 def supporter_tier(user_id: int) -> str | None:
     """Return the user's HIGHEST supporter tier name, or None if not a supporter."""
     member = _find_member_anywhere(user_id)
@@ -967,10 +995,17 @@ async def _send_invites_leaderboard(message):
         total, last7 = _invite_counts(inviter_id, data)
         if total <= 0:
             continue
+        if not _is_member(guild, inviter_id):
+            continue  # hide inviters who left the server (their invite counts are kept)
         rows.append((inviter_id, total, last7))
     # Sort by 7-day, then total
     rows.sort(key=lambda r: (r[2], r[1]), reverse=True)
     rows = rows[:15]
+    if not rows:
+        await message.channel.send(
+            "📨 No invites to show yet from current members."
+        )
+        return
 
     def _name(uid):
         try:
@@ -2225,9 +2260,12 @@ async def tournament_scheduler():
             for i, (uid, stats) in enumerate(ranked[:3]):
                 prize = TOURNAMENT_PRIZES[i]
                 economy.add(int(uid), prize, f"tournament rank {i+1}")
-                announcements.append(
-                    f"{medals[i]} <@{uid}> — **{prize:,}** coins (score: {tournament_score(stats):,})"
-                )
+                # Winner is still paid (above) and DMed (below) — but only name them
+                # in the PUBLIC results post if they're still in the server.
+                if _is_member(None, uid):
+                    announcements.append(
+                        f"{medals[i]} <@{uid}> — **{prize:,}** coins (score: {tournament_score(stats):,})"
+                    )
                 # DM the winner
                 try:
                     dm_embed = discord.Embed(
@@ -5555,6 +5593,8 @@ def _build_leaderboard_embed(guild, viewer_id: int, mode: str = "networth") -> d
     economy._load()
     rows = []  # (uid, networth, cash)
     for uid, data in economy._data["users"].items():
+        if not _is_member(guild, uid):
+            continue  # hide users who left/were kicked/banned (data is kept)
         nw = compute_net_worth(uid)
         rows.append((uid, nw["total"], nw["cash"]))
 
@@ -10399,6 +10439,16 @@ async def tournament_command(interaction: discord.Interaction):
         return
 
     ranked = sorted(scores.items(), key=lambda x: tournament_score(x[1]), reverse=True)
+    ranked = [r for r in ranked if _is_member(interaction.guild, r[0])]  # hide players who left (scores kept)
+    if not ranked:
+        embed = discord.Embed(
+            title="🏆 WEEKLY TOURNAMENT",
+            description="_No participants yet this week._\n\nEarn coins, win games, or use commands to compete!",
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"Season started: {season_start} • Resets Monday")
+        await interaction.response.send_message(embed=embed)
+        return
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, (uid, stats) in enumerate(ranked[:10]):
@@ -14063,6 +14113,12 @@ def _build_dealer_leaderboard_embed(guild) -> discord.Embed:
         key=lambda x: x[1].get("lifetime_profit", 0),
         reverse=True,
     )
+    ranked = [r for r in ranked if _is_member(guild, r[0])]  # hide dealers who left (stats kept)
+    if not ranked:
+        return discord.Embed(
+            description="```ansi\n\u001b[1;36m▓▒░ TOP DEALERS ░▒▓\u001b[0m\n\n\u001b[0;37mNo dealers in the game yet.\u001b[0m\n```",
+            color=0xFF00AA,
+        )
 
     medals = ["\u001b[1;33m①\u001b[0m", "\u001b[0;37m②\u001b[0m", "\u001b[1;31m③\u001b[0m"]
     rows = []
@@ -28166,7 +28222,7 @@ async def _send_legends(message: discord.Message):
     data = _load_prestige()
     users = data.get("users", {})
     ranked = sorted(users.items(), key=lambda kv: (kv[1].get("level", 0), kv[1].get("burned_total", 0)), reverse=True)
-    ranked = [(u, r) for u, r in ranked if r.get("level", 0) > 0][:10]
+    ranked = [(u, r) for u, r in ranked if r.get("level", 0) > 0 and _is_member(message.guild, u)][:10]  # hide departed legends (data kept)
     if not ranked:
         await message.channel.send(
             "🏛️ **HALL OF LEGENDS**\n\nEmpty. Nobody's had the stones to burn an empire yet.\n"
