@@ -13868,6 +13868,10 @@ async def dealers_command(interaction: discord.Interaction):
         key=lambda x: x[1].get("lifetime_profit", 0),
         reverse=True,
     )
+    ranked = [r for r in ranked if _is_member(interaction.guild, r[0])]  # hide dealers who left (stats kept)
+    if not ranked:
+        await interaction.response.send_message("No dealers in the game yet.", ephemeral=True)
+        return
 
     medals = ["🥇", "🥈", "🥉"]
     lines = []
