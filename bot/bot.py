@@ -10346,13 +10346,13 @@ async def achievements_command(interaction: discord.Interaction, user: discord.M
     earned_text = []
     locked_text = []
     for ach_id, ach in ACHIEVEMENTS.items():
-        line = f"{ach['emoji']} **{ach['name']}** — _{ach['description']}_"
+        line = f"{ach['emoji']} **{ach['name']}** — _{ach['desc']}_"
         if ach.get("perk"):
             line += f"\n   ↳ Perk: +{ach['perk_value']}% {_perk_label(ach['perk'])}"
         if ach_id in earned:
             earned_text.append(line)
         else:
-            locked_text.append(f"🔒 **{ach['name']}** — _{ach['description']}_")
+            locked_text.append(f"🔒 **{ach['name']}** — _{ach['desc']}_")
 
     if earned_text:
         # Discord field limit is 1024 chars, so chunk if needed
