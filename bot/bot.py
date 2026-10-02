@@ -26726,6 +26726,199 @@ async def _handle_setreadyimage(message: discord.Message, rest: str):
         await message.channel.send("🖼️ Ready-check image set! Run `.r` to see it.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 😈 FMK — Fuck / Marry / Kill
+# _fmk  -> bot picks 3 random CURRENT members; you assign F / M / K.
+# _fmkme [@user] -> see who has F/M/K'd you (or someone else). Public record.
+# Verdicts are saved; departed members are skipped as targets and hidden in lookups.
+# ─────────────────────────────────────────────────────────────────────────────
+FMK_FILE = MEMORY_DIR / "fmk.json"
+FMK_COLOR = discord.Color(0xE91E63)
+
+
+def _fmk_name_list(ids) -> str:
+    """Render a set/list of user ids as mentions (capped so the embed can't overflow)."""
+    ids = list(ids)
+    if not ids:
+        return "_nobody yet_"
+    shown = ids[:30]
+    out = ", ".join(f"<@{u}>" for u in shown)
+    if len(ids) > 30:
+        out += f" _+{len(ids) - 30} more_"
+    return out
+
+
+class FMKView(discord.ui.View):
+    """Sequential picker: choose Fuck, then Marry; the last of the three is the Kill.
+    Only the player who ran the command can click. Buttons only ever show people who
+    haven't been assigned yet, so the result is always a valid F/M/K of the three."""
+
+    def __init__(self, chooser_id: int, people: list):
+        super().__init__(timeout=120)
+        self.chooser_id = chooser_id
+        self.people = {str(m.id): m for m in people}   # id -> Member, insertion order kept
+        self.fuck_id = None
+        self.marry_id = None
+        self.message = None
+        self._render()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.chooser_id:
+            await interaction.response.send_message(
+                "This isn't your game — run `_fmk` to get your own three.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _render(self):
+        """Rebuild buttons to show only the people not yet assigned."""
+        self.clear_items()
+        chosen = {self.fuck_id, self.marry_id}
+        for pid, m in self.people.items():
+            if pid in chosen:
+                continue
+            btn = discord.ui.Button(
+                label=(m.display_name or str(m))[:70],
+                style=discord.ButtonStyle.primary,
+            )
+            btn.callback = self._make_cb(pid)
+            self.add_item(btn)
+
+    def _make_cb(self, pid: str):
+        async def cb(interaction: discord.Interaction):
+            if self.fuck_id is None:
+                self.fuck_id = pid
+                self._render()
+                await interaction.response.edit_message(embed=self.current_embed(), view=self)
+            elif self.marry_id is None and pid != self.fuck_id:
+                self.marry_id = pid
+                kill_id = next(p for p in self.people if p not in (self.fuck_id, self.marry_id))
+                await self._finish(interaction, kill_id)
+        return cb
+
+    def current_embed(self) -> discord.Embed:
+        three = " · ".join(f"<@{pid}>" for pid in self.people)
+        if self.fuck_id is None:
+            desc = f"Your three:\n{three}\n\n💋 **Who do you Fuck?**"
+        else:
+            desc = (f"💋 **Fuck:** <@{self.fuck_id}>\n\n"
+                    f"💍 **Who do you Marry?**  _(whoever's left gets 🔪)_")
+        return discord.Embed(title="😈 Fuck · Marry · Kill", description=desc, color=FMK_COLOR)
+
+    async def _finish(self, interaction: discord.Interaction, kill_id: str):
+        verdict = {
+            "chooser": str(self.chooser_id),
+            "fuck": self.fuck_id,
+            "marry": self.marry_id,
+            "kill": kill_id,
+            "ts": int(time.time()),
+        }
+        try:
+            data = _load_json_file(FMK_FILE, {"verdicts": []})
+            data.setdefault("verdicts", []).append(verdict)
+            _save_json_file(FMK_FILE, data)
+        except Exception:
+            log.exception("FMK save failed")
+
+        self.clear_items()
+        self.stop()
+        embed = discord.Embed(
+            title="😈 FMK — Verdict",
+            description=(
+                f"💋 **Fuck:** <@{self.fuck_id}>\n"
+                f"💍 **Marry:** <@{self.marry_id}>\n"
+                f"🔪 **Kill:** <@{kill_id}>"
+            ),
+            color=FMK_COLOR,
+        )
+        embed.set_footer(text="Saved · anyone can check their record with _fmkme")
+        try:
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception:
+            pass
+
+    async def on_timeout(self):
+        if self.fuck_id is not None and self.marry_id is not None:
+            return  # already finished
+        try:
+            self.clear_items()
+            if self.message:
+                await self.message.edit(
+                    embed=discord.Embed(
+                        title="😈 FMK",
+                        description="⏳ Timed out — run `_fmk` again.",
+                        color=FMK_COLOR,
+                    ),
+                    view=self,
+                )
+        except Exception:
+            pass
+
+
+async def _handle_fmk(message: discord.Message, rest: str):
+    """_fmk — get three random current members and pick Fuck / Marry / Kill."""
+    if not message.guild:
+        return
+    chooser = message.author
+    # Eligible = CURRENT members only (guild.members excludes anyone who left),
+    # minus bots and the player themselves.
+    pool = [m for m in message.guild.members if not m.bot and m.id != chooser.id]
+    if len(pool) < 3:
+        await message.channel.send("Not enough people around to play FMK right now — need at least 3 others.")
+        return
+    people = random.sample(pool, 3)
+    view = FMKView(chooser.id, people)
+    try:
+        sent = await message.channel.send(
+            embed=view.current_embed(), view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = sent
+    except Exception:
+        log.exception("FMK send failed")
+
+
+async def _handle_fmkme(message: discord.Message, rest: str):
+    """_fmkme [@user] — who has Fucked / Married / Killed you (or the mentioned user)."""
+    if not message.guild:
+        return
+    target = message.mentions[0] if message.mentions else message.author
+    tid = str(target.id)
+    try:
+        data = _load_json_file(FMK_FILE, {"verdicts": []})
+    except Exception:
+        data = {"verdicts": []}
+
+    fuckers, marriers, killers = set(), set(), set()
+    for v in data.get("verdicts", []):
+        chooser = v.get("chooser")
+        if not chooser or chooser == tid:
+            continue
+        # Hide choosers who've left the server (their verdict is still saved).
+        if not _is_member(message.guild, chooser):
+            continue
+        if v.get("fuck") == tid:
+            fuckers.add(chooser)
+        if v.get("marry") == tid:
+            marriers.add(chooser)
+        if v.get("kill") == tid:
+            killers.add(chooser)
+
+    embed = discord.Embed(
+        title=f"😈 FMK record — {target.display_name}",
+        description=(
+            f"💋 **Fucked by:** {_fmk_name_list(fuckers)}\n"
+            f"💍 **Married by:** {_fmk_name_list(marriers)}\n"
+            f"🔪 **Killed by:** {_fmk_name_list(killers)}"
+        ),
+        color=FMK_COLOR,
+    )
+    if not (fuckers or marriers or killers):
+        who = "You haven't" if target.id == message.author.id else f"{target.display_name} hasn't"
+        embed.set_footer(text=f"{who} been FMK'd yet. Run _fmk to get in the game.")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
 def _build_employees_embed(owner_id: int, guild) -> discord.Embed:
     """Build an embed listing all employees across the owner's businesses."""
     data = _load_businesses()
@@ -27641,6 +27834,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
     "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
     "setreadyimage", "readyimage", "setreadyimg", "readyimg", "setreadygif", "readygif", "setreadypic", "readypic",
+    "fmk", "fuckmarrykill", "fmkme", "fmkstats", "whofmk", "myfmk",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -28767,6 +28961,12 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("setreadyimage", "readyimage", "setreadyimg", "readyimg",
                     "setreadygif", "readygif", "setreadypic", "readypic"):
         await _handle_setreadyimage(message, rest)
+        return True
+    if cmd_name in ("fmk", "fuckmarrykill"):
+        await _handle_fmk(message, rest)
+        return True
+    if cmd_name in ("fmkme", "fmkstats", "whofmk", "myfmk"):
+        await _handle_fmkme(message, rest)
         return True
 
     # 🛠️ Custom Commands
