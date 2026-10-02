@@ -19781,10 +19781,17 @@ async def _handle_ready_check(message: discord.Message):
 
     role = message.guild.get_role(READY_ROLE_ID)
     role_mention = role.mention if role else f"<@&{READY_ROLE_ID}>"
-    # Use the starter's custom ready-check image if they set one (tag-members only).
-    # Any hiccup here falls back to the default image rather than breaking the check.
+    # Use the starter's custom ready-check image — but ONLY while they're actually
+    # wearing the server's guild tag. Take the tag off and it reverts to the default,
+    # just like every other tag perk; their saved URL is kept, so it comes right back
+    # the moment they put the tag on again. Any hiccup here falls back to the default
+    # image rather than breaking the check.
+    _starter_img = ""
     try:
-        _starter_img = get_ready_image(message.author.id)
+        member = message.author
+        _saved = get_ready_image(member.id)
+        if _saved and (_wears_guild_tag(member) or has_tag_perks(member.id)):
+            _starter_img = _saved
     except Exception:
         _starter_img = ""
     view = ReadyCheckView(message.author.id, role_mention, open_image=_starter_img)
