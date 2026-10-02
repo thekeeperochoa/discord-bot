@@ -11860,6 +11860,12 @@ def get_custom_title(user_id: int) -> str:
     return economy._user(user_id).get("custom_title", "")
 
 
+def get_ready_image(user_id: int) -> str:
+    """The user's custom ready-check image URL, or '' if they haven't set one.
+    Set via `_setreadyimage <url>` (tag-members only); used by `.r` / `.l`."""
+    return economy._user(user_id).get("ready_image", "")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 🎰 /lotterymult — 2x next lottery win (one-shot)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18069,6 +18075,11 @@ async def _handle_perks(message: discord.Message):
                f"• The 🏷️ rep role + its flex in `_dgen`"),
         inline=False,
     )
+    embed.add_field(
+        name="🖼️ Cosmetic",
+        value="• **Custom ready-check image** — `_setreadyimage <link>` sets the pic your `.r` / `.l` shows",
+        inline=False,
+    )
     embed.set_footer(text="Take the tag off and the perks turn off · Supporter tiers? type _support")
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
@@ -19637,10 +19648,13 @@ async def _ready_reward(interaction: discord.Interaction, view):
 
 
 class ReadyCheckView(discord.ui.View):
-    def __init__(self, starter_id: int, role_mention: str = ""):
+    def __init__(self, starter_id: int, role_mention: str = "", open_image: str = None):
         super().__init__(timeout=None)     # no timer — open until Count is pressed
         self.starter_id = starter_id
         self.role_mention = role_mention
+        # The "open" ready-check image. Tag-members can set their own via
+        # _setreadyimage; everyone else (and on any error) falls back to default.
+        self.open_image = open_image or READY_GIF_URL
         self.locked = False
         self.joiners: list[int] = []       # user ids in join order
         self.almost: list[int] = []        # user ids who hit "one sec"
@@ -19669,7 +19683,7 @@ class ReadyCheckView(discord.ui.View):
 
     def _embeds(self, closed: bool = False) -> list:
         img = discord.Embed(color=READY_EMBED_COLOR)
-        img.set_image(url=READY_CLOSED_GIF_URL if closed else READY_GIF_URL)
+        img.set_image(url=READY_CLOSED_GIF_URL if closed else self.open_image)
         return [img, self._joiners_embed(closed=closed), self._almost_embed(closed=closed)]
 
     @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
@@ -19767,7 +19781,13 @@ async def _handle_ready_check(message: discord.Message):
 
     role = message.guild.get_role(READY_ROLE_ID)
     role_mention = role.mention if role else f"<@&{READY_ROLE_ID}>"
-    view = ReadyCheckView(message.author.id, role_mention)
+    # Use the starter's custom ready-check image if they set one (tag-members only).
+    # Any hiccup here falls back to the default image rather than breaking the check.
+    try:
+        _starter_img = get_ready_image(message.author.id)
+    except Exception:
+        _starter_img = ""
+    view = ReadyCheckView(message.author.id, role_mention, open_image=_starter_img)
     try:
         sent = await message.channel.send(
             content=f"**Ready for {role_mention}**",
@@ -26594,6 +26614,95 @@ async def _handle_setcolor(message: discord.Message, rest: str):
     await message.channel.send(embed=embed)
 
 
+READY_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _valid_image_url(url: str) -> bool:
+    """True if url is an http(s) link whose path points at a common image type.
+    Query strings / fragments after the extension are fine — Discord, Imgur and
+    Postimg direct links all keep the extension before the '?'."""
+    u = (url or "").strip()
+    low = u.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        return False
+    if len(u) > 1024 or any(c.isspace() for c in u):
+        return False
+    path = low.split("?", 1)[0].split("#", 1)[0]
+    return path.endswith(READY_IMAGE_EXTS)
+
+
+async def _handle_setreadyimage(message: discord.Message, rest: str):
+    """Tag-members only: set the image shown in YOUR ready check (.r / .l).
+    Prefix-only: _setreadyimage <image url>   (reset with: _setreadyimage reset)"""
+    if not message.guild:
+        return
+    member = message.author
+
+    # Gate: must be wearing THIS server's guild tag. Live check first, with the
+    # synced tag role as a fallback so a legit wearer is never wrongly blocked.
+    wearing = False
+    try:
+        wearing = _wears_guild_tag(member)
+    except Exception:
+        wearing = False
+    if not wearing and not has_tag_perks(member.id):
+        await message.channel.send(
+            "🔒 Custom ready-check images are a **tag-member** perk. "
+            "Put on the server's guild tag to unlock it — type `_perks` for the full list."
+        )
+        return
+
+    arg = rest.strip()
+    # If they paste the link in angle brackets (Discord embed-suppression), unwrap it.
+    if len(arg) > 2 and arg.startswith("<") and arg.endswith(">"):
+        arg = arg[1:-1].strip()
+
+    # No argument -> show usage + their current image (if any).
+    if not arg:
+        current = get_ready_image(member.id)
+        cur_line = f"\n\n**Your current image:**\n{current}" if current else ""
+        await message.channel.send(
+            "🖼️ **Usage:** `_setreadyimage <image link>`\n"
+            "Paste a direct link to a hosted image ending in `.png`, `.jpg`, `.gif` or `.webp` "
+            "(from Discord, Imgur, Postimg, etc.). It'll show in the ready check whenever **you** run `.r` / `.l`.\n"
+            "_Go back to the default anytime with_ `_setreadyimage reset`." + cur_line
+        )
+        return
+
+    # Reset -> clear their custom image, back to the server default.
+    if arg.lower() in ("reset", "clear", "remove", "default", "none"):
+        u = economy._user(member.id)
+        if u.get("ready_image"):
+            u["ready_image"] = ""
+            economy._save()
+        await message.channel.send("🖼️ Your ready-check image is back to the default.")
+        return
+
+    if not _valid_image_url(arg):
+        await message.channel.send(
+            "❌ That doesn't look like a direct image link. It needs to start with `https://` and "
+            "end in `.png`, `.jpg`, `.gif` or `.webp` (query bits after are fine).\n"
+            "_Tip: on Discord, upload the image, right-click it → **Copy Link**. Imgur / Postimg direct links work too._"
+        )
+        return
+
+    u = economy._user(member.id)
+    u["ready_image"] = arg
+    economy._save()
+
+    embed = discord.Embed(
+        title="🖼️ Ready-check image set!",
+        description="This is what your `.r` / `.l` will show now. Run one to see it live.",
+        color=READY_EMBED_COLOR,
+    )
+    embed.set_image(url=arg)
+    embed.set_footer(text="Reset anytime with  _setreadyimage reset")
+    try:
+        await message.channel.send(embed=embed)
+    except Exception:
+        await message.channel.send("🖼️ Ready-check image set! Run `.r` to see it.")
+
+
 def _build_employees_embed(owner_id: int, guild) -> discord.Embed:
     """Build an embed listing all employees across the owner's businesses."""
     data = _load_businesses()
@@ -27508,6 +27617,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "credits", "supporters", "flex", "flexline", "setclass", "classification",
     "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
     "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
+    "setreadyimage", "readyimage", "setreadyimg", "readyimg", "setreadygif", "readygif", "setreadypic", "readypic",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -28630,6 +28740,10 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("setcolor", "walletcolor"):
         await _handle_setcolor(message, rest)
+        return True
+    if cmd_name in ("setreadyimage", "readyimage", "setreadyimg", "readyimg",
+                    "setreadygif", "readygif", "setreadypic", "readypic"):
+        await _handle_setreadyimage(message, rest)
         return True
 
     # 🛠️ Custom Commands
