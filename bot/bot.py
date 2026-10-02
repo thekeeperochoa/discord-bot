@@ -11608,6 +11608,38 @@ async def sabotage_command(
 
 
 # ── Background task: random business events (IRS, fire, etc.) ────────────────
+async def _post_event_digest(channel, title: str, lines: list, color) -> None:
+    """Post many venue/business event lines as ONE consolidated message instead of
+    spamming the channel with a separate message per event (which floods it).
+    Splits into extra embeds only if the batch exceeds Discord's length limits."""
+    if not channel or not lines:
+        return
+    # Discord's embed description cap is 4096 chars; stay under it with margin, and
+    # also cap lines-per-embed so even a huge batch stays scannable.
+    chunks, cur, cur_len = [], [], 0
+    for ln in lines:
+        add = len(ln) + 1
+        if cur and (cur_len + add > 3800 or len(cur) >= 25):
+            chunks.append(cur)
+            cur, cur_len = [], 0
+        cur.append(ln)
+        cur_len += add
+    if cur:
+        chunks.append(cur)
+
+    total = len(chunks)
+    n = len(lines)
+    for i, ch in enumerate(chunks):
+        header = title if total == 1 else f"{title} ({i + 1}/{total})"
+        embed = discord.Embed(title=header, description="\n".join(ch), color=color)
+        if i == 0:
+            embed.set_footer(text=f"{n} event{'s' if n != 1 else ''} this round")
+        try:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+
+
 async def business_events_scheduler():
     """Periodically rolls random events on businesses."""
     await client.wait_until_ready()
@@ -11620,8 +11652,13 @@ async def business_events_scheduler():
             recap_channel_id = get_notification_channel_id(cfg)
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
 
+            event_lines = []  # collect all events -> one digest post (no channel spam)
+
             for uid, bizs in data["users"].items():
                 if not bizs:
+                    continue
+                # Skip players who left the server — no events (or spam) while they're gone.
+                if not _is_member(None, uid):
                     continue
                 # Insurance blocks events
                 if has_insurance(int(uid)):
@@ -11651,16 +11688,12 @@ async def business_events_scheduler():
                 if lost > 0:
                     biz["last_collected"] = time.time()  # zero out pending
 
-                if channel:
-                    try:
-                        await channel.send(
-                            f"{emoji} **EVENT:** <@{uid}>'s {info['emoji']} **{info['name']}** {desc}!\n"
-                            f"⏰ Closed for **{hours} hours**."
-                            + (f"\n💸 Lost **{lost:,}** coins of pending income." if lost > 0 else ""),
-                            allowed_mentions=discord.AllowedMentions.none(),
-                        )
-                    except Exception:
-                        pass
+                # Collect one compact line for the digest instead of posting now.
+                event_lines.append(
+                    f"{emoji} <@{uid}>'s {info['emoji']} **{info['name']}** {desc} — "
+                    f"closed **{hours}h**"
+                    + (f", lost **{lost:,}**" if lost > 0 else "")
+                )
                 # DM the owner
                 try:
                     dm_embed = discord.Embed(
@@ -11677,6 +11710,7 @@ async def business_events_scheduler():
                 except Exception:
                     pass
 
+            await _post_event_digest(channel, "🏢 Business Report", event_lines, discord.Color.orange())
             _save_businesses(data)
         except Exception as e:
             log.exception("business_events_scheduler: %s", e)
@@ -15462,7 +15496,12 @@ async def nightlife_events_scheduler():
             recap_channel_id = get_notification_channel_id(cfg)
             channel = client.get_channel(int(recap_channel_id)) if recap_channel_id else None
 
+            event_lines = []  # collect all events -> one digest post (no channel spam)
+
             for uid, venues in data["users"].items():
+                # Skip players who left the server — no events (or spam) while they're gone.
+                if not _is_member(None, uid):
+                    continue
                 for venue in venues:
                     if venue.get("closed_until", 0) > time.time():
                         continue
@@ -15498,15 +15537,10 @@ async def nightlife_events_scheduler():
 
                     if "CELEBRITY" in desc:
                         venue["celebrity_until"] = time.time() + 6 * 3600
-                        if channel:
-                            try:
-                                await channel.send(
-                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** had a {desc}\n"
-                                    f"💰 **3x income** for the next **6 hours**!",
-                                    allowed_mentions=discord.AllowedMentions.none(),
-                                )
-                            except Exception:
-                                pass
+                        event_lines.append(
+                            f"{emoji} <@{uid}>'s {info['emoji']} **{venue['name']}** had a {desc} "
+                            f"— 💰 **3x income** for 6h!"
+                        )
                         # DM owner
                         try:
                             await send_dm(int(uid), "business",
@@ -15516,37 +15550,22 @@ async def nightlife_events_scheduler():
                     elif is_brawl and has_bouncer and random.random() < 0.5:
                         # Bouncer prevented it — undo the rep hit, it never happened
                         _venue_adjust_rep(venue, -rep_delta)
-                        if channel:
-                            try:
-                                await channel.send(
-                                    f"💪 **<@{uid}>'s {info['emoji']} {venue['name']}**: a brawl was about to break out, "
-                                    f"but the bouncer shut it down. No damage.",
-                                    allowed_mentions=discord.AllowedMentions.none(),
-                                )
-                            except Exception:
-                                pass
+                        event_lines.append(
+                            f"💪 <@{uid}>'s {info['emoji']} **{venue['name']}** — "
+                            f"brawl shut down by the bouncer, no damage"
+                        )
                     elif rep_delta > 0:
                         # Positive night — no closure, just clout
-                        if channel:
-                            try:
-                                await channel.send(
-                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}\n"
-                                    f"📈 Reputation **+{rep_delta}** → now **{_venue_rep(venue)}/100**.",
-                                    allowed_mentions=discord.AllowedMentions.none(),
-                                )
-                            except Exception:
-                                pass
+                        event_lines.append(
+                            f"{emoji} <@{uid}>'s {info['emoji']} **{venue['name']}** {desc} "
+                            f"— 📈 rep **+{rep_delta}** → **{_venue_rep(venue)}/100**"
+                        )
                     elif close_hours <= 0:
                         # Bad night, but the doors stay open — reputation takes the hit
-                        if channel:
-                            try:
-                                await channel.send(
-                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}!\n"
-                                    f"📉 Reputation **{rep_delta}** → now **{_venue_rep(venue)}/100**.",
-                                    allowed_mentions=discord.AllowedMentions.none(),
-                                )
-                            except Exception:
-                                pass
+                        event_lines.append(
+                            f"{emoji} <@{uid}>'s {info['emoji']} **{venue['name']}** {desc} "
+                            f"— 📉 rep **{rep_delta}** → **{_venue_rep(venue)}/100**"
+                        )
                         try:
                             await send_dm(int(uid), "business",
                                 content=f"{emoji} Your {venue['name']} {desc}. Reputation is now {_venue_rep(venue)}/100.")
@@ -15554,21 +15573,18 @@ async def nightlife_events_scheduler():
                             pass
                     else:
                         venue["closed_until"] = time.time() + close_hours * 3600
-                        if channel:
-                            try:
-                                await channel.send(
-                                    f"{emoji} **<@{uid}>'s {info['emoji']} {venue['name']}** {desc}!\n"
-                                    f"⏰ Closed for **{close_hours} hours**.",
-                                    allowed_mentions=discord.AllowedMentions.none(),
-                                )
-                            except Exception:
-                                pass
+                        event_lines.append(
+                            f"{emoji} <@{uid}>'s {info['emoji']} **{venue['name']}** {desc} "
+                            f"— ⏰ closed **{close_hours}h**"
+                        )
                         try:
                             await send_dm(int(uid), "business",
                                 content=f"🚨 Your {venue['name']} {desc}. Closed for {close_hours} hours.")
                         except Exception:
                             pass
                     venue["last_risk_roll"] = time.time()
+
+            await _post_event_digest(channel, "🌃 Nightlife Report", event_lines, discord.Color.purple())
             _save_nightlife(data)
         except Exception as e:
             log.exception("nightlife_events_scheduler: %s", e)
