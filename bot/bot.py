@@ -897,7 +897,7 @@ async def commit_provisional_attribution(member) -> bool:
 
 
 # Channel the TLDR command always summarizes (regardless of where it's run).
-TLDR_CHANNEL_ID = 1422952400649719858
+TLDR_CHANNEL_ID = 1522611232396415118
 
 # Dedicated factual prompt — NOT Jordan's persona. Neutral, matter-of-fact.
 TLDR_SYSTEM_PROMPT = (
