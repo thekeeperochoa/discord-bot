@@ -83,7 +83,7 @@ DEFAULT_PERSONALITY = {
     ],
     "status_rotation_minutes": 10,
     "max_tokens": 200,
-    "groq_model":     "llama-3.3-70b-versatile",
+    "groq_model":     "openai/gpt-oss-120b",
     "cerebras_model": "gpt-oss-120b",
     "gemini_model":   "gemini-2.5-flash-lite",
     "provider_order": ["groq", "cerebras", "gemini"],
@@ -128,6 +128,16 @@ def load_config() -> dict:
     }
     if cfg.get("cerebras_model") in _DEPRECATED_CEREBRAS:
         cfg["cerebras_model"] = "gpt-oss-120b"
+    # Groq moved the Llama 3.x models to Enterprise-only ("Contact Sales"), so a
+    # developer-tier key now 404s on them ("model does not exist or no access").
+    # Point stale configs at an open Production model.
+    _DEPRECATED_GROQ = {
+        "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama-3.1-8b-instant",
+        "llama3-70b-8192", "llama3-8b-8192", "mixtral-8x7b-32768",
+        "gemma2-9b-it", "gemma-7b-it",
+    }
+    if cfg.get("groq_model") in _DEPRECATED_GROQ:
+        cfg["groq_model"] = "openai/gpt-oss-120b"
     return cfg
 
 
@@ -2845,6 +2855,11 @@ async def call_groq(system_prompt, messages, model, temperature, api_key, max_to
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    # gpt-oss models are reasoning models. Keep effort low AND hide reasoning so the
+    # answer reliably lands in `content` (default can put it in `reasoning`).
+    if "gpt-oss" in (model or ""):
+        payload["reasoning_effort"] = "low"
+        payload["reasoning_format"] = "hidden"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -2860,7 +2875,15 @@ async def call_groq(system_prompt, messages, model, temperature, api_key, max_to
                 text = await resp.text()
                 raise ProviderError(f"groq {resp.status}: {text[:200]}")
             data = await resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            # Reasoning models: usable text may be in `content`, or fall back to
+            # `reasoning` if content is empty/missing. Guard against None.
+            msg = data.get("choices", [{}])[0].get("message", {})
+            content = msg.get("content")
+            if not content:
+                content = msg.get("reasoning") or msg.get("reasoning_content")
+            if not content:
+                raise ProviderError("groq returned empty content")
+            return content.strip()
 
 
 async def call_cerebras(system_prompt, messages, model, temperature, api_key, max_tokens=200):
@@ -2990,7 +3013,10 @@ async def ask_ai(system_prompt, messages, cfg, images=None) -> str:
             continue
         try:
             if provider == "groq":
-                reply = await call_groq(system_prompt, messages, cfg["groq_model"], temperature, api_key, max_tokens)
+                # gpt-oss reasons (even at low effort) and those tokens count
+                # against max_tokens. Give it headroom so the answer isn't truncated.
+                groq_tokens = max_tokens + 400 if "gpt-oss" in cfg.get("groq_model", "") else max_tokens
+                reply = await call_groq(system_prompt, messages, cfg["groq_model"], temperature, api_key, groq_tokens)
             elif provider == "cerebras":
                 # gpt-oss reasons (even at low effort) and those tokens count
                 # against max_tokens. Give it headroom so the answer isn't truncated.
