@@ -280,6 +280,7 @@ MEM_WARM_MAX         = 800          # cap on tracked users (evict least-recent)
 MEM_PER_TICK         = 10           # users distilled per scheduler tick
 MEM_TICK_SECONDS     = 1800         # scheduler cadence (30 min)
 MEM_COLD_PRUNE_SEC   = 60 * 86400   # drop dossiers inactive this long
+MEM_SOURCE_CHANNEL_ID = 1522611232396415118  # the channel memory is built from
 
 # In-memory only (durable dossiers are on disk):
 _mem_recent: dict[int, deque] = {}     # uid -> deque["name: content", ...]
@@ -29865,6 +29866,11 @@ async def on_message(message: discord.Message):
     # ── 🏷️ Tag role: instant sync for active members (no-op unless mismatched) ──
     if isinstance(message.author, discord.Member) and not message.author.bot:
         asyncio.create_task(_tagrole_fix(message.author))
+    # ── 🧠 Member memory: buffer the SOURCE channel's human messages (keyed by uid).
+    # Runs before channel gating so memory always reads this channel; in-memory only.
+    if (isinstance(message.author, discord.Member) and not message.author.bot
+            and message.channel.id == MEM_SOURCE_CHANNEL_ID and message.content.strip()):
+        _mem_track_message(message.author.id, message.author.display_name, message.content.strip())
     if message.author.bot and message.author != client.user:
         last_channel_activity[str(message.channel.id)] = time.time()
         return
@@ -30036,9 +30042,6 @@ async def on_message(message: discord.Message):
     # Log for daily recap
     if message.content.strip():
         daily_log.append(channel_id, message.author.display_name, message.content.strip())
-        # Member memory: buffer recent lines per user (in-memory, keyed by uid)
-        if not message.author.bot:
-            _mem_track_message(message.author.id, message.author.display_name, message.content.strip())
 
     # Passive watching — log every message
     if cfg.get("watch_mode_enabled", True):
