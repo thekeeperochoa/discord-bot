@@ -259,6 +259,474 @@ class DailyLog:
 daily_log = DailyLog()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🧠 MEMBER MEMORY ENGINE (Phase 1)
+# Per-member AI-distilled dossiers so Jordan remembers people across sessions.
+#   Ingestion:   recent messages are buffered IN MEMORY per user, keyed by uid
+#                (no fuzzy name-matching), plus a few structured economy stats.
+#   Distillation: a throttled background job turns buffer+stats into a compact
+#                dossier via ask_ai, MERGING with the previous one (evolves but
+#                stays bounded). Sensitive content is excluded at distill time.
+#   Injection:   the dossier is appended to the persona prompt in reply/roast.
+# Fully opt-out-able; the durable dossiers live on disk, the buffers are in RAM
+# (rebuilt naturally after a restart).
+# ─────────────────────────────────────────────────────────────────────────────
+MEMBER_MEMORY_FILE   = MEMORY_DIR / "member_memory.json"
+MEM_SUMMARY_CAP      = 600          # max chars of dossier -> flat injection cost
+MEM_DISTILL_MIN_MSGS = 15           # distill after this many new msgs...
+MEM_DISTILL_STALE_SEC = 48 * 3600   # ...or this long since last distill (if active)
+MEM_RECENT_PER_USER  = 150          # rolling message buffer per user
+MEM_WARM_MAX         = 800          # cap on tracked users (evict least-recent)
+MEM_PER_TICK         = 10           # users distilled per scheduler tick
+MEM_TICK_SECONDS     = 1800         # scheduler cadence (30 min)
+MEM_COLD_PRUNE_SEC   = 60 * 86400   # drop dossiers inactive this long
+
+# In-memory only (durable dossiers are on disk):
+_mem_recent: dict[int, deque] = {}     # uid -> deque["name: content", ...]
+_mem_activity: dict[int, dict] = {}    # uid -> {"msgs": int, "last": float, "name": str}
+_MEM_OPTED_OUT: set[int] = set()       # cache so the per-message path never hits disk
+
+MEM_DISTILL_PROMPT = (
+    "You maintain a private dossier on ONE Discord member so an in-character bot can "
+    "reference their history naturally in banter. Update the EXISTING dossier using the "
+    "new messages and stats. Output ONLY the updated dossier as compact prose, "
+    f"max ~{MEM_SUMMARY_CAP} characters. Capture how they talk (tone, verbal tics), their "
+    "vibe/personality, running jokes or bits, notable moments, and their most important "
+    "relationships or rivalries. Prefer durable traits over one-off noise; carry forward "
+    "still-true facts and drop stale or contradicted ones. "
+    "NEVER include: anything in DO-NOT-MENTION; real-world identifying info; anything about "
+    "self-harm, health, grief, or genuine personal distress; sexual content about the person. "
+    "If they shared something vulnerable, leave it out entirely. Keep it light — this is for "
+    "playful banter, not a profile that could hurt someone. No preamble, just the dossier text."
+)
+
+
+def _load_member_memory() -> dict:
+    try:
+        return _load_json_file(MEMBER_MEMORY_FILE, {"users": {}, "meta": {"schema": 1}})
+    except Exception:
+        return {"users": {}, "meta": {"schema": 1}}
+
+
+def _save_member_memory(data: dict) -> None:
+    try:
+        _save_json_file(MEMBER_MEMORY_FILE, data)
+    except Exception:
+        log.exception("member memory save failed")
+
+
+def get_member_dossier(user_id: int) -> dict:
+    """This user's dossier record, or an empty dict. Never raises."""
+    try:
+        return _load_member_memory().get("users", {}).get(str(user_id), {}) or {}
+    except Exception:
+        return {}
+
+
+def _mem_track_message(user_id: int, display_name: str, content: str) -> None:
+    """Called on every human message. Cheap, in-memory, no disk I/O."""
+    try:
+        if user_id in _MEM_OPTED_OUT:
+            return
+        buf = _mem_recent.get(user_id)
+        if buf is None:
+            # At capacity -> evict the least-recently-active tracked user.
+            if len(_mem_recent) >= MEM_WARM_MAX and _mem_activity:
+                oldest = min(_mem_activity, key=lambda u: _mem_activity[u].get("last", 0.0))
+                _mem_recent.pop(oldest, None)
+                _mem_activity.pop(oldest, None)
+            buf = _mem_recent[user_id] = deque(maxlen=MEM_RECENT_PER_USER)
+        buf.append(f"{display_name}: {content}"[:400])
+        act = _mem_activity.get(user_id)
+        if act is None:
+            act = _mem_activity[user_id] = {"msgs": 0, "last": 0.0, "name": display_name}
+        act["msgs"] += 1
+        act["last"] = time.time()
+        act["name"] = display_name
+    except Exception:
+        pass
+
+
+def _mem_structured_facts(user_id: int) -> str:
+    """Compact, reliable stats so even quiet members get an 'earned' dossier."""
+    bits = []
+    try:
+        bits.append(f"balance {economy.balance(user_id):,}")
+    except Exception:
+        pass
+    try:
+        nw = compute_net_worth(user_id)
+        if nw and nw.get("total"):
+            bits.append(f"net worth ~{nw['total']:,}")
+    except Exception:
+        pass
+    try:
+        st = economy._user(user_id).get("stats", {})
+        w, l = st.get("games_won", 0), st.get("games_lost", 0)
+        if w or l:
+            bits.append(f"{w}W/{l}L on games")
+    except Exception:
+        pass
+    return "; ".join(bits) if bits else "(no notable stats yet)"
+
+
+def _compute_relationships(user_id: int) -> str:
+    """Structured, uid-exact relationship web from real game events — spouse,
+    crew(mates), and FMK beef. Current members only. Used by the distill (stored
+    as rec['web']) and by _beef (computed live). Never raises."""
+    uid_s = str(user_id)
+    lines = []
+    # 💍 Spouse
+    try:
+        sp = _load_marriages().get(uid_s, {}).get("spouse")
+        if sp and _is_member(None, sp):
+            lines.append(f"💍 Married to <@{sp}>.")
+    except Exception:
+        pass
+    # 🏴 Crew + crewmates (allies)
+    try:
+        _, crew = _crew_of(user_id)
+        if crew:
+            mates = [m for m in crew.get("members", []) if m != uid_s and _is_member(None, m)][:4]
+            extra = (" with " + ", ".join(f"<@{m}>" for m in mates)) if mates else ""
+            lines.append(f"🏴 Crew: [{crew.get('tag','')}] {crew.get('name','')}{extra}.")
+    except Exception:
+        pass
+    # 🔪 FMK beef — who marked them for the kill, and who they've killed
+    try:
+        verdicts = _load_json_file(FMK_FILE, {"verdicts": []}).get("verdicts", [])
+        killed_by, they_killed = [], []
+        for v in verdicts[-300:]:
+            if v.get("kill") == uid_s and v.get("chooser") and _is_member(None, v["chooser"]):
+                killed_by.append(v["chooser"])
+            if v.get("chooser") == uid_s and v.get("kill") and _is_member(None, v["kill"]):
+                they_killed.append(v["kill"])
+        killed_by = list(dict.fromkeys(killed_by))[:4]        # dedup, cap
+        they_killed = list(dict.fromkeys(they_killed))[:4]
+        if killed_by:
+            lines.append(f"🔪 Marked for the kill in FMK by {', '.join(f'<@{u}>' for u in killed_by)}.")
+        if they_killed:
+            lines.append(f"🗡️ Has called the kill on {', '.join(f'<@{u}>' for u in they_killed)}.")
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+def build_member_context(user_id: int, display_name: str = "") -> str:
+    """Short persona-prompt block of what Jordan knows about this member.
+    Empty string if no dossier / opted out. Rides along on persona calls."""
+    try:
+        if user_id in _MEM_OPTED_OUT:
+            return ""
+        rec = get_member_dossier(user_id)
+        if not rec or rec.get("opted_out") or not rec.get("summary"):
+            return ""
+        who = display_name or rec.get("name") or "this person"
+        block = (
+            f"\n\n=== WHAT YOU KNOW ABOUT {who} ===\n{rec['summary']}\n"
+            "(Work this in naturally when it fits — like you actually remember them. "
+            "NEVER recite it, list it, or say you have notes/memory on them. Don't be creepy.)"
+        )
+        web = rec.get("web")
+        if web:
+            block += (
+                f"\n--- {who}'s web (real game history — reference naturally, never recite) ---\n{web}"
+            )
+        dnm = rec.get("do_not_mention", [])
+        if dnm:
+            block += f"\nNever bring up: {', '.join(dnm)}."
+        return block
+    except Exception:
+        return ""
+
+
+async def _distill_one(user_id: int) -> None:
+    """Distill/refresh one member's dossier. Never raises. Keeps prior dossier on failure."""
+    try:
+        buf = _mem_recent.get(user_id)
+        lines = list(buf) if buf else []
+        if not lines:
+            return
+        prev = get_member_dossier(user_id)
+        if prev.get("opted_out"):
+            return
+        act = _mem_activity.get(user_id, {})
+        name = act.get("name", f"user {user_id}")
+        dnm = prev.get("do_not_mention", [])
+        transcript = "\n".join(lines[-MEM_RECENT_PER_USER:])[:4000]
+        user_msg = (
+            f"MEMBER: {name}\n"
+            f"DO-NOT-MENTION: {', '.join(dnm) if dnm else '(none)'}\n"
+            f"EXISTING DOSSIER: {prev.get('summary') or '(none yet)'}\n"
+            f"STATS: {_mem_structured_facts(user_id)}\n"
+            f"RECENT MESSAGES:\n{transcript}"
+        )
+        cfg = load_config()
+        summary = await ask_ai(
+            MEM_DISTILL_PROMPT,
+            [{"role": "user", "content": user_msg}],
+            {**cfg, "max_tokens": 400},
+        )
+        if not summary or summary.startswith("⚠️") or not summary.strip():
+            return  # failed call -> keep previous dossier
+        # Re-load fresh and write only this user's fields (no await between load & save).
+        data = _load_member_memory()
+        rec = data.setdefault("users", {}).setdefault(str(user_id), {})
+        if rec.get("opted_out"):
+            return  # opted out during the AI call
+        rec["summary"] = summary.strip()[:MEM_SUMMARY_CAP]
+        rec["do_not_mention"] = dnm
+        rec["web"] = _compute_relationships(user_id)   # structured, uid-exact relationships
+        rec["last_distilled"] = time.time()
+        rec["last_active"] = act.get("last", time.time())
+        rec["version"] = rec.get("version", 0) + 1
+        _save_member_memory(data)
+        if user_id in _mem_activity:
+            _mem_activity[user_id]["msgs"] = 0
+    except Exception:
+        log.exception("member memory distill failed for %s", user_id)
+
+
+def _mem_prune_cold(now: float) -> None:
+    try:
+        data = _load_member_memory()
+        users = data.get("users", {})
+        changed = False
+        for uid in list(users.keys()):
+            rec = users[uid]
+            if rec.get("opted_out"):
+                continue  # keep opt-out flag so they stay opted out
+            last = rec.get("last_active", 0)
+            if last and (now - last) > MEM_COLD_PRUNE_SEC:
+                del users[uid]
+                changed = True
+        if changed:
+            _save_member_memory(data)
+    except Exception:
+        pass
+
+
+async def member_memory_scheduler():
+    """Background: keep warm members' dossiers fresh, throttled per tick."""
+    await client.wait_until_ready()
+    # Prime the opt-out cache from disk before any buffering matters.
+    try:
+        for uid, rec in _load_member_memory().get("users", {}).items():
+            if rec.get("opted_out"):
+                _MEM_OPTED_OUT.add(int(uid))
+    except Exception:
+        pass
+    while not client.is_closed():
+        await asyncio.sleep(MEM_TICK_SECONDS)
+        try:
+            now = time.time()
+            mem = _load_member_memory()
+            users = mem.get("users", {})
+            candidates = []
+            for uid, act in list(_mem_activity.items()):
+                if uid in _MEM_OPTED_OUT:
+                    continue
+                if not _is_member(None, uid):   # don't build dossiers for people who left
+                    continue
+                rec = users.get(str(uid), {})
+                msgs = act.get("msgs", 0)
+                stale = (now - rec.get("last_distilled", 0)) > MEM_DISTILL_STALE_SEC
+                if msgs >= MEM_DISTILL_MIN_MSGS or (stale and msgs > 0):
+                    candidates.append((uid, msgs))
+            candidates.sort(key=lambda x: x[1], reverse=True)   # most-active first
+            for uid, _ in candidates[:MEM_PER_TICK]:
+                await _distill_one(uid)
+                await asyncio.sleep(1)   # gentle pacing between AI calls
+            _mem_prune_cold(now)
+        except Exception:
+            log.exception("member_memory_scheduler tick failed")
+
+
+async def _handle_memory(message: discord.Message, rest: str):
+    """_memory — DM you what Jordan remembers. _memory off/on — opt out/in."""
+    if not message.guild:
+        return
+    uid = message.author.id
+    arg = (rest or "").strip().lower()
+
+    if arg in ("off", "disable", "stop"):
+        data = _load_member_memory()
+        rec = data.setdefault("users", {}).setdefault(str(uid), {})
+        rec["opted_out"] = True
+        rec["summary"] = ""
+        _save_member_memory(data)
+        _MEM_OPTED_OUT.add(uid)
+        _mem_recent.pop(uid, None)
+        _mem_activity.pop(uid, None)
+        await message.channel.send(
+            "🧠 Memory **off**. Wiped what I had and I won't build a profile while it's off. "
+            "Back on with `_memory on`."
+        )
+        return
+
+    if arg in ("on", "enable", "start"):
+        data = _load_member_memory()
+        rec = data.setdefault("users", {}).setdefault(str(uid), {})
+        rec["opted_out"] = False
+        _save_member_memory(data)
+        _MEM_OPTED_OUT.discard(uid)
+        await message.channel.send("🧠 Memory **on**. I'll start remembering you again as you talk.")
+        return
+
+    # No arg -> show them their own dossier, privately via DM.
+    rec = get_member_dossier(uid)
+    if rec.get("opted_out"):
+        await message.channel.send("🧠 Your memory is currently **off**. Turn it on with `_memory on`.")
+        return
+    summary = rec.get("summary")
+    if not summary:
+        await message.channel.send("🧠 I don't have a read on you yet — talk more and check back.")
+        return
+    dm_text = f"🧠 **Here's what I remember about you:**\n\n{summary}"
+    dnm = rec.get("do_not_mention", [])
+    if dnm:
+        dm_text += f"\n\n_Off-limits:_ {', '.join(dnm)}"
+    dm_text += "\n\n_Opt out anytime with_ `_memory off` _· wipe it with_ `_forgetme`"
+    try:
+        await message.author.send(dm_text)
+        await message.channel.send("🧠 Sent you a DM with what I remember. 👀")
+    except discord.Forbidden:
+        await message.channel.send("🧠 I couldn't DM you — open your DMs and try again.")
+    except Exception:
+        await message.channel.send("🧠 Something went wrong sending that. Try again in a bit.")
+
+
+async def _handle_forgetme(message: discord.Message, rest: str):
+    """_forgetme — permanently delete your whole dossier (confirm)."""
+    if not message.guild:
+        return
+    uid = message.author.id
+    if (rest or "").strip().lower() != "confirm":
+        await message.channel.send(
+            "🧠 This permanently wipes everything I remember about you. "
+            "Run `_forgetme confirm` to go through with it."
+        )
+        return
+    data = _load_member_memory()
+    existed = data.get("users", {}).pop(str(uid), None) is not None
+    _save_member_memory(data)
+    _MEM_OPTED_OUT.discard(uid)
+    _mem_recent.pop(uid, None)
+    _mem_activity.pop(uid, None)
+    await message.channel.send(
+        "🧠 Done — wiped everything I had on you." if existed else "🧠 I had nothing on you to wipe."
+    )
+
+
+async def _mem_strip_summary(summary: str, thing: str) -> str | None:
+    """Rewrite a dossier to remove any mention of `thing`. None on failure."""
+    try:
+        cfg = load_config()
+        out = await ask_ai(
+            "You edit a short dossier. Remove anything related to the TOPIC the user wants "
+            "forgotten — any sentence, clause, or reference touching it. Keep everything else "
+            "intact and natural. Output ONLY the edited dossier text, nothing else.",
+            [{"role": "user", "content": f"TOPIC TO REMOVE: {thing}\n\nDOSSIER:\n{summary}"}],
+            {**cfg, "max_tokens": 400},
+        )
+        if not out or out.startswith("⚠️") or not out.strip():
+            return None
+        return out.strip()
+    except Exception:
+        log.exception("mem strip failed")
+        return None
+
+
+async def _handle_forget(message: discord.Message, rest: str):
+    """_forget <thing> — Jordan never brings <thing> up again, and strips it from memory now."""
+    if not message.guild:
+        return
+    uid = message.author.id
+    thing = (rest or "").strip()
+
+    if not thing:
+        rec = get_member_dossier(uid)
+        dnm = rec.get("do_not_mention", [])
+        cur = f"\n\nCurrently off-limits: {', '.join(dnm)}" if dnm else ""
+        await message.channel.send(
+            "🧠 **Usage:** `_forget <thing>` — I'll never bring it up again and I'll scrub it "
+            "from what I remember." + cur
+        )
+        return
+    thing = thing[:200]
+
+    data = _load_member_memory()
+    rec = data.setdefault("users", {}).setdefault(str(uid), {})
+    if rec.get("opted_out"):
+        await message.channel.send("🧠 Your memory is off, so there's nothing to forget. (`_memory on` to enable.)")
+        return
+    dnm = rec.setdefault("do_not_mention", [])
+    if thing.lower() not in [d.lower() for d in dnm]:
+        dnm.append(thing)
+    summary = rec.get("summary", "")
+    _save_member_memory(data)   # persist the do-not-mention addition immediately
+
+    # Strip it from the current dossier too (so it's gone right now, not just next distill).
+    if summary:
+        async with message.channel.typing():
+            cleaned = await _mem_strip_summary(summary, thing)
+        if cleaned is not None:
+            data = _load_member_memory()   # re-load fresh, no await between here and save
+            rec = data.setdefault("users", {}).setdefault(str(uid), {})
+            if not rec.get("opted_out"):
+                rec["summary"] = cleaned[:MEM_SUMMARY_CAP]
+                _save_member_memory(data)
+    await message.channel.send(f"🧠 Done — I'll never bring up **{thing}** again.")
+
+
+async def _handle_beef(message: discord.Message, rest: str):
+    """_beef [@user] — the web: who's gunning for you (FMK kills), your crew, your ring."""
+    if not message.guild:
+        return
+    target = message.mentions[0] if message.mentions else message.author
+    web = _compute_relationships(target.id)
+    if not web:
+        who = "You're" if target.id == message.author.id else f"{target.display_name} is"
+        await message.channel.send(
+            f"🩸 {who} a lone wolf — no crew, no ring, nobody's called the kill. For now."
+        )
+        return
+    embed = discord.Embed(
+        title=f"🩸 {target.display_name}'s web",
+        description=web,
+        color=discord.Color.dark_red(),
+    )
+    embed.set_footer(text="FMK kills + crew + marriage · full FMK record: _fmkme")
+    await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _mem_entrance_line(member) -> str | None:
+    """A short, in-character, memory-aware arrival line. None if no dossier / opted out / fails."""
+    try:
+        if member.id in _MEM_OPTED_OUT:
+            return None
+        rec = get_member_dossier(member.id)
+        if not rec.get("summary"):
+            return None
+        cfg = load_config()
+        sysp = cfg["system_prompt"] + build_member_context(member.id, member.display_name) + (
+            "\n\n=== ENTRANCE ===\n"
+            f"{member.display_name} just walked into the chat after it was dead quiet. Announce their "
+            "arrival in ONE short line, in character, using what you know about them. Under 110 "
+            "characters. No quotes, no preamble, just the line."
+        )
+        line = await ask_ai(
+            sysp,
+            [{"role": "user", "content": f"Announce {member.display_name}'s entrance."}],
+            {**cfg, "max_tokens": 60},
+        )
+        if not line or line.startswith("⚠️") or not line.strip():
+            return None
+        return line.strip().strip('"')[:120]
+    except Exception:
+        return None
+
+
 # ── 💰 Economy ────────────────────────────────────────────────────────────────
 ECONOMY_FILE = MEMORY_DIR / "economy.json"
 ECONOMY_LOCK = asyncio.Lock()
@@ -3779,6 +4247,7 @@ async def bio_command(interaction: discord.Interaction, user: discord.Member):
             "Total 100 words max. Stay in character."
         )
 
+    bio_system += build_member_context(user.id, user.display_name)
     bio = await ask_ai(
         bio_system,
         [{"role": "user", "content": f"Recent messages from {user.display_name}:\n\n{transcript}\n\nWrite their Tinder bio."}],
@@ -3899,6 +4368,7 @@ async def roast_command(interaction: discord.Interaction, user: discord.Member):
         "Format as a clean paragraph. No bullet points. No 'here's your roast' preamble — just deliver. "
         "Stay completely in character."
     )
+    roast_system += build_member_context(user.id, target_name)
     user_prompt = (
         f"Roast {target_name} based on these recent messages of theirs:\n\n{transcript}"
     )
@@ -17008,7 +17478,10 @@ async def _apply_drip_entrance(message: discord.Message, active: dict):
         # And not if this user just had an entrance recently
         if entrance.get("_last_fire", 0) + ENTRANCE_USER_COOLDOWN > time.time():
             return
-        phrase = entrance.get("text") or f"👑 {message.author.display_name} has entered the chat."
+        phrase = entrance.get("text")
+        if not phrase:
+            # No custom line set — give them a memory-aware Jordan callout (graceful fallback).
+            phrase = await _mem_entrance_line(message.author) or f"👑 {message.author.display_name} has entered the chat."
         await message.channel.send(phrase[:120])
         data = _load_drip()
         rec = data.get("users", {}).get(str(message.author.id), {})
@@ -26034,6 +26507,7 @@ async def on_ready():
     client.loop.create_task(tournament_scheduler())
     client.loop.create_task(random_event_scheduler())
     client.loop.create_task(business_events_scheduler())
+    client.loop.create_task(member_memory_scheduler())
     client.loop.create_task(channel_revert_scheduler())
     # Refund any blackjack games interrupted by a restart (dead button views)
     try:
@@ -27861,6 +28335,8 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
     "setreadyimage", "readyimage", "setreadyimg", "readyimg", "setreadygif", "readygif", "setreadypic", "readypic",
     "fmk", "fuckmarrykill", "fmkme", "fmkstats", "whofmk", "myfmk",
+    "memory", "mymemory", "whatdoyouknow", "forgetme", "wipeme", "forget", "forgetabout",
+    "beef", "rivals", "whosgunning", "enemies",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -28994,6 +29470,18 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("fmkme", "fmkstats", "whofmk", "myfmk"):
         await _handle_fmkme(message, rest)
         return True
+    if cmd_name in ("memory", "mymemory", "whatdoyouknow"):
+        await _handle_memory(message, rest)
+        return True
+    if cmd_name in ("forgetme", "wipeme"):
+        await _handle_forgetme(message, rest)
+        return True
+    if cmd_name in ("forget", "forgetabout"):
+        await _handle_forget(message, rest)
+        return True
+    if cmd_name in ("beef", "rivals", "whosgunning", "enemies"):
+        await _handle_beef(message, rest)
+        return True
 
     # 🛠️ Custom Commands
     if cmd_name in ("makecommand", "createcommand", "newcommand", "addcommand"):
@@ -29548,6 +30036,9 @@ async def on_message(message: discord.Message):
     # Log for daily recap
     if message.content.strip():
         daily_log.append(channel_id, message.author.display_name, message.content.strip())
+        # Member memory: buffer recent lines per user (in-memory, keyed by uid)
+        if not message.author.bot:
+            _mem_track_message(message.author.id, message.author.display_name, message.content.strip())
 
     # Passive watching — log every message
     if cfg.get("watch_mode_enabled", True):
@@ -29601,6 +30092,7 @@ async def on_message(message: discord.Message):
             "Keep it short — 1 to 3 sentences max. Do NOT announce that you're joining. "
             + get_time_context()
         )
+        chime_system += build_member_context(message.author.id, message.author.display_name)
         async with message.channel.typing():
             reply = await ask_ai(
                 chime_system,
@@ -29632,6 +30124,8 @@ async def on_message(message: discord.Message):
         history = memory.get_messages(channel_id)
         # If there are images, enrich the system prompt slightly so Jordan knows to roast them
         sys_prompt = cfg["system_prompt"] + "\n\n" + get_time_context()
+        # Memory: what Jordan knows about the person he's replying to
+        sys_prompt += build_member_context(message.author.id, message.author.display_name)
         # Kingpin perk: bot addresses them by a custom name
         try:
             if supporter_has_tier(message.author.id, "kingpin"):
