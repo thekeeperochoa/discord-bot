@@ -26461,6 +26461,140 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
         log.warning("auto command tracking failed: %s", e)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🖱️ RIGHT-CLICK (CONTEXT MENU) COMMANDS
+# Apps menu entries you reach by right-clicking a person or a message.
+# These live on Discord's SEPARATE context-menu limits (15 USER + 15 MESSAGE),
+# so they add NOTHING to the 100 slash-command cap. The USER menus forward to the
+# existing slash callbacks so there's one source of truth for the logic.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ctx_guild_only(interaction: discord.Interaction) -> bool:
+    """Context menus sync globally, so they can appear in DMs. These features need
+    a guild — return False (and reply) when there's no guild."""
+    return interaction.guild is not None
+
+
+@tree.context_menu(name="Roast")
+async def ctx_roast(interaction: discord.Interaction, user: discord.Member):
+    """Right-click a person → Apps → Roast."""
+    if not _ctx_guild_only(interaction):
+        await interaction.response.send_message("Right-click this in the server, not DMs.", ephemeral=True)
+        return
+    # Forward to the real /roast — same logic, one source of truth. It defers itself.
+    await roast_command.callback(interaction, user)
+
+
+@tree.context_menu(name="Dossier")
+async def ctx_dossier(interaction: discord.Interaction, user: discord.Member):
+    """Right-click a person → Apps → Dossier (the /whois report)."""
+    if not _ctx_guild_only(interaction):
+        await interaction.response.send_message("Right-click this in the server, not DMs.", ephemeral=True)
+        return
+    await whois_command.callback(interaction, user)
+
+
+@tree.context_menu(name="Beef")
+async def ctx_beef(interaction: discord.Interaction, user: discord.Member):
+    """Right-click a person → Apps → Beef (their relationship web)."""
+    if not _ctx_guild_only(interaction):
+        await interaction.response.send_message("Right-click this in the server, not DMs.", ephemeral=True)
+        return
+    web = _compute_relationships(user.id)
+    if not web:
+        await interaction.response.send_message(
+            f"🩸 {user.display_name} is a lone wolf — no crew, no ring, nobody's called the kill. For now.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+    embed = discord.Embed(
+        title=f"🩸 {user.display_name}'s web",
+        description=web,
+        color=discord.Color.dark_red(),
+    )
+    embed.set_footer(text="FMK kills + crew + marriage · full FMK record: _fmkme")
+    await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.context_menu(name="Jordan's Verdict")
+async def ctx_verdict(interaction: discord.Interaction, message: discord.Message):
+    """Right-click a message → Apps → Jordan's Verdict (AI rates the take)."""
+    if not _ctx_guild_only(interaction):
+        await interaction.response.send_message("Right-click this in the server, not DMs.", ephemeral=True)
+        return
+    content = (message.content or "").strip()
+    if not content:
+        await interaction.response.send_message("Nothing to judge — that message has no text.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    cfg = load_config()
+    author = message.author
+    system = (
+        cfg["system_prompt"] +
+        "\n\n=== VERDICT MODE ===\n"
+        f"{author.display_name} posted the message below. Give your verdict on it — is it based, "
+        "cringe, a hot take, a cold take, a crime against the server? React in character, 2 to 4 sentences, "
+        "witty and sharp. No preamble, just the verdict."
+    )
+    try:
+        system += build_member_context(author.id, author.display_name)
+    except Exception:
+        pass
+    try:
+        verdict = await ask_ai(
+            system,
+            [{"role": "user", "content": f"The message:\n\n{content[:1500]}"}],
+            {**cfg, "max_tokens": 220},
+        )
+    except Exception as e:
+        log.exception("ctx verdict failed")
+        await interaction.followup.send(f"⚠️ Couldn't reach a verdict: {e}")
+        return
+    if verdict.startswith("⚠️"):
+        await interaction.followup.send(verdict)
+        return
+    quoted = content.replace("\n", " ")
+    quoted = quoted if len(quoted) <= 180 else quoted[:177] + "..."
+    await interaction.followup.send(
+        f"⚖️ **Verdict on {author.mention}:**\n> {quoted}\n\n{verdict}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tree.context_menu(name="Say it like Jordan")
+async def ctx_jbsay(interaction: discord.Interaction, message: discord.Message):
+    """Right-click a message → Apps → Say it like Jordan (rewrite in his voice)."""
+    if not _ctx_guild_only(interaction):
+        await interaction.response.send_message("Right-click this in the server, not DMs.", ephemeral=True)
+        return
+    content = (message.content or "").strip()
+    if not content:
+        await interaction.response.send_message("Nothing to rewrite — that message has no text.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    cfg = load_config()
+    system = (
+        cfg["system_prompt"] +
+        "\n\n=== REWRITE MODE ===\n"
+        "Rewrite the user's message in YOUR voice — same meaning, but how you'd say it. "
+        "Keep it roughly the same length. Output ONLY the rewritten line — no preamble, no quotes, no explanation."
+    )
+    try:
+        out = await ask_ai(
+            system,
+            [{"role": "user", "content": content[:1500]}],
+            {**cfg, "max_tokens": 220},
+        )
+    except Exception as e:
+        log.exception("ctx jbsay failed")
+        await interaction.followup.send(f"⚠️ Couldn't rewrite that: {e}")
+        return
+    if out.startswith("⚠️"):
+        await interaction.followup.send(out)
+        return
+    await interaction.followup.send(out.strip()[:1900], allowed_mentions=discord.AllowedMentions.none())
+
+
 @client.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)
