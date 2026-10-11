@@ -701,6 +701,135 @@ async def _handle_beef(message: discord.Message, rest: str):
     await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🖊️ SELL ME THIS PEN — the Wolf of Wall Street test.
+# JB hands you a random object; your NEXT message is your one-shot pitch. He
+# scores it 1-10 in character and pays out coins scaled to the score.
+# Prefix-only (slash cap is full). The cooldown is set at START so a pitch can't
+# be spam-started, win, lose, or time out.
+# ─────────────────────────────────────────────────────────────────────────────
+SELL_OBJECTS = [
+    "pen", "brick", "single shoe", "broken umbrella", "ice cube (in the desert)",
+    "1998 flip phone", "jar of air", "used lottery ticket", "rubber duck",
+    "traffic cone", "half-eaten sandwich", "VHS tape", "parking ticket",
+    "glass of lukewarm tap water", "paperclip", "sock with a hole in it",
+    "expired coupon book", "pet rock", "broken calculator", "ketchup packet",
+    "left AirPod (just the one)", "fork with a bent prong", "burnt piece of toast",
+    "deck of cards missing the aces", "slightly deflated basketball",
+    "mystery key that opens nothing", "screenshot of a coin",
+]
+SELL_TIMEOUT = 90        # seconds to deliver the pitch
+SELL_PER_POINT = 250     # coins per point of the 1-10 score (perfect 10 ≈ 2,500)
+
+
+async def _handle_sellme(message: discord.Message, rest: str):
+    """_sellme — JB hands you a random object; your next message is your one-shot pitch."""
+    if not message.guild:
+        return
+    uid = message.author.id
+
+    remaining = economy.get_cooldown_remaining(uid, "sellme")
+    if remaining > 0:
+        await message.channel.send(
+            f"🖊️ Easy, closer. The floor's not open again for **{fmt_cooldown(remaining)}**."
+        )
+        return
+    # Burn the cooldown at START so it can't be spam-started (win, lose, or timeout).
+    economy.set_cooldown(uid, "sellme")
+
+    obj = random.choice(SELL_OBJECTS)
+    try:
+        await message.channel.send(
+            f"🖊️ Alright **{message.author.display_name}** — sell me this **{obj}**.\n"
+            f"_One message. One shot. You've got {SELL_TIMEOUT} seconds. Go._"
+        )
+    except Exception:
+        return
+
+    def _check(m: discord.Message) -> bool:
+        # Their next real message in this channel. Skip prefix commands so an
+        # accidental `_command` doesn't get judged as the pitch.
+        return (
+            m.author.id == uid
+            and m.channel.id == message.channel.id
+            and bool((m.content or "").strip())
+            and not (m.content or "").lstrip().startswith("_")
+        )
+
+    try:
+        pitch_msg = await client.wait_for("message", check=_check, timeout=SELL_TIMEOUT)
+    except asyncio.TimeoutError:
+        await message.channel.send("⏰ Too slow. A real closer doesn't freeze up. **No sale.**")
+        return
+    except Exception:
+        log.exception("sellme wait_for failed")
+        return
+
+    pitch = (pitch_msg.content or "").strip()[:1000]
+
+    cfg = load_config()
+    judge_system = (
+        cfg["system_prompt"] +
+        "\n\n=== SELL ME THIS PEN ===\n"
+        f"A player is trying to sell you a {obj}. Judge their pitch like the sharp buyer you are. "
+        "Reward confidence, specificity, creativity, and selling the NEED and the emotion over the "
+        "object itself — the Wolf of Wall Street way. Punish lazy, generic, or low-effort pitches. "
+        "Respond in EXACTLY this format and nothing else:\n"
+        "SCORE: <a single whole number from 1 to 10>\n"
+        "<a 1-2 sentence reaction, in character, reacting to THEIR specific pitch>"
+    )
+    try:
+        judge_system += build_member_context(uid, message.author.display_name)
+    except Exception:
+        pass
+
+    try:
+        async with message.channel.typing():
+            verdict = await ask_ai(
+                judge_system,
+                [{"role": "user", "content": f"The {obj}. Their pitch:\n\n{pitch}"}],
+                {**cfg, "max_tokens": 200},
+            )
+    except Exception as e:
+        log.exception("sellme judge failed")
+        await message.channel.send(f"⚠️ Couldn't close the deal (AI hiccup): {e}")
+        return
+
+    if not verdict or verdict.startswith("⚠️"):
+        await message.channel.send(verdict or "⚠️ No verdict came back — try again later.")
+        return
+
+    # Parse "SCORE: N"; default to a middling 5 if parsing fails so a good pitch
+    # is never robbed by a formatting slip.
+    score = 5
+    reaction = verdict.strip()
+    mscore = re.search(r"SCORE:\s*(\d{1,2})", verdict, re.IGNORECASE)
+    if mscore:
+        try:
+            score = max(1, min(10, int(mscore.group(1))))
+        except ValueError:
+            score = 5
+        reaction = re.sub(r"^\s*SCORE:\s*\d{1,2}\s*", "", verdict, flags=re.IGNORECASE).strip()
+    if not reaction:
+        reaction = "..."
+
+    payout = int(score * SELL_PER_POINT * random.uniform(0.9, 1.1))
+    payout = max(payout, 0)
+    new_bal = economy.add(uid, payout, "sell me this pen")
+    try:
+        track_economy_event("earned", payout)
+    except Exception:
+        pass
+
+    stars = "⭐" * score + "·" * (10 - score)
+    await message.channel.send(
+        f"🖊️ **Verdict on the {obj}:**\n{reaction}\n\n"
+        f"**Score:** {score}/10  `{stars}`\n"
+        f"💰 Payout: **{payout:,}** coins · Balance: **{new_bal:,}**",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 async def _mem_entrance_line(member) -> str | None:
     """A short, in-character, memory-aware arrival line. None if no dossier / opted out / fails."""
     try:
@@ -755,6 +884,7 @@ COOLDOWNS = {
     "pay":    60,  # 1 min between payments to prevent rapid alt-account farming
     "crime":  2 * 3600,  # separate from rob for clarity
     "wheel":  45 * 60,   # separate from work
+    "sellme": 5 * 60,    # Sell Me This Pen — 5 min between pitches
 }
 
 
@@ -28472,6 +28602,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "fmk", "fuckmarrykill", "fmkme", "fmkstats", "whofmk", "myfmk",
     "memory", "mymemory", "whatdoyouknow", "forgetme", "wipeme", "forget", "forgetabout",
     "beef", "rivals", "whosgunning", "enemies",
+    "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -29616,6 +29747,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("beef", "rivals", "whosgunning", "enemies"):
         await _handle_beef(message, rest)
+        return True
+    if cmd_name in ("sellme", "sellmethispen", "sellpen", "pitch", "pitchme"):
+        await _handle_sellme(message, rest)
         return True
 
     # 🛠️ Custom Commands
