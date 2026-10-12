@@ -20201,8 +20201,11 @@ async def _handle_catastrophe(message: discord.Message, rest: str):
 # 5-minute per-channel cooldown to prevent spam.
 # ─────────────────────────────────────────────────────────────────────────────
 READY_ROLE_ID = 1312186593154564178
-READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-(16).gif"
-READY_CLOSED_GIF_URL = "https://i.postimg.cc/y63HPKfG/download-(30).gif"
+# NOTE: URLs must be percent-encoded. Discord proxies every embed image through
+# media.discordapp.net, and raw parentheses in the path break that proxy fetch —
+# the embed then renders as an empty black box. ( -> %28, ) -> %29.
+READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-%2816%29.gif"
+READY_CLOSED_GIF_URL = "https://i.postimg.cc/y63HPKfG/download-%2830%29.gif"
 READY_COOLDOWN = 300       # 5 min per channel
 READY_EMBED_COLOR = 0x000000  # black
 
