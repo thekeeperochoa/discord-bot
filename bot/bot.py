@@ -20201,11 +20201,19 @@ async def _handle_catastrophe(message: discord.Message, rest: str):
 # 5-minute per-channel cooldown to prevent spam.
 # ─────────────────────────────────────────────────────────────────────────────
 READY_ROLE_ID = 1312186593154564178
-# NOTE: URLs must be percent-encoded. Discord proxies every embed image through
-# media.discordapp.net, and raw parentheses in the path break that proxy fetch —
-# the embed then renders as an empty black box. ( -> %28, ) -> %29.
+# Ready-check GIFs are now BUNDLED in the repo and sent as Discord attachments,
+# not hotlinked. Reason: external hosts (postimg) were too slow/large, so Discord's
+# media.discordapp.net image proxy timed out fetching them and the embed rendered
+# as an empty black box. Discord serves its own attachments directly — no proxy,
+# no timeout, no link-rot, no CDN expiry. Files live in bot/assets/ (optimized).
+# The two URLs below are kept only as a legacy last-resort fallback.
 READY_GIF_URL = "https://i.postimg.cc/8zynPHyW/standard-%2816%29.gif"
 READY_CLOSED_GIF_URL = "https://i.postimg.cc/y63HPKfG/download-%2830%29.gif"
+READY_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+READY_OPEN_FILE = os.path.join(READY_ASSETS_DIR, "ready_open.gif")
+READY_CLOSED_FILE = os.path.join(READY_ASSETS_DIR, "ready_closed.gif")
+READY_OPEN_ATTACH = "ready_open.gif"      # attachment filename referenced by the embed
+READY_CLOSED_ATTACH = "ready_closed.gif"
 READY_COOLDOWN = 300       # 5 min per channel
 READY_EMBED_COLOR = 0x000000  # black
 
@@ -20301,9 +20309,12 @@ class ReadyCheckView(discord.ui.View):
         super().__init__(timeout=None)     # no timer — open until Count is pressed
         self.starter_id = starter_id
         self.role_mention = role_mention
-        # The "open" ready-check image. Tag-members can set their own via
-        # _setreadyimage; everyone else (and on any error) falls back to default.
-        self.open_image = open_image or READY_GIF_URL
+        # The "open" ready-check image. Tag-members can set their own URL via
+        # _setreadyimage (custom_open_url); everyone else gets the bundled default
+        # GIF sent as an attachment. _attach_open is True only when we should ship
+        # the bundled file (default image AND the file is actually present).
+        self.custom_open_url = open_image or None
+        self._attach_open = (self.custom_open_url is None) and os.path.exists(READY_OPEN_FILE)
         self.locked = False
         self.joiners: list[int] = []       # user ids in join order
         self.almost: list[int] = []        # user ids who hit "one sec"
@@ -20331,9 +20342,25 @@ class ReadyCheckView(discord.ui.View):
         return e
 
     def _embeds(self, closed: bool = False) -> list:
-        img = discord.Embed(color=READY_EMBED_COLOR)
-        img.set_image(url=READY_CLOSED_GIF_URL if closed else self.open_image)
-        return [img, self._joiners_embed(closed=closed), self._almost_embed(closed=closed)]
+        # Closed state shows only the roster here; the countdown GIF is posted
+        # separately as an attachment (see count_button) so we never have to swap
+        # an attachment on an interaction edit.
+        if closed:
+            return [self._joiners_embed(closed=True), self._almost_embed(closed=True)]
+        # Open state: custom URL (tag perk) -> url; default -> bundled attachment;
+        # if neither is usable, omit the image embed entirely (never an empty box).
+        embeds = []
+        if self.custom_open_url:
+            img = discord.Embed(color=READY_EMBED_COLOR)
+            img.set_image(url=self.custom_open_url)
+            embeds.append(img)
+        elif self._attach_open:
+            img = discord.Embed(color=READY_EMBED_COLOR)
+            img.set_image(url=f"attachment://{READY_OPEN_ATTACH}")
+            embeds.append(img)
+        embeds.append(self._joiners_embed(closed=False))
+        embeds.append(self._almost_embed(closed=False))
+        return embeds
 
     @discord.ui.button(label="Join!", emoji="✅", style=discord.ButtonStyle.secondary)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -20395,16 +20422,19 @@ class ReadyCheckView(discord.ui.View):
             await interaction.response.edit_message(
                 content=f"**Ready for {self.role_mention}** · 🔒 **CLOSED**",
                 embeds=self._embeds(closed=True),
+                attachments=[],   # drop the open-GIF attachment; countdown posts below
                 view=self,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             pass
-        # Post the closing gif as a fresh black embed under the ready check
+        # Post the countdown GIF as a fresh attachment under the ready check.
+        # Attachment (not a hotlinked URL) so it renders instantly and can't rot.
         try:
-            closed_embed = discord.Embed(color=READY_EMBED_COLOR)
-            closed_embed.set_image(url=READY_CLOSED_GIF_URL)
-            await interaction.channel.send(embed=closed_embed)
+            if os.path.exists(READY_CLOSED_FILE):
+                await interaction.channel.send(
+                    file=discord.File(READY_CLOSED_FILE, filename=READY_CLOSED_ATTACH)
+                )
         except Exception:
             pass
 
@@ -20444,10 +20474,19 @@ async def _handle_ready_check(message: discord.Message):
     except Exception:
         _starter_img = ""
     view = ReadyCheckView(message.author.id, role_mention, open_image=_starter_img)
+    # Ship the bundled open GIF as an attachment (default image). Custom-URL images
+    # (tag perk) need no file — the embed references the URL directly.
+    _files = []
+    if view._attach_open:
+        try:
+            _files = [discord.File(READY_OPEN_FILE, filename=READY_OPEN_ATTACH)]
+        except Exception:
+            _files = []
     try:
         sent = await message.channel.send(
             content=f"**Ready for {role_mention}**",
             embeds=view._embeds(),
+            files=_files,
             view=view,
             allowed_mentions=discord.AllowedMentions(roles=[role] if role else True, users=False, everyone=False),
         )
