@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your JB dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Homemade+Apple&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#0D2B21; --page-2:#143A2D; --line:rgba(184,146,58,.34);
+  --gold:#B8923A; --gold-ink:#D9B86C;
+  --text:#E6EDE7; --muted:#A3B8AB; --faint:#7B9486;
+  --paper:#E8EFE4; --paper-ink:#16261F; --paper-muted:#56695D; --paper-line:#9DB2A4;
+  --pen:#1D3F8F; --stamp:#B3261E;
+  --loss:#EE8A80; --ready:#A6E6BF;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--page);color:var(--text);
+  font:400 15px/1.55 "IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  font-variant-numeric:tabular-nums}
+a{color:var(--gold-ink);text-underline-offset:3px}
+a:focus-visible,button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--gold-ink);outline-offset:3px;border-radius:2px}
+.wrap{max-width:980px;margin:0 auto;padding:20px 16px 56px}
+
+/* header */
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:22px;flex-wrap:wrap}
+.who{display:flex;align-items:center;gap:10px;min-width:0}
+.who img{width:30px;height:30px;border-radius:50%;flex:none;background:var(--page-2)}
+.who span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.who strong{color:var(--text);font-weight:500}
+.links{display:flex;gap:18px;font-size:14px}
+
+/* the check */
+.check{position:relative;color:var(--paper-ink);background-color:var(--paper);border-radius:5px;
+  padding:20px 22px 18px;box-shadow:0 1px 0 rgba(0,0,0,.25),0 14px 34px rgba(0,0,0,.38);
+  background-image:
+    repeating-linear-gradient(135deg,rgba(22,38,31,.04) 0 1px,transparent 1px 5px),
+    repeating-linear-gradient(45deg,rgba(22,38,31,.03) 0 1px,transparent 1px 9px),
+    radial-gradient(120% 90% at 85% 10%,rgba(184,146,58,.14),transparent 60%);
+  overflow:hidden}
+.check::before{content:"";position:absolute;inset:7px;border:1px solid rgba(22,38,31,.18);border-radius:3px;pointer-events:none}
+.ck-row{position:relative;display:flex;align-items:flex-end;gap:14px}
+.ck-head{justify-content:space-between;align-items:flex-start;margin-bottom:14px}
+.bank{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.06rem;letter-spacing:.01em}
+.bank small{display:block;font-weight:400;font-size:.78rem;color:var(--paper-muted);letter-spacing:0}
+.ck-no{font-family:"IBM Plex Serif",Georgia,serif;font-size:.9rem;color:var(--paper-muted)}
+.lbl{font-size:.72rem;line-height:1.2;color:var(--paper-muted);flex:none}
+.hand{font-family:"Homemade Apple","Segoe Script","Brush Script MT",cursive;color:var(--pen);
+  font-size:clamp(1rem,3.3vw,1.45rem);line-height:1.5;min-height:1.5em}
+.fill{flex:1;min-width:0;border-bottom:1px solid var(--paper-line);padding:0 6px 2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ck-date{justify-content:flex-end;margin-bottom:10px}
+.ck-date .fill{flex:0 1 190px;font-size:clamp(.85rem,2.6vw,1.05rem)}
+.ck-pay{flex-wrap:wrap;margin-bottom:10px}
+.ck-pay .fill{flex:1 1 220px}
+.amt{flex:none;margin-left:auto;display:flex;align-items:center;gap:6px;border:1.5px solid rgba(22,38,31,.55);
+  border-radius:3px;padding:3px 10px;background:rgba(255,255,255,.35);
+  font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:clamp(1rem,3.4vw,1.35rem)}
+.ck-words{margin-bottom:16px}
+.ck-words .fill{white-space:normal;font-size:clamp(.82rem,2.5vw,1.08rem);line-height:2em;
+  background-image:linear-gradient(transparent calc(100% - 1px),var(--paper-line) 0);
+  background-size:100% 2em;border-bottom:0;text-overflow:clip}
+.ck-foot{justify-content:space-between;flex-wrap:wrap;gap:16px 28px}
+.memo{flex:1 1 220px;display:flex;align-items:flex-end;gap:10px;min-width:0}
+.memo .fill{font-size:clamp(.82rem,2.4vw,1rem)}
+.sig{flex:0 0 auto;text-align:center;min-width:170px;margin-left:auto}
+.sig .hand{display:block;border-bottom:1px solid var(--paper-line);padding:0 8px 2px;font-size:clamp(1.05rem,3.4vw,1.4rem)}
+.sig .lbl{display:block;margin-top:4px}
+.stamp{position:absolute;left:50%;bottom:54px;transform:translateX(-50%) rotate(-9deg);white-space:nowrap;border:3px solid var(--stamp);
+  color:var(--stamp);font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.05rem;
+  padding:4px 12px;border-radius:4px;opacity:.82;mix-blend-mode:multiply;pointer-events:none}
+.stamp[hidden]{display:none}
+
+/* the one orchestrated moment: the check gets written in, once */
+.writable{clip-path:inset(0 100% 0 0)}
+.written .writable{animation:ink .7s cubic-bezier(.3,.6,.3,1) forwards}
+.written .w2{animation-delay:.35s}.written .w3{animation-delay:.7s}
+.written .w4{animation-delay:1.05s}.written .w5{animation-delay:1.4s}
+@keyframes ink{to{clip-path:inset(0 0 0 0)}}
+@media (prefers-reduced-motion:reduce){.writable{clip-path:none}.written .writable{animation:none}}
+
+.note{color:var(--muted);font-size:14px;margin:12px 2px 0}
+.note[hidden]{display:none}
+
+/* standing band */
+.standing{display:grid;grid-template-columns:1fr;gap:18px 40px;margin-top:28px;padding-top:18px;border-top:1px solid var(--line)}
+@media (min-width:700px){.standing{grid-template-columns:1fr 1fr}}
+.big{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.35rem;line-height:1.25;margin:0 0 8px}
+.pips{display:flex;gap:6px;margin:4px 0 8px}
+.pip{width:10px;height:10px;border-radius:50%;border:1.5px solid var(--gold)}
+.pip.on{background:var(--gold)}
+.meter{height:8px;border-radius:4px;background:var(--page-2);overflow:hidden;margin:6px 0 6px}
+.meter i{display:block;height:100%;border-radius:4px;background:var(--gold)}
+.sub{color:var(--muted);font-size:14px;margin:0}
+.badges{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;color:var(--muted);font-size:14px}
+
+/* columns */
+.cols{display:grid;grid-template-columns:1fr;gap:0 44px}
+@media (min-width:860px){.cols{grid-template-columns:1.12fr 1fr}}
+section.sec{margin-top:28px;padding-top:16px;border-top:1px solid var(--line)}
+h2{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.18rem;line-height:1.3;margin:0 0 12px}
+h3{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1rem;margin:18px 0 6px}
+h3 .count{font-family:"IBM Plex Sans",sans-serif;font-weight:400;color:var(--faint);font-size:.9rem}
+.empty{color:var(--muted);margin:0}
+ul.rows{list-style:none;margin:0;padding:0}
+ul.rows li{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:7px 0;border-bottom:1px solid rgba(163,184,171,.12)}
+ul.rows li:last-child{border-bottom:0}
+.r-main{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r-side{flex:none;color:var(--muted);text-align:right}
+.r-dim{color:var(--faint)}
+.loss{color:var(--loss)}
+.ok{color:var(--ready)}
+.gold{color:var(--gold-ink)}
+
+/* net worth bar */
+.bar{position:relative;display:flex;gap:2px;height:16px;margin:4px 0 14px}
+.seg{height:100%;border-radius:3px;min-width:4px;cursor:default}
+.legend{list-style:none;margin:0;padding:0}
+.legend li{display:grid;grid-template-columns:12px 1fr auto 3.6em;align-items:baseline;gap:10px;padding:5px 0}
+.sw{width:12px;height:12px;border-radius:3px;align-self:center}
+.legend .v{text-align:right}
+.legend .p{text-align:right;color:var(--faint)}
+.legend .total{border-top:1px solid rgba(163,184,171,.2);margin-top:4px;padding-top:9px;font-weight:600}
+.tip{position:absolute;z-index:5;pointer-events:none;background:#0A1F18;color:var(--text);border:1px solid var(--line);
+  padding:6px 9px;border-radius:4px;font-size:13px;white-space:nowrap;transform:translate(-50%,-100%);margin-top:-8px}
+.tip[hidden]{display:none}
+
+/* record */
+.figs{display:grid;grid-template-columns:1fr 1fr;gap:12px 24px;margin:0}
+.figs div{margin:0}
+.figs dt{color:var(--muted);font-size:13px}
+.figs dd{margin:2px 0 0;font-family:"IBM Plex Serif",Georgia,serif;font-size:1.15rem}
+
+/* fmk + achievements */
+.fmk li .r-main{white-space:normal}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.chips li{background:var(--page-2);border-radius:4px;padding:4px 9px;font-size:14px}
+.up li .r-main{white-space:normal}
+
+/* memory */
+blockquote{margin:0;padding:2px 0 2px 16px;border-left:2px solid var(--gold);
+  font-family:"IBM Plex Serif",Georgia,serif;font-style:italic;font-size:1.02rem;line-height:1.65;color:var(--text);max-width:62ch}
+code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);padding:1px 5px;border-radius:3px}
+.foot{margin-top:40px;color:var(--faint);font-size:13px}
+.err{margin-top:24px}
+.err button{margin-top:12px;font:inherit;background:var(--gold);color:#16261F;border:0;border-radius:4px;padding:9px 16px;font-weight:600;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="who"><img id="av" alt="" hidden><span id="who">Signed in</span></div>
+    <nav class="links"><a id="adminLink" href="/" hidden>Admin dashboard</a><a href="/auth/logout">Log out</a></nav>
+  </header>
+
+  <div class="check" id="check" role="img" aria-label="Your account statement">
+    <div class="ck-row ck-head">
+      <div class="bank">Stratton Oakmont, Inc.<small>Long Island, New York</small></div>
+      <div class="ck-no" id="ckNo">No. ----</div>
+    </div>
+    <div class="ck-row ck-date"><span class="lbl">Date</span><span class="fill hand writable w1" id="ckDate"></span></div>
+    <div class="ck-row ck-pay">
+      <span class="lbl">Pay to the<br>order of</span>
+      <span class="fill hand writable w2" id="ckPayee"></span>
+      <span class="amt"><span aria-hidden="true">🪙</span><span id="ckAmt">—</span></span>
+    </div>
+    <div class="ck-row ck-words"><span class="fill hand writable w3" id="ckWords"></span><span class="lbl">coins</span></div>
+    <div class="ck-row ck-foot">
+      <div class="memo"><span class="lbl">Memo</span><span class="fill hand writable w4" id="ckMemo"></span></div>
+      <div class="sig"><span class="hand writable w5">J. Belfort</span><span class="lbl">Authorized signature</span></div>
+    </div>
+    <div class="stamp" id="stamp" hidden></div>
+  </div>
+  <p class="note" id="status" role="status">Pulling your file…</p>
+
+  <main id="main" hidden></main>
+  <p class="foot">This page is private. Only you can see it.</p>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+  function n(v){ return Number(v || 0).toLocaleString("en-US"); }
+  function dur(s){ s = Math.max(0, Math.floor(s||0)); var d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+    if(d) return d+"d "+h+"h"; if(h) return h+"h "+m+"m"; if(m) return m+"m"; return s+"s"; }
+  var ONES=["","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen"];
+  var TENS=["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"];
+  function w999(x){ var out=[], h=Math.floor(x/100), r=x%100;
+    if(h) out.push(ONES[h]+" hundred");
+    if(r){ out.push(r<20 ? ONES[r] : TENS[Math.floor(r/10)]+(r%10 ? "-"+ONES[r%10] : "")); }
+    return out.join(" "); }
+  function words(v){ var neg = v < 0, x = Math.floor(Math.abs(v||0));
+    if(x === 0) return "Zero";
+    var sc=["","thousand","million","billion","trillion","quadrillion"], parts=[], i=0;
+    while(x > 0 && i < sc.length){ var c = x % 1000; if(c) parts.unshift(w999(c)+(sc[i] ? " "+sc[i] : "")); x = Math.floor(x/1000); i++; }
+    var s = parts.join(" "); s = s.charAt(0).toUpperCase()+s.slice(1);
+    return neg ? "Minus "+s.charAt(0).toLowerCase()+s.slice(1) : s; }
+  var SUPPORTER = {supporter:"☕ Associate supporter", vip:"💎 Made Man supporter", kingpin:"👑 Kingpin supporter"};
+  function roman(k){ var m=[[10,"X"],[9,"IX"],[5,"V"],[4,"IV"],[1,"I"]], s=""; m.forEach(function(p){ while(k>=p[0]){ s+=p[1]; k-=p[0]; } }); return s; }
+
+  function fillCheck(d){
+    var name = (d.user && d.user.name) || d.session_username || "Member";
+    $("ckDate").textContent = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+    $("ckPayee").textContent = name;
+    var id = (d.user && d.user.id) || "";
+    $("ckNo").textContent = "No. " + (id ? id.slice(-4) : "----");
+    var stamp = $("stamp");
+    if(!d.exists){
+      $("ckAmt").textContent = "0"; $("ckWords").textContent = "Zero";
+      $("ckMemo").textContent = "";
+      stamp.textContent = "Account not opened"; stamp.hidden = false;
+    } else {
+      var total = (d.money && d.money.total) || 0;
+      $("ckAmt").textContent = n(total);
+      $("ckWords").textContent = words(total);
+      var memo = [];
+      if(d.rank) memo.push(d.rank.emoji+" "+d.rank.name);
+      if(d.level) memo.push("level "+d.level.level);
+      $("ckMemo").textContent = memo.join(", ");
+      if(total <= 0){ stamp.textContent = "Insufficient funds"; stamp.hidden = false; }
+    }
+    $("check").setAttribute("aria-label", "Account statement: pay to the order of "+name+", "+$("ckAmt").textContent+" coins");
+    requestAnimationFrame(function(){ $("check").classList.add("written"); });
+  }
+
+  function header(d){
+    var name = (d.user && d.user.name) || d.session_username || "you";
+    $("who").innerHTML = "Signed in as <strong>"+esc(name)+"</strong>";
+    if(d.user && d.user.avatar){ var av=$("av"); av.src = d.user.avatar; av.hidden = false; }
+    if(d.is_admin) $("adminLink").hidden = false;
+  }
+
+  function standing(d){
+    var r = d.rank, l = d.level, st = d.status || {}, h = "";
+    h += '<div class="standing">';
+    if(r){
+      var pips=""; for(var i=0;i<=r.of;i++) pips += '<span class="pip'+(i<=r.idx?" on":"")+'"></span>';
+      h += '<div><p class="big">'+esc(r.emoji)+' '+esc(r.name)+'</p>'+
+           '<div class="pips" role="img" aria-label="City rank '+(r.idx+1)+' of '+(r.of+1)+'">'+pips+'</div>'+
+           (r.next ? '<p class="sub">Next: '+esc(r.next.emoji)+' '+esc(r.next.name)+'. '+esc(r.next.req)+'.</p>'
+                   : '<p class="sub">Top rank. The city is yours.</p>')+'</div>';
+    }
+    if(l){
+      var span = Math.max(1, l.next - l.floor), got = Math.min(span, Math.max(0, l.xp - l.floor));
+      var pct = Math.round(got/span*100);
+      h += '<div><p class="big">Level '+n(l.level)+'</p>'+
+           '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+pct+'" aria-label="Progress to level '+(l.level+1)+'"><i style="width:'+pct+'%"></i></div>'+
+           '<p class="sub">'+n(got)+' of '+n(span)+' XP to level '+n(l.level+1)+'</p></div>';
+    }
+    h += '</div>';
+    var b = [];
+    if(st.title) b.push("Title: “"+esc(st.title)+"”");
+    if(st.prestige) b.push("⭐ Prestige "+roman(st.prestige));
+    if(st.tag_perks) b.push("🏷️ Tag perks on");
+    if(st.supporter && SUPPORTER[st.supporter]) b.push(SUPPORTER[st.supporter]);
+    if(b.length) h += '<div class="badges">'+b.map(function(x){return "<span>"+x+"</span>";}).join("")+'</div>';
+    return h;
+  }
+
+  var CATS = [["cash","Cash","--s1"],["business","Businesses","--s2"],["realestate","Property","--s3"],["stocks","Stocks","--s4"],["venues","Venues","--s5"]];
+  function money(m){
+    if(!m) return '<p class="empty">Your money couldn’t be loaded right now.</p>';
+    var pos = CATS.map(function(c){ return Math.max(0, m[c[0]]||0); });
+    var sum = pos.reduce(function(a,b){return a+b;}, 0);
+    var h = "";
+    if(sum > 0){
+      h += '<div class="bar" id="nwbar">';
+      CATS.forEach(function(c,i){ if(pos[i] <= 0) return;
+        var pct = pos[i]/sum*100;
+        h += '<div class="seg" tabindex="0" style="flex:'+pos[i]+' 1 0;background:var('+c[2]+')" data-tip="'+esc(c[1]+": "+n(m[c[0]])+" ("+(pct<1?"<1":Math.round(pct))+"%)")+'" aria-label="'+esc(c[1]+" "+n(m[c[0]])+" coins, "+Math.round(pct)+" percent")+'"></div>';
+      });
+      h += '<div class="tip" id="tip" hidden></div></div>';
+    }
+    h += '<ul class="legend">';
+    CATS.forEach(function(c,i){ var v = m[c[0]]||0, pct = sum>0 ? Math.round(pos[i]/sum*100) : 0;
+      h += '<li><span class="sw" style="background:var('+c[2]+')"></span><span>'+c[1]+(c[0]==="realestate"&&v<0?' <span class="r-dim">(mortgage owed)</span>':'')+'</span>'+
+           '<span class="v'+(v<0?" loss":"")+'">'+n(v)+'</span><span class="p">'+(sum>0?pct+"%":"")+'</span></li>'; });
+    h += '<li class="total"><span></span><span>Net worth</span><span class="v">'+n(m.total)+'</span><span></span></li></ul>';
+    if(m.cash_rank) h += '<p class="sub" style="margin-top:10px">#'+n(m.cash_rank)+' in cash out of '+n(m.ranked_of)+' members.</p>';
+    if(sum <= 0) h = '<p class="empty">Nothing on the books yet. Claim <code>/daily</code> and start earning.</p>' + h;
+    return h;
+  }
+
+  function ready(rows){
+    if(!rows || !rows.length) return '<p class="empty">No timers to show.</p>';
+    rows = rows.slice().sort(function(a,b){ return (a.remaining>0) - (b.remaining>0) || a.remaining - b.remaining; });
+    return '<ul class="rows">'+rows.map(function(r){
+      return '<li><span class="r-main">'+esc(r.label)+' <span class="r-dim">'+esc(r.cmd)+'</span></span>'+
+        (r.remaining>0 ? '<span class="r-side">⏳ '+dur(r.remaining)+'</span>' : '<span class="r-side ok">✓ Ready</span>')+'</li>';
+    }).join("")+'</ul>';
+  }
+
+  function list(title, items, emptyHtml, rowFn){
+    var h = '<h3>'+title+(items && items.length ? ' <span class="count">'+items.length+'</span>' : '')+'</h3>';
+    if(!items || !items.length) return h+'<p class="empty">'+emptyHtml+'</p>';
+    return h+'<ul class="rows">'+items.map(rowFn).join("")+'</ul>';
+  }
+
+  function empire(d){
+    var h = "";
+    h += list("Businesses", d.businesses, 'No businesses yet. Buy one with <code>/buybusiness</code>.', function(b){
+      return '<li><span class="r-main">'+esc(b.emoji)+' '+esc(b.name)+(b.level?' <span class="r-dim">upgrade '+b.level+'</span>':'')+'</span>'+
+        (b.closed_for>0 ? '<span class="r-side loss">Closed '+dur(b.closed_for)+'</span>'
+                        : '<span class="r-side">'+(b.pending>0?'<span class="gold">'+n(b.pending)+'</span> to collect':'Nothing to collect')+'</span>')+'</li>'; });
+    h += list("Venues", d.venues, 'No venues yet. Open one with <code>/buyvenue</code>.', function(v){
+      var s = v.closed_for>0 ? '<span class="loss">Closed '+dur(v.closed_for)+'</span>'
+            : v.celebrity_for>0 ? '<span class="gold">⭐ Celebrity night, '+dur(v.celebrity_for)+'</span>' : 'Open';
+      return '<li><span class="r-main">'+esc(v.emoji)+' '+esc(v.name)+' <span class="r-dim">rep '+v.rep+'</span></span><span class="r-side">'+s+'</span></li>'; });
+    h += list("Stocks", d.stocks, 'No shares yet. Trade with <code>/stocks</code>.', function(s){
+      return '<li><span class="r-main">'+esc(s.emoji)+' '+esc(s.ticker)+' <span class="r-dim">'+n(s.shares)+' shares</span></span><span class="r-side">'+n(s.value)+'</span></li>'; });
+    h += '<h3>Property and pet</h3><ul class="rows">';
+    h += '<li><span class="r-main">🏘️ Real estate</span><span class="r-side">'+(d.properties ? n(d.properties)+(d.properties===1?" property":" properties") : 'None yet. See <code>/realestate</code>')+'</span></li>';
+    h += '<li><span class="r-main">🐾 Pet</span><span class="r-side">'+(d.pet ? esc(d.pet.emoji)+' '+esc(d.pet.name)+', level '+d.pet.level : 'None. Adopt one with <code>/adopt</code>')+'</span></li>';
+    return h+'</ul>';
+  }
+
+  function record(r){
+    if(!r) return '<p class="empty">Your record couldn’t be loaded right now.</p>';
+    return '<dl class="figs"><div><dt>Games won</dt><dd>'+n(r.games_won)+'</dd></div><div><dt>Games lost</dt><dd>'+n(r.games_lost)+'</dd></div>'+
+      '<div><dt>Earned, all time</dt><dd>'+n(r.total_earned)+'</dd></div><div><dt>Lost, all time</dt><dd class="loss">'+n(r.total_lost)+'</dd></div></dl>';
+  }
+
+  function web(d){
+    var h = '<ul class="rows">';
+    var c = d.crew;
+    h += '<li><span class="r-main">🏴 Crew</span><span class="r-side">'+(c ? esc("["+c.tag+"] "+c.name)+', '+esc(c.role.toLowerCase())+' of '+c.members : 'None. Start one with <code>_createcrew</code>')+'</span></li>';
+    h += '<li><span class="r-main">💍 Married to</span><span class="r-side">'+(d.spouse ? esc(d.spouse) : 'Nobody')+'</span></li>';
+    h += '</ul>';
+    var f = d.fmk;
+    h += '<h3>FMK record</h3>';
+    if(!f || !(f.fuck.count + f.marry.count + f.kill.count)) return h+'<p class="empty">Nobody has FMK’d you yet.</p>';
+    function line(icon, label, x){ return '<li><span class="r-main">'+icon+' '+label+' <span class="r-dim">'+x.count+'</span><br>'+
+      (x.count ? esc(x.names.join(", "))+(x.count>x.names.length?' and '+(x.count-x.names.length)+' more':'') : '<span class="r-dim">nobody</span>')+'</span></li>'; }
+    return h+'<ul class="rows fmk">'+line("💋","Fucked by",f.fuck)+line("💍","Married by",f.marry)+line("🔪","Killed by",f.kill)+'</ul>';
+  }
+
+  function achievements(a){
+    if(!a) return '<p class="empty">Achievements couldn’t be loaded right now.</p>';
+    var h = '<p class="sub">'+a.earned.length+' of '+a.total+' earned</p>';
+    h += '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="'+a.total+'" aria-valuenow="'+a.earned.length+'" aria-label="Achievements earned"><i style="width:'+Math.round(a.earned.length/Math.max(1,a.total)*100)+'%"></i></div>';
+    if(a.earned.length) h += '<ul class="chips" style="margin-top:12px">'+a.earned.map(function(x){ return '<li title="'+esc(x.desc)+'">'+esc(x.emoji)+' '+esc(x.name)+'</li>'; }).join("")+'</ul>';
+    if(a.locked.length) h += '<h3>Up next</h3><ul class="rows up">'+a.locked.map(function(x){ return '<li><span class="r-main">🔒 '+esc(x.name)+' <span class="r-dim">'+esc(x.desc)+'</span></span></li>'; }).join("")+'</ul>';
+    return h;
+  }
+
+  function memory(m){
+    if(!m) return '<p class="empty">Couldn’t load this right now.</p>';
+    if(m.opted_out) return '<p class="empty">Memory is off, so Jordan isn’t keeping a file on you. Turn it on in Discord with <code>_memory on</code>.</p>';
+    var h = m.summary ? '<blockquote>'+esc(m.summary)+'</blockquote>'
+                      : '<p class="empty">Jordan doesn’t have a read on you yet. Talk in the server and check back.</p>';
+    if(m.do_not_mention && m.do_not_mention.length) h += '<p class="sub" style="margin-top:10px">Off limits: '+esc(m.do_not_mention.join(", "))+'</p>';
+    return h+'<p class="sub" style="margin-top:10px">To change it, use <code>_forget &lt;thing&gt;</code> or <code>_memory off</code> in Discord.</p>';
+  }
+
+  function sec(title, body){ return '<section class="sec"><h2>'+title+'</h2>'+body+'</section>'; }
+
+  function render(d){
+    header(d); fillCheck(d);
+    var main = $("main");
+    if(!d.exists){
+      main.innerHTML = sec("Open your account", '<p class="empty">You’re not on the books yet. Claim <code>/daily</code> in the server and this page fills in.</p>');
+    } else {
+      main.innerHTML = standing(d) +
+        '<div class="cols"><div>' +
+          sec("Ready now", ready(d.cooldowns)) +
+          sec("Where your money sits", money(d.money)) +
+          sec("Your empire", empire(d)) +
+          sec("Your record", record(d.record)) +
+        '</div><div>' +
+          sec("Your web", web(d)) +
+          sec("Achievements", achievements(d.achievements)) +
+          sec("What Jordan remembers", memory(d.memory)) +
+        '</div></div>';
+      wireTips();
+    }
+    main.hidden = false;
+    $("status").hidden = true;
+  }
+
+  function wireTips(){
+    var bar = $("nwbar"), tip = $("tip"); if(!bar || !tip) return;
+    function show(e){ var s = e.currentTarget; tip.textContent = s.getAttribute("data-tip");
+      tip.style.left = (s.offsetLeft + s.offsetWidth/2)+"px"; tip.style.top = "0px"; tip.hidden = false; }
+    function hide(){ tip.hidden = true; }
+    bar.querySelectorAll(".seg").forEach(function(s){
+      s.addEventListener("pointerenter", show); s.addEventListener("focus", show);
+      s.addEventListener("pointerleave", hide); s.addEventListener("blur", hide); });
+  }
+
+  function fail(msg){
+    $("status").hidden = true;
+    var main = $("main");
+    main.innerHTML = '<div class="err"><p class="empty">'+esc(msg)+'</p><button type="button" id="retry">Try again</button></div>';
+    main.hidden = false;
+    $("retry").addEventListener("click", function(){ location.reload(); });
+  }
+
+  fetch("/api/me", {credentials:"same-origin", cache:"no-store"})
+    .then(function(r){ if(r.status === 401){ location.href = "/auth/login"; throw null; } return r.json(); })
+    .then(function(d){ if(!d || d.ok === false){ fail((d && d.error) || "Couldn’t load your dashboard."); return; } render(d); })
+    .catch(function(e){ if(e !== null) fail("Couldn’t reach the server. Check your connection and try again."); });
+})();
+</script>
+</body>
+</html>

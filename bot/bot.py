@@ -26634,6 +26634,261 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 📊 PERSONAL DASHBOARD — every member gets their own page on the web dashboard
+# (/me). The web server runs on its own thread while the bot's data lives on the
+# bot's event loop, so the web side never touches bot state directly: it calls
+# dashboard_profile_provider(uid), which runs _gather_dashboard_profile ON the
+# bot's loop via run_coroutine_threadsafe and returns plain JSON-safe data. The
+# web route only ever passes the logged-in user's own id.
+# ─────────────────────────────────────────────────────────────────────────────
+DASH_COOLDOWNS = [
+    # (cooldown key, label, command to run)
+    ("daily", "Daily", "/daily"),
+    ("weekly", "Weekly", "/weekly"),
+    ("work", "Work", "/work"),
+    ("crime", "Crime", "/crime"),
+    ("rob", "Rob", "/rob"),
+    ("wheel", "Wheel", "/wheel"),
+    ("beg", "Beg", "/beg"),
+    ("sellme", "Sell me this pen", "_sellme"),
+]
+
+
+def _dash_name(uid) -> str:
+    try:
+        m = _find_member_anywhere(int(uid))
+        return m.display_name if m else "a former member"
+    except Exception:
+        return "a former member"
+
+
+def _dash_public_url() -> str:
+    """Public base URL of the web dashboard: DASHBOARD_PUBLIC_URL if set, else
+    derived from the OAuth redirect (…/auth/callback). '' if not configured."""
+    explicit = os.environ.get("DASHBOARD_PUBLIC_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    redirect = os.environ.get("DISCORD_OAUTH_REDIRECT", "").strip()
+    if redirect.endswith("/auth/callback"):
+        return redirect[: -len("/auth/callback")].rstrip("/")
+    return ""
+
+
+async def _gather_dashboard_profile(uid: int) -> dict:
+    """One member's dashboard data. Runs on the bot's event loop. Never creates
+    an economy record for someone who hasn't played. Each section is isolated so
+    one broken system can't blank the whole page."""
+    uid = int(uid)
+    uid_s = str(uid)
+    out: dict = {"ok": True}
+
+    member = _find_member_anywhere(uid)
+    out["user"] = {
+        "id": uid_s,
+        "name": member.display_name if member else None,
+        "avatar": str(member.display_avatar.url) if member else None,
+        "in_server": member is not None,
+    }
+
+    economy._load()
+    if uid_s not in economy._data.get("users", {}):
+        out["exists"] = False
+        return out
+    out["exists"] = True
+    u = economy._data["users"][uid_s]
+
+    def section(name, fn):
+        try:
+            out[name] = fn()
+        except Exception:
+            log.exception("dashboard section %s failed for %s", name, uid)
+            out[name] = None
+
+    section("status", lambda: {
+        "title": u.get("custom_title", "") or "",
+        "prestige": int(prestige_level(uid)),
+        "tag_perks": bool(has_tag_perks(uid)),
+        "supporter": supporter_tier(uid),
+    })
+
+    def _rank():
+        idx = city_rank(uid)
+        r = CITY_RANKS[idx]
+        nxt = None
+        if idx + 1 < len(CITY_RANKS):
+            n = CITY_RANKS[idx + 1]
+            nxt = {"name": n[1], "emoji": n[2], "req": _req_text(n[3]), "unlocks": n[4]}
+        return {"idx": idx, "of": len(CITY_RANKS) - 1, "name": r[1], "emoji": r[2],
+                "unlocks": r[4], "next": nxt}
+    section("rank", _rank)
+
+    def _level():
+        xp = int(u.get("xp", 0))
+        lvl = level_for_xp(xp)
+        return {"level": lvl, "xp": xp, "floor": xp_for_level(lvl), "next": xp_for_level(lvl + 1)}
+    section("level", _level)
+
+    def _money():
+        nw = {k: int(v) for k, v in compute_net_worth(uid).items()}
+        ranked = []
+        for k, rec in economy._data.get("users", {}).items():
+            try:
+                if _is_member(None, k):
+                    ranked.append((int(rec.get("balance", 0)), k))
+            except Exception:
+                continue
+        ranked.sort(reverse=True)
+        pos = next((i + 1 for i, (_, k) in enumerate(ranked) if k == uid_s), None)
+        return {**nw, "cash_rank": pos, "ranked_of": len(ranked)}
+    section("money", _money)
+
+    def _record():
+        st = u.get("stats", {})
+        return {k: int(st.get(k, 0)) for k in ("games_won", "games_lost", "total_earned", "total_lost")}
+    section("record", _record)
+
+    def _cooldowns():
+        rows = []
+        for key, label, cmd in DASH_COOLDOWNS:
+            if key in COOLDOWNS:
+                rows.append({"label": label, "cmd": cmd,
+                             "remaining": int(economy.get_cooldown_remaining(uid, key))})
+        return rows
+    section("cooldowns", _cooldowns)
+
+    def _businesses():
+        now = time.time()
+        rows = []
+        for b in _user_businesses(uid):
+            info = BUSINESS_TYPES.get(b.get("type"), {})
+            rows.append({
+                "emoji": info.get("emoji", "🏢"), "name": info.get("name", "Business"),
+                "level": int(b.get("upgrade_level", 0)),
+                "pending": int(_business_pending_income(b)),
+                "closed_for": max(0, int(b.get("damaged_until", 0) - now)),
+            })
+        return rows
+    section("businesses", _businesses)
+
+    def _venues():
+        now = time.time()
+        rows = []
+        for v in _load_nightlife().get("users", {}).get(uid_s, []):
+            info = VENUE_TYPES.get(v.get("type"), {})
+            rows.append({
+                "emoji": info.get("emoji", "🏢"), "name": v.get("name") or info.get("name", "Venue"),
+                "rep": int(_venue_rep(v)),
+                "closed_for": max(0, int(v.get("closed_until", 0) - now)),
+                "celebrity_for": max(0, int(v.get("celebrity_until", 0) - now)),
+            })
+        return rows
+    section("venues", _venues)
+
+    def _stocks():
+        data = _load_stocks()
+        rows = []
+        for t, sh in data.get("holdings", {}).get(uid_s, {}).items():
+            if sh <= 0:
+                continue
+            info = STOCKS.get(t, {})
+            rows.append({"ticker": t, "emoji": info.get("emoji", "📈"), "name": info.get("name", t),
+                         "shares": int(sh), "value": int(_stock_price(t, data) * sh)})
+        rows.sort(key=lambda r: r["value"], reverse=True)
+        return rows
+    section("stocks", _stocks)
+
+    section("properties", lambda: len(_load_re().get("users", {}).get(uid_s, [])))
+
+    def _pet():
+        p = _load_pets().get(uid_s)
+        if not p:
+            return None
+        info = PET_TYPES.get(p.get("type"), {})
+        return {"emoji": info.get("emoji", "🐾"), "kind": info.get("name", "Pet"),
+                "name": p.get("name", ""), "level": int(_pet_level(int(p.get("xp", 0))))}
+    section("pet", _pet)
+
+    def _crew():
+        _, crew = _crew_of(uid)
+        if not crew:
+            return None
+        return {"tag": crew.get("tag", ""), "name": crew.get("name", ""),
+                "role": "Leader" if str(crew.get("leader")) == uid_s else "Member",
+                "members": len(crew.get("members", [])), "level": int(crew.get("level", 1)),
+                "vault": int(crew.get("vault", 0))}
+    section("crew", _crew)
+
+    def _spouse():
+        sp = _load_marriages().get(uid_s, {}).get("spouse")
+        return _dash_name(sp) if sp and _is_member(None, sp) else None
+    section("spouse", _spouse)
+
+    def _fmk():
+        verdicts = _load_json_file(FMK_FILE, {"verdicts": []}).get("verdicts", [])
+        by = {"fuck": [], "marry": [], "kill": []}
+        for v in verdicts:
+            ch = v.get("chooser")
+            if not ch or ch == uid_s or not _is_member(None, ch):
+                continue   # skip self-verdicts and choosers who left (same rule as _fmkme)
+            for k in by:
+                if v.get(k) == uid_s and ch not in by[k]:
+                    by[k].append(ch)
+        return {k: {"count": len(ids), "names": [_dash_name(i) for i in ids[:12]]}
+                for k, ids in by.items()}
+    section("fmk", _fmk)
+
+    def _achievements():
+        earned_ids = set(_get_achievements(uid))
+        earned, locked = [], []
+        for aid, a in ACHIEVEMENTS.items():
+            row = {"emoji": a.get("emoji", "🏆"), "name": a.get("name", aid), "desc": a.get("desc", "")}
+            (earned if aid in earned_ids else locked).append(row)
+        return {"earned": earned, "locked": locked[:6], "total": len(ACHIEVEMENTS)}
+    section("achievements", _achievements)
+
+    def _memory():
+        rec = get_member_dossier(uid)
+        off = bool(rec.get("opted_out")) or uid in _MEM_OPTED_OUT
+        return {"opted_out": off,
+                "summary": "" if off else (rec.get("summary") or ""),
+                "do_not_mention": list(rec.get("do_not_mention", []))}
+    section("memory", _memory)
+
+    return out
+
+
+def dashboard_profile_provider(uid: int) -> dict:
+    """Called from the web dashboard's thread. Runs the gather on the bot's event
+    loop so it never races the bot's own reads/writes."""
+    fut = None
+    try:
+        if not client.is_ready():
+            return {"ok": False, "error": "Jordan is still starting up. Refresh in a minute."}
+        fut = asyncio.run_coroutine_threadsafe(_gather_dashboard_profile(int(uid)), client.loop)
+        return fut.result(timeout=10)
+    except TimeoutError:
+        if fut is not None:
+            fut.cancel()
+        return {"ok": False, "error": "Your file took too long to pull. Refresh to try again."}
+    except Exception:
+        log.exception("dashboard provider failed for %s", uid)
+        return {"ok": False, "error": "Couldn't load your dashboard. Refresh to try again."}
+
+
+async def _handle_mydash(message: discord.Message, rest: str):
+    """_mydash — link to your personal web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("📊 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"📊 **Your dashboard:** <{base}/me>\n"
+        "Log in with Discord. It shows your own stats, and only you can see it.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🖱️ RIGHT-CLICK (CONTEXT MENU) COMMANDS
 # Apps menu entries you reach by right-clicking a person or a message.
 # These live on Discord's SEPARATE context-menu limits (15 USER + 15 MESSAGE),
@@ -28645,6 +28900,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "memory", "mymemory", "whatdoyouknow", "forgetme", "wipeme", "forget", "forgetabout",
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
+    "mydash", "mydashboard", "myprofile",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -29793,6 +30049,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("sellme", "sellmethispen", "sellpen", "pitch", "pitchme"):
         await _handle_sellme(message, rest)
         return True
+    if cmd_name in ("mydash", "mydashboard", "myprofile"):
+        await _handle_mydash(message, rest)
+        return True
 
     # 🛠️ Custom Commands
     if cmd_name in ("makecommand", "createcommand", "newcommand", "addcommand"):
@@ -30484,7 +30743,11 @@ if __name__ == "__main__":
             port = int(os.environ.get("PORT", 8080))
             # Hand the dashboard our exact MEMORY_DIR so both halves read/write
             # the same files (verify tokens, stats, economy) — no path guessing.
-            t = threading.Thread(target=start_dashboard, args=(port, MEMORY_DIR), daemon=True)
+            # profile_provider lets the /me page pull ONE member's data via the bot's loop.
+            t = threading.Thread(
+                target=start_dashboard, args=(port, MEMORY_DIR),
+                kwargs={"profile_provider": dashboard_profile_provider}, daemon=True,
+            )
             t.start()
             log.info("Dashboard thread started on port %s", port)
     except ImportError as e:

@@ -75,6 +75,19 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("DASHBOARD_INSECURE", "") != "1"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 
+# Set by bot.py at startup: fn(user_id: int) -> dict with ONLY that member's data.
+# It runs the gather on the bot's own event loop, so this thread never touches
+# live bot state directly.
+_PROFILE_PROVIDER = None
+_ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
+_me_page_cache = {"html": None}
+
+
+def _me_page_html() -> str:
+    if _me_page_cache["html"] is None:
+        _me_page_cache["html"] = _ME_PAGE_PATH.read_text(encoding="utf-8")
+    return _me_page_cache["html"]
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 def is_logged_in() -> bool:
@@ -110,7 +123,8 @@ def index():
     if not is_logged_in():
         return redirect("/auth/login")
     if not is_admin():
-        return _render_denied()
+        # Every member gets their own dashboard; only admins see the admin one.
+        return redirect("/me")
     return _render_dashboard()
 
 
@@ -173,6 +187,42 @@ def auth_callback():
 def auth_logout():
     session.clear()
     return redirect("/")
+
+
+@app.route("/me")
+def me_page():
+    """Personal dashboard shell. Data comes from /api/me for the session's own user."""
+    if not is_logged_in():
+        return redirect("/auth/login")
+    try:
+        html = _me_page_html()
+    except Exception as e:
+        log.exception("me page template missing: %s", e)
+        return "Your dashboard page is missing from this deploy.", 500
+    resp = app.response_class(html, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/me")
+def api_me():
+    """The logged-in member's OWN data. Never takes a user id from the request —
+    the id always comes from the signed session, so nobody can view someone else."""
+    if not is_logged_in():
+        return jsonify({"ok": False, "error": "Log in to see your dashboard."}), 401
+    if _PROFILE_PROVIDER is None:
+        data = {"ok": False, "error": "Your dashboard isn't connected to the bot right now. Try again shortly."}
+    else:
+        try:
+            data = dict(_PROFILE_PROVIDER(int(session["user_id"])) or {})
+        except Exception:
+            log.exception("profile provider failed")
+            data = {"ok": False, "error": "Couldn't load your dashboard. Refresh to try again."}
+    data["is_admin"] = is_admin()
+    data["session_username"] = session.get("username", "")
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/health")
@@ -1140,7 +1190,7 @@ textarea.cm-input { line-height:1.5; }
 <header>
   <div>
     <h1>📊 Jordan Belfort — Analytics Dashboard</h1>
-    <div class="user-info" style="margin-top: 6px;">Logged in as <strong>__USERNAME__</strong><a href="/auth/logout">Logout</a></div>
+    <div class="user-info" style="margin-top: 6px;">Logged in as <strong>__USERNAME__</strong><a href="/me">My profile</a> <a href="/auth/logout">Logout</a></div>
   </div>
   <button onclick="loadStats()" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:8px 16px;border-radius:6px;cursor:pointer;">🔄 Refresh</button>
 </header>
@@ -2032,10 +2082,13 @@ def _rebind_memory_dir(memory_dir):
              MEMORY_DIR, MEMORY_DIR.exists())
 
 
-def start_dashboard(port: int = 8080, memory_dir=None):
+def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None):
     """Run the Flask server. Called from bot.py on a background thread."""
+    global _PROFILE_PROVIDER
     if memory_dir is not None:
         _rebind_memory_dir(memory_dir)
+    if profile_provider is not None:
+        _PROFILE_PROVIDER = profile_provider
     log.info("Starting dashboard on port %s", port)
     # Use waitress if available (production-quality), else Flask dev server
     try:
