@@ -27037,6 +27037,7 @@ async def on_ready():
         asyncio.create_task(_hydrate_loop())
         asyncio.create_task(_tagrole_sweep_loop())
         asyncio.create_task(_verify_queue_loop())
+        asyncio.create_task(_fmk_social_flush_loop())
         # Persistent verify button — re-registered so it works after restarts
         try:
             client.add_view(VerifyView())
@@ -27865,7 +27866,9 @@ class FMKView(discord.ui.View):
         else:
             desc = (f"💋 **Fuck:** <@{self.fuck_id}>\n\n"
                     f"💍 **Who do you Marry?**  _(whoever's left gets 🔪)_")
-        return discord.Embed(title="😈 Fuck · Marry · Kill", description=desc, color=FMK_COLOR)
+        e = discord.Embed(title="😈 Fuck · Marry · Kill", description=desc, color=FMK_COLOR)
+        e.set_footer(text="Change who you get: _fmkpref · Sit out: _fmk off")
+        return e
 
     async def _finish(self, interaction: discord.Interaction, kill_id: str):
         verdict = {
@@ -27917,18 +27920,259 @@ class FMKView(discord.ui.View):
             pass
 
 
+# ── FMK matchmaking ──────────────────────────────────────────────────────────
+# Who you get is no longer "any of 3,600 members". It's:
+#   1. ACTIVE  — people who've chatted (or used an economy command) recently
+#   2. FAMILIAR — weighted toward people YOU interact with (replies, @mentions,
+#                 chatting in the same channel at the same time)
+#   3. MATCHED — by gender/orientation roles, or the player's own _fmkpref
+#   4. CONSENTING — anyone who ran `_fmk off` is never drawn (and can't play)
+FMK_ROLE_MALE   = 1249000656350478387
+FMK_ROLE_FEMALE = 1249000739129528361
+FMK_ROLE_NB     = 1249000810465984663
+FMK_ROLE_HETERO = 1308056089773735987
+FMK_ROLE_HOMO   = 1308056234406051871
+FMK_ROLE_BI     = 1308056343961403422   # bisexual / pan
+FMK_ROLE_ACE    = 1308056406104215552
+FMK_ROLE_QUEER  = 1308056477298069545   # queer / fluid
+
+FMK_SOCIAL_FILE = MEMORY_DIR / "fmk_social.json"
+FMK_ACTIVE_DAYS = 7          # first try: active in the last week
+FMK_ACTIVE_DAYS_WIDE = 30    # fallback if that's too few
+FMK_TIE_DAYS = 30            # interactions older than this don't count as "your circle"
+FMK_COPRESENCE_SEC = 300     # chatting in the same channel within 5 min = a weak tie
+FMK_TIE_CAP = 60             # max ties kept per member (pruned to the strongest 40)
+FMK_PREFS = {"women": {"F"}, "men": {"M"}, "nonbinary": {"NB"}, "everyone": None}
+FMK_PREF_LABEL = {"F": "women", "M": "men", "NB": "non-binary members"}
+
+_fmk_social = {"loaded": False, "dirty": False, "last_seen": {}, "ties": {}}
+_fmk_chan_recent: dict[int, deque] = {}   # channel id -> recent (uid, ts) speakers
+
+
+def _fmk_social_load():
+    if _fmk_social["loaded"]:
+        return
+    data = _load_json_file(FMK_SOCIAL_FILE, {})
+    _fmk_social["last_seen"] = data.get("last_seen", {}) if isinstance(data, dict) else {}
+    _fmk_social["ties"] = data.get("ties", {}) if isinstance(data, dict) else {}
+    _fmk_social["loaded"] = True
+
+
+def _fmk_social_save():
+    try:
+        _save_json_file(FMK_SOCIAL_FILE, {"last_seen": _fmk_social["last_seen"],
+                                          "ties": _fmk_social["ties"]})
+        _fmk_social["dirty"] = False
+    except Exception:
+        log.exception("fmk social save failed")
+
+
+async def _fmk_social_flush_loop():
+    """Persist activity + ties every 5 minutes (only when something changed)."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(300)
+        if _fmk_social["loaded"] and _fmk_social["dirty"]:
+            _fmk_social_save()
+
+
+def _fmk_tie(a: int, b: int, weight: float, now: float, min_gap: float = 0):
+    """Strengthen the a<->b familiarity tie (both directions)."""
+    ties = _fmk_social["ties"]
+    for x, y in ((a, b), (b, a)):
+        rec = ties.setdefault(str(x), {})
+        cur = rec.get(str(y))
+        if cur and min_gap and now - cur[1] < min_gap:
+            continue
+        rec[str(y)] = [round((cur[0] if cur else 0) + weight, 2), now]
+        if len(rec) > FMK_TIE_CAP:
+            keep = sorted(rec.items(), key=lambda kv: kv[1][0], reverse=True)[:40]
+            ties[str(x)] = dict(keep)
+    _fmk_social["dirty"] = True
+
+
+def _fmk_track_activity(message: discord.Message):
+    """on_message hook: who's active, and who talks to whom. Cheap; never raises."""
+    try:
+        _fmk_social_load()
+        uid, now = message.author.id, time.time()
+        _fmk_social["last_seen"][str(uid)] = now
+        _fmk_social["dirty"] = True
+        # Replies are the strongest signal, @mentions next.
+        ref = message.reference
+        if ref is not None and isinstance(ref.resolved, discord.Message):
+            other = ref.resolved.author
+            if other and not other.bot and other.id != uid:
+                _fmk_tie(uid, other.id, 3, now)
+        for m in message.mentions[:5]:
+            if not m.bot and m.id != uid:
+                _fmk_tie(uid, m.id, 2, now)
+        # Same channel, same few minutes: a weak tie (throttled per pair).
+        dq = _fmk_chan_recent.setdefault(message.channel.id, deque(maxlen=25))
+        seen = set()
+        for other_id, ts in dq:
+            if other_id != uid and other_id not in seen and now - ts <= FMK_COPRESENCE_SEC:
+                seen.add(other_id)
+                _fmk_tie(uid, other_id, 1, now, min_gap=600)
+        dq.append((uid, now))
+    except Exception:
+        pass
+
+
+def _fmk_genders(member) -> set:
+    ids = {r.id for r in getattr(member, "roles", [])}
+    g = set()
+    if FMK_ROLE_MALE in ids: g.add("M")
+    if FMK_ROLE_FEMALE in ids: g.add("F")
+    if FMK_ROLE_NB in ids: g.add("NB")
+    return g
+
+
+def _fmk_targets(member, pref: str | None):
+    """Which genders this player draws. Returns (set of genders, or None for
+    everyone, plain-English reason)."""
+    if pref in FMK_PREFS:
+        return FMK_PREFS[pref], "your `_fmkpref`"
+    ids = {r.id for r in getattr(member, "roles", [])}
+    g = _fmk_genders(member)
+    open_roles = {FMK_ROLE_BI, FMK_ROLE_QUEER, FMK_ROLE_ACE}
+    if ids & open_roles or {FMK_ROLE_HETERO, FMK_ROLE_HOMO} <= ids:
+        return None, "your orientation role"
+    if FMK_ROLE_HOMO in ids and g in ({"M"}, {"F"}):
+        return set(g), "your gender and orientation roles"
+    if g == {"M"}:
+        return {"F"}, "your gender role"
+    if g == {"F"}:
+        return {"M"}, "your gender role"
+    return None, "your roles (no single gender role to match on)"
+
+
+def _fmk_last_active(uid: int) -> float:
+    """Most recent sign of life: a chat message, or an economy command."""
+    best = float(_fmk_social["last_seen"].get(str(uid), 0) or 0)
+    try:
+        cds = economy._data.get("users", {}).get(str(uid), {}).get("cooldowns", {})
+        for v in cds.values():
+            if isinstance(v, (int, float)) and v > best:
+                best = float(v)
+    except Exception:
+        pass
+    return best
+
+
+def _fmk_pick(chooser, members, targets, opted_out: set, now: float):
+    """Return (three members or None, how wide we had to look in days)."""
+    def eligible(days):
+        cutoff = now - days * 86400
+        out = []
+        for m in members:
+            if m.bot or m.id == chooser.id or str(m.id) in opted_out:
+                continue
+            if targets is not None and not (_fmk_genders(m) & targets):
+                continue
+            if _fmk_last_active(m.id) >= cutoff:
+                out.append(m)
+        return out
+
+    days = FMK_ACTIVE_DAYS
+    pool = eligible(days)
+    if len(pool) < 3:
+        days = FMK_ACTIVE_DAYS_WIDE
+        pool = eligible(days)
+    if len(pool) < 3:
+        return None, days
+
+    by_id = {m.id: m for m in pool}
+    tie_cut = now - FMK_TIE_DAYS * 86400
+    mine = _fmk_social["ties"].get(str(chooser.id), {})
+    circle = sorted(((int(o), rec[0]) for o, rec in mine.items()
+                     if int(o) in by_id and rec[1] >= tie_cut),
+                    key=lambda x: x[1], reverse=True)[:15]
+
+    picks = []
+    # Up to two from your circle (weighted by how much you interact)...
+    while circle and len(picks) < 2:
+        ids, weights = zip(*circle)
+        choice = random.choices(ids, weights=weights, k=1)[0]
+        picks.append(by_id[choice])
+        circle = [c for c in circle if c[0] != choice]
+    # ...the rest are wildcards from the active pool.
+    rest = [m for m in pool if m not in picks]
+    picks += random.sample(rest, 3 - len(picks))
+    random.shuffle(picks)
+    return picks, days
+
+
+async def _handle_fmkpref(message: discord.Message, rest: str):
+    """_fmkpref [women|men|nonbinary|everyone|auto] — who _fmk draws for you."""
+    if not message.guild:
+        return
+    uid = str(message.author.id)
+    arg = (rest or "").strip().lower()
+    alias = {"woman": "women", "female": "women", "females": "women", "girls": "women",
+             "man": "men", "male": "men", "males": "men", "guys": "men",
+             "nb": "nonbinary", "non-binary": "nonbinary", "enby": "nonbinary",
+             "all": "everyone", "anyone": "everyone", "reset": "auto", "default": "auto"}
+    arg = alias.get(arg, arg)
+    data = _load_json_file(FMK_FILE, {"verdicts": []})
+    prefs = data.setdefault("prefs", {})
+    if arg in FMK_PREFS or arg == "auto":
+        if arg == "auto":
+            prefs.pop(uid, None)
+        else:
+            prefs[uid] = arg
+        _save_json_file(FMK_FILE, data)
+    elif arg:
+        await message.channel.send("Use `_fmkpref women`, `men`, `nonbinary`, `everyone`, or `auto`.")
+        return
+    targets, why = _fmk_targets(message.author, prefs.get(uid))
+    who = "everyone" if targets is None else " and ".join(FMK_PREF_LABEL[t] for t in sorted(targets))
+    head = "Saved. " if arg else ""
+    await message.channel.send(
+        f"😈 {head}`_fmk` draws **{who}** for you, based on {why}.\n"
+        "Change it: `_fmkpref women` · `men` · `nonbinary` · `everyone` · `auto` (follow your roles)"
+    )
+
+
 async def _handle_fmk(message: discord.Message, rest: str):
-    """_fmk — get three random current members and pick Fuck / Marry / Kill."""
+    """_fmk — three people you actually know, matched to you. _fmk off/on to sit out."""
     if not message.guild:
         return
     chooser = message.author
-    # Eligible = CURRENT members only (guild.members excludes anyone who left),
-    # minus bots and the player themselves.
-    pool = [m for m in message.guild.members if not m.bot and m.id != chooser.id]
-    if len(pool) < 3:
-        await message.channel.send("Not enough people around to play FMK right now — need at least 3 others.")
+    uid = str(chooser.id)
+    data = _load_json_file(FMK_FILE, {"verdicts": []})
+    opted_out = set(data.get("opted_out", []))
+    arg = (rest or "").strip().lower()
+
+    if arg in ("off", "out", "optout", "stop"):
+        opted_out.add(uid)
+        data["opted_out"] = sorted(opted_out)
+        _save_json_file(FMK_FILE, data)
+        await message.channel.send(
+            "😈 You're out of FMK. Nobody will draw you, and you can't play until you're back in "
+            "with `_fmk on`. Past verdicts stay on the record."
+        )
         return
-    people = random.sample(pool, 3)
+    if arg in ("on", "in", "optin", "start"):
+        opted_out.discard(uid)
+        data["opted_out"] = sorted(opted_out)
+        _save_json_file(FMK_FILE, data)
+        await message.channel.send("😈 You're back in FMK. Run `_fmk` to play.")
+        return
+    if uid in opted_out:
+        await message.channel.send("You sat out of FMK, so you can't play. Get back in with `_fmk on`.")
+        return
+
+    _fmk_social_load()
+    targets, _why = _fmk_targets(chooser, data.get("prefs", {}).get(uid))
+    people, _days = _fmk_pick(chooser, message.guild.members, targets, opted_out, time.time())
+    if not people:
+        who = "people" if targets is None else " and ".join(FMK_PREF_LABEL[t] for t in sorted(targets))
+        await message.channel.send(
+            f"Not enough active {who} around right now to play. Try again later"
+            + ("." if targets is None else ", or widen it with `_fmkpref everyone`.")
+        )
+        return
     view = FMKView(chooser.id, people)
     try:
         sent = await message.channel.send(
@@ -28896,7 +29140,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "setname", "botname", "dropemoji", "setdropemoji", "suggest", "feature",
     "featurevote", "roadmap", "votes", "suggestions", "setcolor", "walletcolor",
     "setreadyimage", "readyimage", "setreadyimg", "readyimg", "setreadygif", "readygif", "setreadypic", "readypic",
-    "fmk", "fuckmarrykill", "fmkme", "fmkstats", "whofmk", "myfmk",
+    "fmk", "fuckmarrykill", "fmkme", "fmkstats", "whofmk", "myfmk", "fmkpref", "fmkprefs", "fmkpreference",
     "memory", "mymemory", "whatdoyouknow", "forgetme", "wipeme", "forget", "forgetabout",
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
@@ -30031,6 +30275,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("fmk", "fuckmarrykill"):
         await _handle_fmk(message, rest)
         return True
+    if cmd_name in ("fmkpref", "fmkprefs", "fmkpreference"):
+        await _handle_fmkpref(message, rest)
+        return True
     if cmd_name in ("fmkme", "fmkstats", "whofmk", "myfmk"):
         await _handle_fmkme(message, rest)
         return True
@@ -30435,6 +30682,9 @@ async def on_message(message: discord.Message):
     # ── 🏷️ Tag role: instant sync for active members (no-op unless mismatched) ──
     if isinstance(message.author, discord.Member) and not message.author.bot:
         asyncio.create_task(_tagrole_fix(message.author))
+    # ── 😈 FMK: track who's active and who talks to whom (in-memory, saved every 5 min)
+    if isinstance(message.author, discord.Member) and not message.author.bot and message.guild:
+        _fmk_track_activity(message)
     # ── 🧠 Member memory: buffer the SOURCE channel's human messages (keyed by uid).
     # Runs before channel gating so memory always reads this channel; in-memory only.
     if (isinstance(message.author, discord.Member) and not message.author.bot
