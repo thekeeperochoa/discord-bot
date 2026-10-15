@@ -3166,6 +3166,8 @@ ACHIEVEMENTS = {
     # ── Hidden / fun ─────────────────────────────────────────────────────────
     "lucky_7":       {"emoji":"7️⃣", "name":"Triple 7s",            "desc":"Hit 3x7️⃣ on slots",                        "reward":2500},
     "lieordie_pro":  {"emoji":"🤥", "name":"Detector",             "desc":"Win 10 /lieordie rounds",                  "reward":500},
+    "getaway_first": {"emoji":"🏃", "name":"Clean Getaway",        "desc":"Finish a run in The Getaway",              "reward":200},
+    "getaway_5k":    {"emoji":"🚨", "name":"Most Wanted",          "desc":"Run 5,000 m in one Getaway run",           "reward":2000},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -26634,6 +26636,294 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🏃 WEB GAME: THE GETAWAY — a 3-lane endless runner on the web dashboard.
+# The SERVER decides payouts; the browser only reports how long it survived and
+# how many coins it grabbed. Each run gets a server-made seed, and the course is
+# generated from that seed by the SAME algorithm here and in bot/web/getaway.html
+# (mulberry32 PRNG, integer-only decisions). So the server can rebuild any course
+# and know exactly how many coins existed on it. Distance is never trusted from
+# the browser: it's computed here from the run's duration, and the duration can't
+# exceed the real time since the server handed out the seed. Net effect: a
+# cheater can at most claim what a perfect player could earn in the same time,
+# and every run is capped per run and per day.
+# ─────────────────────────────────────────────────────────────────────────────
+WEB_GAMES_FILE = MEMORY_DIR / "web_games.json"
+GETAWAY_ROW = 4                # meters between course rows
+GETAWAY_START = 40             # first row's distance (a clean runway to start)
+GETAWAY_V0, GETAWAY_ACCEL, GETAWAY_VMAX = 10.0, 0.12, 22.0   # m/s, m/s², m/s
+GETAWAY_COIN_VALUE = 3         # bot coins per coin grabbed
+GETAWAY_DIST_BONUS = 20        # bot coins per 100 m
+GETAWAY_RUN_CAP = 2_500        # max payout per run (before Hype Train)
+GETAWAY_DAILY_CAP = 10_000     # max paid out per member per day (EST)
+GETAWAY_MIN_SECONDS = 3        # shorter runs pay nothing
+GETAWAY_RUN_TTL = 30 * 60      # an unfinished run expires after 30 minutes
+GETAWAY_XP_CAP = 60
+GETAWAY_RECORD_MIN = 1_000     # only announce new city records past this distance
+
+_getaway_runs: dict[int, dict] = {}       # uid -> active run
+_getaway_done: dict[str, dict] = {}       # run_id -> result (lets a retry get the same answer)
+_getaway_last_start: dict[int, float] = {}
+
+
+def _mulberry32(seed: int):
+    """Bit-exact Python port of the JS mulberry32 PRNG used by the game page."""
+    state = [seed & 0xFFFFFFFF]
+
+    def rnd() -> float:
+        state[0] = (state[0] + 0x6D2B79F5) & 0xFFFFFFFF
+        a = state[0]
+        t = ((a ^ (a >> 15)) * (1 | a)) & 0xFFFFFFFF
+        t = ((t + (((t ^ (t >> 7)) * (61 | t)) & 0xFFFFFFFF)) & 0xFFFFFFFF) ^ t
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+    return rnd
+
+
+def getaway_course(seed: int, n_rows: int) -> list:
+    """Rows of 3 lanes: '' empty, 'c' coin, 'b' barricade (jump), 's' scaffold
+    (slide), 'v' vehicle (switch lanes). MUST stay identical to genRows() in
+    bot/web/getaway.html — any change here needs the same change there."""
+    rng = _mulberry32(seed)
+    rows = []
+    coin_lane, coin_left, next_obs = 1, 0, 6
+    veh_until = [-1, -1, -1]
+    for i in range(n_rows):
+        row = ["", "", ""]
+        if i == next_obs:
+            span = 4 if i < 100 else (3 if i < 250 else 2)
+            next_obs = i + 4 + int(rng() * span)
+            if i > 150 and rng() < 0.25:
+                open_lane = int(rng() * 3)
+                for L in range(3):
+                    if L == open_lane:
+                        row[L] = "b" if rng() < 0.5 else "s"
+                    elif rng() < 0.7:
+                        row[L] = "v"
+                    else:
+                        row[L] = "b" if rng() < 0.5 else "s"
+            else:
+                two = rng() < (0.35 if i < 100 else 0.6)
+                free = int(rng() * 3)
+                lanes = [L for L in range(3) if L != free]
+                if not two:
+                    lanes = [lanes[int(rng() * 2)]]
+                for L in lanes:
+                    r = rng()
+                    row[L] = "v" if r < 0.45 else ("b" if r < 0.75 else "s")
+            for L in range(3):
+                if row[L] == "v":
+                    veh_until[L] = i + 1
+            if row[coin_lane] == "v":
+                opts = [L for L in range(3) if row[L] != "v"]
+                coin_lane = opts[int(rng() * len(opts))]
+        else:
+            if coin_left <= 0:
+                coin_left = 6 + int(rng() * 8)
+                if rng() < 0.5:
+                    coin_lane = int(rng() * 3)
+            if veh_until[coin_lane] < i and rng() < 0.92:
+                row[coin_lane] = "c"
+            coin_left -= 1
+        rows.append(row)
+    return rows
+
+
+def getaway_distance(seconds: float) -> float:
+    """Meters covered after `seconds` of running (speed ramps 10 -> 22 m/s)."""
+    t = max(0.0, float(seconds))
+    t_max = (GETAWAY_VMAX - GETAWAY_V0) / GETAWAY_ACCEL
+    if t <= t_max:
+        return GETAWAY_V0 * t + GETAWAY_ACCEL * t * t / 2
+    return GETAWAY_V0 * t_max + GETAWAY_ACCEL * t_max * t_max / 2 + GETAWAY_VMAX * (t - t_max)
+
+
+def getaway_max_coins(seed: int, distance: float) -> int:
+    """How many coins existed on this course up to `distance` (+1 row of slack
+    for the pickup window)."""
+    reach = distance + GETAWAY_ROW
+    if reach < GETAWAY_START:
+        return 0
+    n = int((reach - GETAWAY_START) // GETAWAY_ROW) + 1
+    return sum(row.count("c") for row in getaway_course(seed, n))
+
+
+def _web_games_load() -> dict:
+    data = _load_json_file(WEB_GAMES_FILE, {})
+    g = data.setdefault("getaway", {})
+    for k in ("best", "daily", "runs"):
+        g.setdefault(k, {})
+    return data
+
+
+def _getaway_today_earned(g: dict, uid_s: str) -> int:
+    rec = g["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _getaway_board(g: dict, uid_s: str) -> dict:
+    present = [(int(d), u) for u, d in g["best"].items() if _is_member(None, u)]
+    present.sort(reverse=True)
+    top = [{"name": _dash_name(u), "best": d, "you": u == uid_s} for d, u in present[:10]]
+    rank = next((i + 1 for i, (_, u) in enumerate(present) if u == uid_s), None)
+    return {"top": top, "rank": rank, "of": len(present)}
+
+
+async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) -> dict:
+    """All web-game actions, run on the bot's event loop."""
+    if game != "getaway":
+        return {"ok": False, "error": "Unknown game."}
+    uid_s = str(uid)
+    now = time.time()
+    economy._load()
+    data = _web_games_load()
+    g = data["getaway"]
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates a record
+        return {"ok": True, "best": int(g["best"].get(uid_s, 0)),
+                "balance": int(rec.get("balance", 0)) if rec else None,
+                "today": _getaway_today_earned(g, uid_s), "daily_cap": GETAWAY_DAILY_CAP,
+                "run_cap": GETAWAY_RUN_CAP, "coin_value": GETAWAY_COIN_VALUE,
+                "dist_bonus": GETAWAY_DIST_BONUS, "hype": int(hype_train_multiplier()),
+                "board": _getaway_board(g, uid_s)}
+
+    if action == "start":
+        if now - _getaway_last_start.get(uid, 0) < 2:
+            return {"ok": False, "error": "Slow down — one run at a time."}
+        _getaway_last_start[uid] = now
+        for rid in [r for r, res in _getaway_done.items() if now - res.get("_ts", 0) > 600]:
+            _getaway_done.pop(rid, None)
+        run = {"run_id": secrets.token_hex(12), "seed": random.getrandbits(32), "started": now}
+        _getaway_runs[uid] = run   # starting a new run abandons any unfinished one
+        return {"ok": True, "run_id": run["run_id"], "seed": run["seed"]}
+
+    if action == "finish":
+        run_id = str(payload.get("run_id", ""))
+        if run_id in _getaway_done and _getaway_done[run_id].get("_uid") == uid:
+            return {k: v for k, v in _getaway_done[run_id].items() if not k.startswith("_")}
+        run = _getaway_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That run isn't active anymore. Start a new one."}
+        if now - run["started"] > GETAWAY_RUN_TTL:
+            _getaway_runs.pop(uid, None)
+            return {"ok": False, "error": "That run expired. Start a new one."}
+        _getaway_runs.pop(uid, None)
+        try:
+            claimed_s = float(payload.get("duration_ms", 0)) / 1000.0
+            claimed_coins = int(payload.get("coins", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Bad run data."}
+        # Never trust the browser's clock beyond the real time since the seed went out.
+        seconds = max(0.0, min(claimed_s, now - run["started"]))
+        distance = int(getaway_distance(seconds))
+        coins = max(0, min(claimed_coins, getaway_max_coins(run["seed"], distance)))
+
+        if seconds < GETAWAY_MIN_SECONDS:
+            base = coin_part = dist_part = 0
+        else:
+            coin_part = coins * GETAWAY_COIN_VALUE
+            dist_part = (distance // 100) * GETAWAY_DIST_BONUS
+            base = min(coin_part + dist_part, GETAWAY_RUN_CAP)
+        hype = int(hype_train_multiplier())
+        today = _getaway_today_earned(g, uid_s)
+        left = max(0, GETAWAY_DAILY_CAP - today)
+        payout = max(0, min(base * hype, left))
+
+        balance = economy.balance(uid)
+        if payout > 0:
+            balance = economy.add(uid, payout, "web game: the getaway")
+            try:
+                track_economy_event("earned", payout)
+            except Exception:
+                pass
+        g["daily"][uid_s] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + payout}
+        g["runs"][uid_s] = int(g["runs"].get(uid_s, 0)) + 1
+        prev_best = int(g["best"].get(uid_s, 0))
+        new_best = distance > prev_best
+        prev_record = max([int(d) for u, d in g["best"].items() if u != uid_s and _is_member(None, u)] or [0])
+        if new_best:
+            g["best"][uid_s] = distance
+        _save_json_file(WEB_GAMES_FILE, data)
+        try:
+            track_command_use("getaway", uid)
+        except Exception:
+            pass
+
+        # XP + achievements flow through the normal systems; level-ups and unlocks
+        # announce in the notifications channel since there's no Discord channel here.
+        notif = None
+        try:
+            cid = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid)) if cid else None
+        except Exception:
+            notif = None
+        xp = min(GETAWAY_XP_CAP, distance // 50) if seconds >= GETAWAY_MIN_SECONDS else 0
+        if xp:
+            try:
+                await grant_xp(uid, xp, channel=notif)
+            except Exception:
+                log.exception("getaway xp failed")
+        unlocked = []
+        for ach_id, ok in (("getaway_first", seconds >= GETAWAY_MIN_SECONDS), ("getaway_5k", distance >= 5000)):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("getaway achievement failed")
+        if new_best and distance > prev_record and distance >= GETAWAY_RECORD_MIN and notif:
+            try:
+                await notif.send(
+                    f"🚨 **{_dash_name(uid)}** just outran the feds for **{distance:,} m** in "
+                    f"The Getaway — a new city record. `_getaway` to try and beat it.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+
+        result = {"ok": True, "distance": distance, "coins": coins, "seconds": round(seconds, 1),
+                  "coin_part": coin_part, "dist_part": dist_part, "capped": coin_part + dist_part > GETAWAY_RUN_CAP,
+                  "hype": hype, "payout": payout, "daily_capped": base * hype > left,
+                  "today": today + payout, "daily_cap": GETAWAY_DAILY_CAP, "balance": int(balance),
+                  "xp": int(xp), "best": max(prev_best, distance), "new_best": new_best,
+                  "achievements": unlocked, "board": _getaway_board(g, uid_s)}
+        _getaway_done[run_id] = {**result, "_uid": uid, "_ts": now}
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+def dashboard_game_provider(uid: int, game: str, action: str, payload: dict) -> dict:
+    """Called from the web thread; runs the game action on the bot's event loop."""
+    fut = None
+    try:
+        if not client.is_ready():
+            return {"ok": False, "error": "Jordan is still starting up. Try again in a minute."}
+        fut = asyncio.run_coroutine_threadsafe(
+            _web_game_dispatch(int(uid), str(game), str(action), dict(payload or {})), client.loop)
+        return fut.result(timeout=10)
+    except TimeoutError:
+        if fut is not None:
+            fut.cancel()
+        return {"ok": False, "error": "The server took too long. Try again."}
+    except Exception:
+        log.exception("web game provider failed")
+        return {"ok": False, "error": "Something went wrong on our end. Try again."}
+
+
+async def _handle_getaway(message: discord.Message, rest: str):
+    """_getaway — link to The Getaway on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🏃 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🏃 **The Getaway** — outrun the feds, grab coins, get paid: <{base}/games/getaway>\n"
+        f"Coins go straight to your balance (up to {GETAWAY_DAILY_CAP:,} a day).",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 📊 PERSONAL DASHBOARD — every member gets their own page on the web dashboard
 # (/me). The web server runs on its own thread while the bot's data lives on the
 # bot's event loop, so the web side never touches bot state directly: it calls
@@ -26853,6 +27143,12 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "summary": "" if off else (rec.get("summary") or ""),
                 "do_not_mention": list(rec.get("do_not_mention", []))}
     section("memory", _memory)
+
+    def _games():
+        g = _web_games_load()["getaway"]
+        return {"getaway": {"best": int(g["best"].get(uid_s, 0)), "runs": int(g["runs"].get(uid_s, 0)),
+                            "today": _getaway_today_earned(g, uid_s), "daily_cap": GETAWAY_DAILY_CAP}}
+    section("games", _games)
 
     return out
 
@@ -29144,7 +29440,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "memory", "mymemory", "whatdoyouknow", "forgetme", "wipeme", "forget", "forgetabout",
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
-    "mydash", "mydashboard", "myprofile",
+    "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -30299,6 +30595,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("mydash", "mydashboard", "myprofile"):
         await _handle_mydash(message, rest)
         return True
+    if cmd_name in ("getaway", "arcade", "webgames"):
+        await _handle_getaway(message, rest)
+        return True
 
     # 🛠️ Custom Commands
     if cmd_name in ("makecommand", "createcommand", "newcommand", "addcommand"):
@@ -30996,7 +31295,8 @@ if __name__ == "__main__":
             # profile_provider lets the /me page pull ONE member's data via the bot's loop.
             t = threading.Thread(
                 target=start_dashboard, args=(port, MEMORY_DIR),
-                kwargs={"profile_provider": dashboard_profile_provider}, daemon=True,
+                kwargs={"profile_provider": dashboard_profile_provider,
+                        "game_provider": dashboard_game_provider}, daemon=True,
             )
             t.start()
             log.info("Dashboard thread started on port %s", port)

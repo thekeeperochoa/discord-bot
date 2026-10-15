@@ -79,6 +79,10 @@ app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 # It runs the gather on the bot's own event loop, so this thread never touches
 # live bot state directly.
 _PROFILE_PROVIDER = None
+# Set by bot.py: fn(user_id, game, action, payload) -> dict. Runs on the bot's loop;
+# the server there decides every payout (the browser only reports what happened).
+_GAME_PROVIDER = None
+_GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html"}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
@@ -220,6 +224,50 @@ def api_me():
             data = {"ok": False, "error": "Couldn't load your dashboard. Refresh to try again."}
     data["is_admin"] = is_admin()
     data["session_username"] = session.get("username", "")
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/games/<game>")
+def game_page(game):
+    if game not in _GAMES:
+        return "No such game.", 404
+    if not is_logged_in():
+        return redirect("/auth/login")
+    try:
+        html = _GAMES[game].read_text(encoding="utf-8")
+    except Exception:
+        log.exception("game page missing: %s", game)
+        return "This game is missing from this deploy.", 500
+    resp = app.response_class(html, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/games/<game>/<action>", methods=["GET", "POST"])
+def game_api(game, action):
+    """Game actions for the logged-in member only. POSTs must be JSON, which a
+    cross-site form can't send — together with the Lax session cookie that blocks
+    other sites from starting or finishing runs on someone's behalf."""
+    if not is_logged_in():
+        return jsonify({"ok": False, "error": "Log in to play."}), 401
+    allowed = {"info": "GET", "start": "POST", "finish": "POST"}
+    if game not in _GAMES or allowed.get(action) != request.method:
+        return jsonify({"ok": False, "error": "Not found."}), 404
+    if request.method == "POST" and not request.is_json:
+        return jsonify({"ok": False, "error": "Expected JSON."}), 415
+    payload = request.get_json(silent=True) if request.method == "POST" else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if _GAME_PROVIDER is None:
+        data = {"ok": False, "error": "Games aren't connected to the bot right now. Try again shortly."}
+    else:
+        try:
+            data = dict(_GAME_PROVIDER(int(session["user_id"]), game, action, payload) or {})
+        except Exception:
+            log.exception("game provider failed")
+            data = {"ok": False, "error": "Something went wrong. Try again."}
     resp = jsonify(data)
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -2082,9 +2130,11 @@ def _rebind_memory_dir(memory_dir):
              MEMORY_DIR, MEMORY_DIR.exists())
 
 
-def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None):
+def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None, game_provider=None):
     """Run the Flask server. Called from bot.py on a background thread."""
-    global _PROFILE_PROVIDER
+    global _PROFILE_PROVIDER, _GAME_PROVIDER
+    if game_provider is not None:
+        _GAME_PROVIDER = game_provider
     if memory_dir is not None:
         _rebind_memory_dir(memory_dir)
     if profile_provider is not None:

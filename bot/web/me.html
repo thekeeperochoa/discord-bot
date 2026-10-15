@@ -360,6 +360,16 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     return h+'<p class="sub" style="margin-top:10px">To change it, use <code>_forget &lt;thing&gt;</code> or <code>_memory off</code> in Discord.</p>';
   }
 
+  function games(g){
+    var x = g && g.getaway;
+    var h = '<ul class="rows"><li><span class="r-main">🏃 The Getaway <span class="r-dim">outrun the feds</span></span>' +
+            '<span class="r-side"><a href="/games/getaway">Play</a></span></li></ul>';
+    if (!x) return h;
+    h += '<p class="sub" style="margin-top:8px">' + (x.best ? 'Best run ' + n(x.best) + ' m. ' : 'No runs yet. ') +
+         'Paid today ' + n(x.today) + ' of ' + n(x.daily_cap) + '.</p>';
+    return h;
+  }
+
   function sec(title, body){ return '<section class="sec"><h2>'+title+'</h2>'+body+'</section>'; }
 
   function render(d){
@@ -376,6 +386,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
           sec("Your record", record(d.record)) +
         '</div><div>' +
           sec("Your web", web(d)) +
+          sec("Games", games(d.games)) +
           sec("Achievements", achievements(d.achievements)) +
           sec("What Jordan remembers", memory(d.memory)) +
         '</div></div>';
