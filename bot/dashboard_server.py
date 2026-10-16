@@ -83,9 +83,11 @@ _PROFILE_PROVIDER = None
 # the server there decides every payout (the browser only reports what happened).
 _GAME_PROVIDER = None
 _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
-          "pumpdump": Path(__file__).resolve().parent / "web" / "pumpdump.html"}
+          "pumpdump": Path(__file__).resolve().parent / "web" / "pumpdump.html",
+          "videopoker": Path(__file__).resolve().parent / "web" / "videopoker.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
-                 "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"}}
+                 "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
+                 "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 

@@ -3170,6 +3170,8 @@ ACHIEVEMENTS = {
     "getaway_5k":    {"emoji":"🚨", "name":"Most Wanted",          "desc":"Run 5,000 m in one Getaway run",           "reward":2000},
     "pnd_first":     {"emoji":"📈", "name":"Penny Stock Pro",      "desc":"Finish a round of Pump & Dump",            "reward":200},
     "pnd_double":    {"emoji":"💸", "name":"Doubled Up",           "desc":"Make +100% in one Pump & Dump round",      "reward":2000},
+    "vp_quads":      {"emoji":"🃏", "name":"Four of a Kind",       "desc":"Hit four of a kind or better in Video Poker", "reward":1000},
+    "vp_royal":      {"emoji":"👑", "name":"Royal Flush",          "desc":"Hit a royal flush in Video Poker",          "reward":10000},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -7235,6 +7237,7 @@ async def casino_command(interaction: discord.Interaction):
     embed.add_field(name="🎯 /gun",               value="Russian roulette w/ friends", inline=False)
     embed.add_field(name="💰 /heist",             value="Rob a bank with your crew", inline=False)
     embed.add_field(name="💸 /rob `<user>`",      value="Pickpocket someone", inline=False)
+    embed.add_field(name="🎴 `_videopoker`",       value="Jacks or Better on the web dashboard • royal flush pays 800x", inline=False)
     bal = economy.balance(interaction.user.id)
     embed.set_footer(text=f"💰 Your balance: {bal:,} coins")
     await interaction.response.send_message(embed=embed)
@@ -26754,6 +26757,7 @@ def _web_games_load() -> dict:
         g = data.setdefault(game, {})
         for k in ("best", "daily", "runs"):
             g.setdefault(k, {})
+    _vp_store(data)
     return data
 
 
@@ -26774,6 +26778,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
     """All web-game actions, run on the bot's event loop."""
     if game == "pumpdump":
         return await _pnd_dispatch(uid, action, payload)
+    if game == "videopoker":
+        return await _vp_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27253,7 +27259,251 @@ async def _handle_arcade(message: discord.Message, rest: str):
         "🕹️ **The Arcade** — play in your browser, get paid in coins:\n"
         f"🏃 **The Getaway** — outrun the feds down Wall Street: <{base}/games/getaway>\n"
         f"📈 **Pump & Dump** — trade a penny stock for 60 seconds: <{base}/games/pumpdump>\n"
+        f"🃏 **Video Poker** — Jacks or Better, royal flush pays 800×: <{base}/games/videopoker>\n"
         f"Your stats are on your dashboard: <{base}/me>",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🃏 WEB GAME: VIDEO POKER (Jacks or Better, 8/5 pay table) — real coin bets.
+# Deal 5, hold any, draw once. Everything is decided on the server: the bet is
+# taken on the deal, the deck lives here, and the page only says which cards to
+# hold. Provably fair: before each hand the page is shown sha256(server_seed)
+# (the "seal"). The deck order is the 52 cards sorted by
+# sha256(f"{server_seed}:{client_seed}:{card}"), with client_seed chosen by the
+# page at deal time. After the draw the server seed is revealed so anyone can
+# check the deck was fixed before they played and wasn't changed after.
+# RTP with perfect strategy is 97.3%, so over time it takes more than it pays.
+# ─────────────────────────────────────────────────────────────────────────────
+VP_MIN_BET = 10
+VP_MAX_BET = 50_000
+VP_RANKS = "23456789TJQKA"
+VP_SUITS = "SHDC"
+VP_CARDS = [r + s for s in VP_SUITS for r in VP_RANKS]
+VP_PAYTABLE = [  # (key, name, multiplier of the bet; "jacks" just returns the bet)
+    ("royal", "Royal Flush", 800), ("sflush", "Straight Flush", 50), ("quads", "Four of a Kind", 25),
+    ("full", "Full House", 8), ("flush", "Flush", 5), ("straight", "Straight", 4),
+    ("trips", "Three of a Kind", 3), ("twopair", "Two Pair", 2), ("jacks", "Jacks or Better", 1),
+]
+VP_PAY = {k: (name, mult) for k, name, mult in VP_PAYTABLE}
+VP_ANNOUNCE_WIN = 250_000      # announce any single win this big (royal flushes always)
+_vp_last_deal: dict[int, float] = {}
+
+
+def vp_deck(server_seed: str, client_seed: str) -> list:
+    """The hand's full deck order. Mirrored in bot/web/videopoker.html for verification."""
+    return sorted(VP_CARDS, key=lambda c: hashlib.sha256(f"{server_seed}:{client_seed}:{c}".encode()).hexdigest())
+
+
+def vp_eval(cards: list) -> tuple:
+    """(key or None, indices of the cards that make the hand)."""
+    ranks = [VP_RANKS.index(c[0]) for c in cards]
+    counts = {r: ranks.count(r) for r in set(ranks)}
+    shape = sorted(counts.values(), reverse=True)
+    flush = len({c[1] for c in cards}) == 1
+    uniq = sorted(set(ranks))
+    straight = len(uniq) == 5 and (uniq[-1] - uniq[0] == 4 or uniq == [0, 1, 2, 3, 12])
+    every = [0, 1, 2, 3, 4]
+    paired = [i for i, r in enumerate(ranks) if counts[r] >= 2]
+    if straight and flush:
+        return ("royal" if uniq == [8, 9, 10, 11, 12] else "sflush"), every
+    if shape[0] == 4:
+        return "quads", [i for i, r in enumerate(ranks) if counts[r] == 4]
+    if shape == [3, 2]:
+        return "full", every
+    if flush:
+        return "flush", every
+    if straight:
+        return "straight", every
+    if shape[0] == 3:
+        return "trips", [i for i, r in enumerate(ranks) if counts[r] == 3]
+    if shape == [2, 2, 1]:
+        return "twopair", paired
+    if shape[0] == 2 and max(r for r in counts if counts[r] == 2) >= VP_RANKS.index("J"):
+        return "jacks", paired
+    return None, []
+
+
+def _vp_store(data: dict) -> dict:
+    g = data.setdefault("videopoker", {})
+    for k in ("stats", "seeds", "active", "last"):
+        g.setdefault(k, {})
+    return g
+
+
+def _vp_next_seal(g: dict, uid_s: str) -> str:
+    """Make sure this player has a sealed seed waiting for their next hand; return its hash."""
+    if uid_s not in g["seeds"]:
+        g["seeds"][uid_s] = secrets.token_hex(32)
+    return hashlib.sha256(g["seeds"][uid_s].encode()).hexdigest()
+
+
+def _vp_board(g: dict, uid_s: str) -> dict:
+    rows = [(int(s.get("best_win", 0)), u, s.get("best_hand")) for u, s in g["stats"].items()
+            if int(s.get("best_win", 0)) > 0 and _is_member(None, u)]
+    rows.sort(reverse=True)
+    top = [{"name": _dash_name(u), "win": w, "hand": VP_PAY.get(h, ("", 0))[0], "you": u == uid_s} for w, u, h in rows[:10]]
+    return {"top": top}
+
+
+def _vp_public_stats(g: dict, uid_s: str) -> dict:
+    s = g["stats"].get(uid_s, {})
+    return {"hands": int(s.get("hands", 0)), "wagered": int(s.get("wagered", 0)), "won": int(s.get("won", 0)),
+            "best_win": int(s.get("best_win", 0)), "royals": int(s.get("royals", 0))}
+
+
+async def _vp_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    data = _web_games_load()
+    g = _vp_store(data)
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
+        fresh = uid_s not in g["seeds"]
+        seal = _vp_next_seal(g, uid_s)
+        if fresh:
+            _save_json_file(WEB_GAMES_FILE, data)
+        act = g["active"].get(uid_s)
+        return {"ok": True, "balance": int(rec.get("balance", 0)) if rec else 0,
+                "min_bet": VP_MIN_BET, "max_bet": VP_MAX_BET,
+                "paytable": [{"key": k, "name": nm, "mult": m} for k, nm, m in VP_PAYTABLE],
+                "seal": seal, "stats": _vp_public_stats(g, uid_s), "board": _vp_board(g, uid_s),
+                "active": None if not act else {"hand_id": act["hand_id"], "cards": act["deck"][:5], "bet": act["bet"],
+                                                 "seal": act["seal"], "client_seed": act["client_seed"],
+                                                 "dealt": act["dealt"], "dealt_idx": act["dealt_idx"]}}
+
+    if action == "deal":
+        act = g["active"].get(uid_s)
+        if act:
+            return {"ok": False, "error": "Finish the hand you already have first.", "resume": True}
+        if now - _vp_last_deal.get(uid, 0) < 0.4:
+            return {"ok": False, "error": "Easy — one hand at a time."}
+        try:
+            bet = int(payload.get("bet", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Pick a bet."}
+        if bet < VP_MIN_BET or bet > VP_MAX_BET:
+            return {"ok": False, "error": f"Bets are {VP_MIN_BET:,} to {VP_MAX_BET:,} coins."}
+        bal = economy.balance(uid)
+        if bet > bal:
+            return {"ok": False, "error": f"You only have {bal:,} coins.", "balance": int(bal)}
+        _vp_last_deal[uid] = now
+        client_seed = re.sub(r"[^A-Za-z0-9]", "", str(payload.get("client_seed", "")))[:32] or secrets.token_hex(8)
+        seal = _vp_next_seal(g, uid_s)
+        server_seed = g["seeds"].pop(uid_s)
+        deck = vp_deck(server_seed, client_seed)
+        dealt, dealt_idx = vp_eval(deck[:5])
+        balance = economy.add(uid, -bet, "video poker bet")
+        hand = {"hand_id": secrets.token_hex(8), "bet": bet, "deck": deck, "server_seed": server_seed,
+                "client_seed": client_seed, "seal": seal, "dealt": dealt, "dealt_idx": dealt_idx, "ts": now}
+        g["active"][uid_s] = hand
+        _vp_next_seal(g, uid_s)
+        _save_json_file(WEB_GAMES_FILE, data)   # the bet is taken: persist the hand so a restart can't eat it
+        return {"ok": True, "hand_id": hand["hand_id"], "cards": deck[:5], "bet": bet, "balance": int(balance),
+                "seal": seal, "client_seed": client_seed, "dealt": dealt, "dealt_idx": dealt_idx}
+
+    if action == "draw":
+        hand_id = str(payload.get("hand_id", ""))
+        last = g["last"].get(uid_s)
+        if last and last.get("hand_id") == hand_id:
+            return last                                   # a retried draw gets the same answer
+        act = g["active"].get(uid_s)
+        if not act or act["hand_id"] != hand_id:
+            return {"ok": False, "error": "That hand is already over."}
+        hold = payload.get("hold")
+        if not isinstance(hold, list) or len(hold) != 5:
+            return {"ok": False, "error": "Bad hold."}
+        hold = [bool(h) for h in hold]
+        deck, nxt, final = act["deck"], 5, []
+        for i in range(5):
+            if hold[i]:
+                final.append(deck[i])
+            else:
+                final.append(deck[nxt])
+                nxt += 1
+        key, win_idx = vp_eval(final)
+        bet = int(act["bet"])
+        mult = VP_PAY[key][1] if key else 0
+        payout = bet * mult
+        balance = economy.add(uid, payout, "video poker win") if payout else economy.balance(uid)
+        del g["active"][uid_s]
+
+        s = g["stats"].setdefault(uid_s, {})
+        s["hands"] = int(s.get("hands", 0)) + 1
+        s["wagered"] = int(s.get("wagered", 0)) + bet
+        s["won"] = int(s.get("won", 0)) + payout
+        if key == "royal":
+            s["royals"] = int(s.get("royals", 0)) + 1
+        new_best = payout > bet and payout > int(s.get("best_win", 0))
+        prev_record = max([int(x.get("best_win", 0)) for u, x in g["stats"].items() if u != uid_s and _is_member(None, u)] or [0])
+        if new_best:
+            s["best_win"], s["best_hand"] = payout, key
+
+        notif = None
+        try:
+            cid = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid)) if cid else None
+        except Exception:
+            notif = None
+        # Shared casino bookkeeping: wins/losses, quests, tournaments, achievements.
+        try:
+            if payout > bet:
+                economy.record_win(uid, "videopoker", notif)
+                track_quest_progress(uid, "games_won")
+                track_quest_progress(uid, "coins_earned", payout - bet)
+                add_tournament_score(uid, coins_earned=payout - bet, games_won=1)
+            elif payout == 0:
+                economy.record_loss(uid, "videopoker", notif)
+            else:
+                track_quest_progress(uid, "games_played")
+            track_command_use("videopoker", uid)
+        except Exception:
+            log.exception("video poker bookkeeping failed")
+        unlocked = []
+        for ach_id, ok in (("vp_quads", key in ("quads", "sflush", "royal")), ("vp_royal", key == "royal")):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("video poker achievement failed")
+        if notif and (key == "royal" or payout >= VP_ANNOUNCE_WIN):
+            try:
+                what = "a **ROYAL FLUSH**" if key == "royal" else f"**{VP_PAY[key][0]}**"
+                await notif.send(
+                    f"🃏 **{_dash_name(uid)}** just hit {what} in Video Poker for **{payout:,}** coins"
+                    f"{' — a new casino record' if payout > prev_record else ''}. `_videopoker` to take a seat.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+
+        seal = _vp_next_seal(g, uid_s)
+        result = {"ok": True, "hand_id": hand_id, "cards": final, "held": hold, "hand": key,
+                  "hand_name": VP_PAY[key][0] if key else "No win", "mult": mult, "win_idx": win_idx,
+                  "bet": bet, "payout": payout, "net": payout - bet, "balance": int(balance),
+                  "server_seed": act["server_seed"], "client_seed": act["client_seed"], "seal": act["seal"],
+                  "next_seal": seal, "new_best": new_best, "achievements": unlocked,
+                  "stats": _vp_public_stats(g, uid_s), "board": _vp_board(g, uid_s)}
+        g["last"][uid_s] = result
+        _save_json_file(WEB_GAMES_FILE, data)
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_videopoker(message: discord.Message, rest: str):
+    """_videopoker — link to Video Poker on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🃏 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
+        f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
+        f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -27518,7 +27768,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                             "today": _getaway_today_earned(g, uid_s), "daily_cap": GETAWAY_DAILY_CAP},
                 "pumpdump": {"best": round(int(pb) / 100, 1) if pb is not None else None,
                              "runs": int(p["runs"].get(uid_s, 0)),
-                             "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP}}
+                             "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP},
+                "videopoker": _vp_public_stats(data["videopoker"], uid_s)}
     section("games", _games)
 
     return out
@@ -29812,7 +30063,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
-    "pumpdump", "pnd", "pumpanddump",
+    "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -30972,6 +31223,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("pumpdump", "pnd", "pumpanddump"):
         await _handle_pumpdump(message, rest)
+        return True
+    if cmd_name in ("videopoker", "vp", "poker"):
+        await _handle_videopoker(message, rest)
         return True
     if cmd_name in ("arcade", "webgames"):
         await _handle_arcade(message, rest)

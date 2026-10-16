@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Video Poker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#0D2B21; --page-2:#143A2D; --line:rgba(184,146,58,.34); --rule:rgba(163,184,171,.14);
+  --gold:#B8923A; --gold-ink:#D9B86C; --gold-hi:#F3D27A; --text:#E6EDE7; --muted:#A3B8AB; --faint:#7B9486;
+  --felt:#0A2219; --felt-2:#0F2E22; --ok:#A6E6BF; --bad:#F0776C;
+  --card:#FBF8F1; --red:#C8322B; --black:#1B1B1F; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;min-height:100%}
+body{background:var(--page);color:var(--text);font:400 15px/1.5 "IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  font-variant-numeric:tabular-nums;-webkit-tap-highlight-color:transparent}
+a{color:var(--gold-ink);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--gold-ink);outline-offset:3px;border-radius:4px}
+.wrap{max-width:760px;margin:0 auto;padding:0 12px 40px}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 2px}
+.bar h1{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.05rem;margin:0}
+.bar a,.bar .bal{font-size:14px}
+.bar .bal{color:var(--muted)} .bar .bal b{color:var(--text);font-family:var(--mono);font-weight:600}
+
+/* the machine */
+.machine{background:radial-gradient(120% 90% at 50% 0%,var(--felt-2),var(--felt) 70%);border:1px solid var(--line);border-radius:12px;
+  padding:14px 14px 16px;box-shadow:0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba(243,210,122,.12)}
+.pay{width:100%;border-collapse:collapse;font-size:13px;margin:0 0 12px}
+.pay td{padding:3px 8px;border-bottom:1px solid rgba(184,146,58,.12);white-space:nowrap}
+.pay tr:last-child td{border-bottom:0}
+.pay td:nth-child(2){color:var(--faint);font-family:var(--mono);text-align:right;width:1%}
+.pay td:nth-child(3){font-family:var(--mono);text-align:right;color:var(--gold-ink);width:1%}
+.pay tr.hit td{background:rgba(243,210,122,.16);color:var(--gold-hi)}
+.pay tr.hit td:first-child{box-shadow:inset 3px 0 0 var(--gold-hi)}
+.pay tr.flash td{animation:flash .5s steps(2) 4}
+@keyframes flash{50%{background:rgba(243,210,122,.38)}}
+
+.status{text-align:center;min-height:44px;display:flex;align-items:center;justify-content:center;flex-direction:column;margin:2px 0 8px}
+.status .big{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.35rem;line-height:1.2}
+.status .big.win{color:var(--gold-hi);text-shadow:0 0 22px rgba(243,210,122,.35)}
+.status .big.lose{color:var(--muted)}
+.status .sub{font-size:13px;color:var(--muted)}
+
+.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:clamp(6px,1.6vw,12px);margin:0 auto 12px;max-width:620px}
+.slot{display:flex;flex-direction:column;align-items:center;gap:6px}
+.held{font:600 11px/1 var(--mono);letter-spacing:.14em;color:#16261F;background:var(--gold-hi);padding:4px 7px;border-radius:3px;visibility:hidden}
+.slot.isheld .held{visibility:visible}
+.card{all:unset;display:block;width:100%;aspect-ratio:5/7;perspective:700px;cursor:pointer;border-radius:8px}
+.card:disabled{cursor:default}
+.card:focus-visible{outline:2px solid var(--gold-hi);outline-offset:3px}
+.inner{display:block;position:relative;width:100%;height:100%;transform-style:preserve-3d;transition:transform .32s cubic-bezier(.3,.7,.3,1)}
+.card.down .inner{transform:rotateY(180deg)}
+.face,.back{position:absolute;inset:0;border-radius:8px;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.face{background:var(--card);color:var(--black);box-shadow:0 6px 16px rgba(0,0,0,.35),inset 0 0 0 1px rgba(0,0,0,.08);overflow:hidden}
+.face.red{color:var(--red)}
+.slot.isheld .face{box-shadow:0 0 0 2px var(--gold-hi),0 8px 20px rgba(0,0,0,.4)}
+.slot.isheld .card .inner{transform:translateY(-4px)}
+.slot.isheld .card.down .inner{transform:rotateY(180deg)}
+.slot .face.win,.slot.isheld .face.win{box-shadow:0 0 0 2px var(--gold-hi),0 0 26px rgba(243,210,122,.55)}
+.face.dim{filter:brightness(.55) saturate(.6)}
+.corner{position:absolute;display:flex;flex-direction:column;align-items:center;line-height:1;font-weight:600}
+.corner .r{font:600 clamp(13px,3.6vw,22px)/1 "IBM Plex Serif",Georgia,serif}
+.corner .s{font-size:clamp(10px,2.8vw,17px);margin-top:1px}
+.corner.tl{top:6%;left:8%} .corner.br{bottom:6%;right:8%;transform:rotate(180deg)}
+.pip{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:clamp(26px,9vw,56px)}
+.court{position:absolute;inset:18% 16%;border:1px solid currentColor;border-radius:4px;opacity:.9;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:repeating-linear-gradient(135deg,rgba(184,146,58,.10) 0 4px,transparent 4px 8px)}
+.court b{font:600 clamp(22px,7vw,44px)/1 "IBM Plex Serif",Georgia,serif}
+.court i{font-style:normal;font-size:clamp(12px,3.4vw,20px);margin-top:2px}
+.back{transform:rotateY(180deg);background:
+  radial-gradient(circle at 50% 50%,rgba(243,210,122,.22),transparent 60%),
+  repeating-linear-gradient(45deg,rgba(243,210,122,.18) 0 2px,transparent 2px 10px),
+  repeating-linear-gradient(-45deg,rgba(243,210,122,.18) 0 2px,transparent 2px 10px),#123A2B;
+  box-shadow:0 6px 16px rgba(0,0,0,.35),inset 0 0 0 3px #0B261C,inset 0 0 0 4px rgba(243,210,122,.5);display:flex;align-items:center;justify-content:center}
+.back span{font:600 clamp(14px,4vw,22px)/1 "IBM Plex Serif",Georgia,serif;color:var(--gold-hi);border:1px solid rgba(243,210,122,.6);border-radius:50%;
+  width:2.2em;height:2.2em;display:flex;align-items:center;justify-content:center;background:#0E3125}
+
+.meter{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:4px 2px 10px}
+.meter small{display:block;font-size:11px;color:var(--muted)}
+.meter b{font:600 1.15rem/1.2 var(--mono)}
+.meter .w b{color:var(--gold-hi)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin:0 0 12px}
+.chip{font:600 13px/1 var(--mono);color:var(--gold-ink);background:transparent;border:1px solid var(--line);border-radius:999px;padding:9px 12px;cursor:pointer;min-width:52px}
+.chip.on{background:var(--gold);color:#16261F;border-color:var(--gold)}
+.chip:disabled{opacity:.35;cursor:not-allowed}
+.go{display:block;width:100%;font:600 18px/1 "IBM Plex Sans",sans-serif;background:linear-gradient(180deg,#CFA54A,#A9832F);color:#16261F;border:0;border-radius:8px;
+  padding:16px;cursor:pointer;box-shadow:0 4px 0 #6E5420,0 10px 24px rgba(0,0,0,.3);transition:transform .06s}
+.go:active{transform:translateY(2px);box-shadow:0 2px 0 #6E5420,0 6px 16px rgba(0,0,0,.3)}
+.go:disabled{opacity:.6;cursor:wait}
+.go small{display:block;font:500 11px/1 var(--mono);margin-top:5px;opacity:.7}
+.note{min-height:20px;text-align:center;font-size:13px;color:var(--bad);margin:8px 0 0}
+
+/* below the machine */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.box{background:rgba(9,26,20,.6);border:1px solid var(--rule);border-radius:10px;padding:14px}
+.box h2{font:600 1rem/1.2 "IBM Plex Serif",Georgia,serif;margin:0 0 8px}
+.facts{list-style:none;margin:0;padding:0}
+.facts li{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--rule);font-size:14px}
+.facts li:last-child{border-bottom:0}
+.facts .k{color:var(--muted)} .facts .v{font-family:var(--mono)}
+.board{list-style:none;margin:0;padding:0;counter-reset:r}
+.board li{display:flex;gap:8px;padding:5px 0;font-size:14px;border-bottom:1px solid var(--rule)}
+.board li:last-child{border-bottom:0}
+.board li::before{counter-increment:r;content:counter(r);width:1.4em;color:var(--faint);text-align:right;flex:none}
+.board .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.board .h{color:var(--faint);font-size:12px;margin-left:4px}
+.board .you{color:var(--gold-ink);font-weight:600}
+.board .v{font-family:var(--mono);color:var(--gold-ink)}
+details.fair{margin-top:12px}
+details.fair summary{cursor:pointer;font-weight:600;list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.fair summary::-webkit-details-marker{display:none}
+details.fair summary::after{content:"+";color:var(--gold-ink);font-family:var(--mono)}
+details.fair[open] summary::after{content:"−"}
+.fair p{font-size:13px;color:var(--muted);margin:8px 0}
+.hash{font:500 12px/1.45 var(--mono);word-break:break-all;color:var(--text);background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin:4px 0 8px}
+.fair label{font-size:12px;color:var(--muted);display:block}
+.fair input{width:100%;font:500 13px var(--mono);color:var(--text);background:rgba(0,0,0,.3);border:1px solid var(--rule);border-radius:6px;padding:8px}
+.ok{color:var(--ok)} .bad{color:var(--bad)}
+@media (max-width:560px){
+  .grid2{grid-template-columns:1fr}
+  .pay{font-size:12px} .pay td{padding:2px 6px}
+  .machine{padding:10px 10px 14px}
+  .chips{gap:5px}
+  .chip{min-width:0;padding:9px 8px;flex:1}
+}
+@media (prefers-reduced-motion:reduce){.inner{transition:none}.pay tr.flash td{animation:none}.go{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar"><a href="/me">Your dashboard</a><h1>Video Poker</h1><span class="bal">Balance <b id="bal">—</b></span></div>
+
+  <div class="machine">
+    <table class="pay" id="pay" aria-label="Pay table"></table>
+    <div class="status" id="status" aria-live="polite"><span class="big">Jacks or Better</span><span class="sub">Pick a bet and deal.</span></div>
+    <div class="cards" id="cards"></div>
+    <div class="meter">
+      <div><small>Bet</small><b id="mBet">—</b></div>
+      <div class="w" style="text-align:right"><small>Win</small><b id="mWin">0</b></div>
+    </div>
+    <div class="chips" id="chips" role="group" aria-label="Bet size"></div>
+    <button class="go" id="go" type="button" disabled>Deal<small>enter</small></button>
+    <p class="note" id="note"></p>
+  </div>
+
+  <div class="grid2">
+    <div class="box">
+      <h2>Your table</h2>
+      <ul class="facts">
+        <li><span class="k">Hands played</span><span class="v" id="sHands">0</span></li>
+        <li><span class="k">Net</span><span class="v" id="sNet">0</span></li>
+        <li><span class="k">Biggest win</span><span class="v" id="sBest">—</span></li>
+        <li><span class="k">Royal flushes</span><span class="v" id="sRoyals">0</span></li>
+      </ul>
+      <details class="fair" id="fair">
+        <summary>Provably fair</summary>
+        <p>Before you deal, the house locks in a secret seed and shows you its fingerprint (the seal). Your seed is mixed in when you deal, and the seed is revealed after the draw so your browser can check the deck wasn't changed.</p>
+        <label>Seal for your next hand</label><div class="hash" id="fSeal">—</div>
+        <label for="fClient">Your seed (change it any time before you deal)</label><input id="fClient" maxlength="32" autocomplete="off" spellcheck="false">
+        <div id="fLast"></div>
+      </details>
+    </div>
+    <div class="box">
+      <h2>Biggest wins</h2>
+      <ol class="board" id="board"><li><span class="n">Loading…</span></li></ol>
+      <p style="font-size:12px;color:var(--faint);margin:10px 0 0">Bets are real coins. With perfect play the table pays back 97.3% over time, so the house wins in the long run.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(id){ return document.getElementById(id); };
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function n(v){ return Math.round(Number(v || 0)).toLocaleString("en-US"); }
+function short(v){ return v >= 1000 ? (v % 1000 ? (v / 1000).toFixed(1) : v / 1000) + "K" : String(v); }
+function api(path, body){
+  return fetch(path, {method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
+    headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined})
+    .then(function(r){ if (r.status === 401){ location.href = "/auth/login"; throw new Error("login"); } return r.json(); });
+}
+var REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+var FLIP = REDUCED ? 0 : 320, STAGGER = REDUCED ? 0 : 85;
+function wait(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+function store(k, v){ try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// ── State ─────────────────────────────────────────────────────────────────────
+var info = null, phase = "idle", hand = null, held = [false, false, false, false, false], bet = 100, balance = 0;
+var CHIPS = [10, 100, 500, 1000, 5000, 10000, 50000];
+var SUIT = {S: "♠", H: "♥", D: "♦", C: "♣"}, SUITNAME = {S: "spades", H: "hearts", D: "diamonds", C: "clubs"};
+var RANKNAME = {"2":"Two","3":"Three","4":"Four","5":"Five","6":"Six","7":"Seven","8":"Eight","9":"Nine","T":"Ten","J":"Jack","Q":"Queen","K":"King","A":"Ace"};
+
+// ── Cards ─────────────────────────────────────────────────────────────────────
+var slots = [];
+(function build(){
+  var wrap = $("cards");
+  for (var i = 0; i < 5; i++){
+    var s = document.createElement("div"); s.className = "slot";
+    s.innerHTML = '<span class="held">HELD</span><button class="card down" type="button" disabled><span class="inner"><span class="face"></span><span class="back"><span>JB</span></span></span></button>';
+    (function(i){ s.querySelector(".card").addEventListener("click", function(){ toggle(i); }); })(i);
+    wrap.appendChild(s); slots.push(s);
+  }
+})();
+function faceHTML(c){
+  var r = c[0], s = SUIT[c[1]], label = r === "T" ? "10" : r;
+  var mid = "JQK".indexOf(r) >= 0 ? '<span class="court"><b>' + r + '</b><i>' + s + '</i></span>'
+          : '<span class="pip"' + (r === "A" ? ' style="font-size:clamp(34px,12vw,72px)"' : '') + '>' + s + '</span>';
+  return '<span class="corner tl"><span class="r">' + label + '</span><span class="s">' + s + '</span></span>' + mid +
+         '<span class="corner br"><span class="r">' + label + '</span><span class="s">' + s + '</span></span>';
+}
+function setFace(i, c){
+  var f = slots[i].querySelector(".face");
+  f.className = "face" + (c[1] === "H" || c[1] === "D" ? " red" : ""); f.innerHTML = faceHTML(c);
+  slots[i].querySelector(".card").setAttribute("data-card", c);
+}
+function label(i){
+  var b = slots[i].querySelector(".card"), c = b.getAttribute("data-card");
+  b.setAttribute("aria-label", c && !b.classList.contains("down") ? RANKNAME[c[0]] + " of " + SUITNAME[c[1]] + (held[i] ? ", held" : "") : "Face-down card");
+  b.setAttribute("aria-pressed", held[i] ? "true" : "false");
+}
+function flipDown(i){ slots[i].querySelector(".card").classList.add("down"); label(i); }
+function flipUp(i){ slots[i].querySelector(".card").classList.remove("down"); label(i); }
+function marks(winIdx, dimOthers){
+  for (var i = 0; i < 5; i++){
+    var f = slots[i].querySelector(".face"), w = winIdx && winIdx.indexOf(i) >= 0;
+    f.classList.toggle("win", !!w); f.classList.toggle("dim", !!(dimOthers && winIdx && winIdx.length && !w));
+  }
+}
+function renderHeld(){
+  for (var i = 0; i < 5; i++){
+    slots[i].classList.toggle("isheld", held[i]);
+    slots[i].querySelector(".card").disabled = phase !== "hold";
+    label(i);
+  }
+}
+function toggle(i){ if (phase !== "hold") return; held[i] = !held[i]; renderHeld(); }
+
+// ── Pay table, bet, meters ────────────────────────────────────────────────────
+function renderPay(hit, flash){
+  if (!info) return;
+  $("pay").innerHTML = info.paytable.map(function(p){
+    return '<tr data-k="' + p.key + '"' + (p.key === hit ? ' class="hit' + (flash ? ' flash' : '') + '"' : '') + '><td>' + esc(p.name) + '</td><td>×' + p.mult + '</td><td>' + n(p.mult * bet) + '</td></tr>';
+  }).join("");
+}
+function renderChips(){
+  $("chips").innerHTML = CHIPS.filter(function(c){ return !info || (c >= info.min_bet && c <= info.max_bet); }).map(function(c){
+    return '<button class="chip' + (c === bet ? ' on' : '') + '" type="button" data-v="' + c + '"' + (phase === "hold" || phase === "busy" || c > balance ? ' disabled' : '') + ' aria-pressed="' + (c === bet) + '">' + short(c) + '</button>';
+  }).join("");
+}
+$("chips").addEventListener("click", function(e){
+  var b = e.target.closest(".chip"); if (!b || b.disabled) return;
+  bet = Number(b.getAttribute("data-v")); store("vp_bet", String(bet)); refresh();
+});
+function refresh(hit, flash){
+  $("bal").textContent = n(balance); $("mBet").textContent = n(bet);
+  renderPay(hit, flash); renderChips(); renderHeld();
+  var go = $("go");
+  go.disabled = phase === "busy" || (phase !== "hold" && bet > balance);
+  go.innerHTML = (phase === "hold" ? "Draw" : "Deal") + "<small>enter</small>";
+}
+function status(big, sub, cls){ $("status").innerHTML = '<span class="big' + (cls ? " " + cls : "") + '">' + esc(big) + '</span>' + (sub ? '<span class="sub">' + esc(sub) + '</span>' : ''); }
+function note(msg){ $("note").textContent = msg || ""; }
+function countUp(el, to){
+  if (REDUCED || to <= 0){ el.textContent = n(to); return; }
+  var t0 = performance.now(), dur = Math.min(1400, 400 + Math.log(to + 1) * 90);
+  (function step(t){ var k = Math.min(1, (t - t0) / dur); el.textContent = n(to * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); })(t0);
+}
+function renderStats(s){
+  if (!s) return;
+  $("sHands").textContent = n(s.hands);
+  var net = s.won - s.wagered; $("sNet").textContent = (net >= 0 ? "+" : "−") + n(Math.abs(net)); $("sNet").className = "v " + (net >= 0 ? "ok" : "bad");
+  $("sBest").textContent = s.best_win ? n(s.best_win) : "—"; $("sRoyals").textContent = n(s.royals);
+}
+function renderBoard(b){
+  if (!b || !b.top || !b.top.length){ $("board").innerHTML = '<li><span class="n">No big wins yet. Be the first.</span></li>'; return; }
+  $("board").innerHTML = b.top.map(function(r){
+    return '<li><span class="n' + (r.you ? ' you' : '') + '">' + esc(r.name) + '<span class="h">' + esc(r.hand) + '</span></span><span class="v">' + n(r.win) + '</span></li>'; }).join("");
+}
+
+// ── Provably fair ─────────────────────────────────────────────────────────────
+function randSeed(){ var a = new Uint8Array(8); (window.crypto || {}).getRandomValues ? crypto.getRandomValues(a) : a.forEach(function(_, i){ a[i] = Math.random() * 256; });
+  return Array.prototype.map.call(a, function(x){ return ("0" + x.toString(16)).slice(-2); }).join(""); }
+$("fClient").value = randSeed();
+function sha(s){
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function(buf){
+    return Array.prototype.map.call(new Uint8Array(buf), function(x){ return ("0" + x.toString(16)).slice(-2); }).join(""); });
+}
+var CARDS = []; "SHDC".split("").forEach(function(s){ "23456789TJQKA".split("").forEach(function(r){ CARDS.push(r + s); }); });
+function verify(r){
+  var box = $("fLast");
+  box.innerHTML = '<label>Last hand</label><div class="hash">seal ' + esc(r.seal) + '<br>server seed ' + esc(r.server_seed) + '<br>your seed ' + esc(r.client_seed) + '</div><p id="fVerdict">Checking…</p>';
+  if (!(window.crypto && crypto.subtle && window.TextEncoder)){ $("fVerdict").textContent = "Your browser can't check this here, but you can with any SHA-256 tool."; return; }
+  Promise.all([sha(r.server_seed)].concat(CARDS.map(function(c){ return sha(r.server_seed + ":" + r.client_seed + ":" + c); }))).then(function(h){
+    var sealOk = h[0] === r.seal, keyed = CARDS.map(function(c, i){ return [h[i + 1], c]; });
+    keyed.sort(function(a, b){ return a[0] < b[0] ? -1 : 1; });
+    var deck = keyed.map(function(x){ return x[1]; }), nxt = 5, ok = sealOk;
+    for (var i = 0; i < 5; i++){ var want = r.held[i] ? deck[i] : deck[nxt++]; if (want !== r.cards[i]) ok = false; }
+    $("fVerdict").innerHTML = ok ? '<span class="ok">✓ Verified.</span> The seal matches and the deck it locked in is exactly what you were dealt and drew.'
+                                 : '<span class="bad">✗ This hand didn\'t verify.</span> Screenshot this and tell an admin.';
+  }).catch(function(){ $("fVerdict").textContent = "Couldn't run the check in this browser."; });
+}
+
+// ── Play ──────────────────────────────────────────────────────────────────────
+function load(){
+  return api("/api/games/videopoker/info").then(function(d){
+    if (!d || d.ok === false){ note((d && d.error) || "Couldn't load the table."); return; }
+    info = d; balance = d.balance;
+    var saved = Number(store("vp_bet")); if (CHIPS.indexOf(saved) >= 0) bet = saved;
+    if (bet > balance){ var fit = CHIPS.filter(function(c){ return c <= balance && c >= d.min_bet; }); bet = fit.length ? fit[fit.length - 1] : d.min_bet; }
+    $("fSeal").textContent = d.seal; renderStats(d.stats); renderBoard(d.board);
+    if (d.active){                                  // pick up a hand that was dealt but never drawn
+      hand = d.active; bet = hand.bet; phase = "hold"; held = [false, false, false, false, false];
+      hand.cards.forEach(function(c, i){ setFace(i, c); flipUp(i); });
+      marks(hand.dealt_idx, false);
+      status(hand.dealt ? nameOf(hand.dealt) + " on the deal" : "Your hand is waiting", "Tap the cards to hold, then draw.");
+      refresh(hand.dealt);
+    } else {
+      phase = "idle"; refresh();
+      if (balance < d.min_bet) note("You need at least " + n(d.min_bet) + " coins to play.");
+    }
+  }).catch(function(e){ if (e.message !== "login") note("Couldn't reach the table."); });
+}
+function nameOf(k){ var p = info && info.paytable.filter(function(x){ return x.key === k; })[0]; return p ? p.name : ""; }
+async function deal(){
+  if (phase !== "idle" && phase !== "done") return;
+  note(""); phase = "busy"; refresh(); marks(null);
+  var seed = ($("fClient").value || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 32) || randSeed();
+  var downs = []; for (var i = 0; i < 5; i++){ if (!slots[i].querySelector(".card").classList.contains("down")){ flipDown(i); downs.push(i); } }
+  held = [false, false, false, false, false]; renderHeld(); $("mWin").textContent = "0";
+  status("Dealing…", "");
+  var req = api("/api/games/videopoker/deal", {bet: bet, client_seed: seed});
+  if (downs.length) await wait(FLIP);
+  var d;
+  try { d = await req; } catch (e){ if (e.message !== "login"){ note("Couldn't reach the table. Try again."); phase = "idle"; refresh(); } return; }
+  if (!d || d.ok === false){
+    if (d && d.balance != null) balance = d.balance;
+    if (d && d.resume){ await load(); return; }
+    note((d && d.error) || "Couldn't deal."); phase = "idle"; status("Jacks or Better", "Pick a bet and deal."); refresh(); return;
+  }
+  hand = d; balance = d.balance; $("fClient").value = randSeed();
+  for (i = 0; i < 5; i++){ setFace(i, d.cards[i]); flipUp(i); if (STAGGER) await wait(STAGGER); }
+  await wait(FLIP / 2);
+  phase = "hold"; marks(d.dealt_idx, false);
+  status(d.dealt ? nameOf(d.dealt) + " on the deal" : "Hold what you like", d.dealt ? "Hold it and draw for more." : "Tap the cards to hold, then draw.");
+  refresh(d.dealt);
+}
+async function draw(){
+  if (phase !== "hold") return;
+  note(""); phase = "busy"; refresh();
+  var swap = []; for (var i = 0; i < 5; i++) if (!held[i]){ flipDown(i); swap.push(i); }
+  status("Drawing…", "");
+  var req = api("/api/games/videopoker/draw", {hand_id: hand.hand_id, hold: held});
+  if (swap.length) await wait(FLIP);
+  var r;
+  try { r = await req; } catch (e){ if (e.message !== "login"){ note("Couldn't reach the table. Tap Draw to try again."); swap.forEach(flipUp); phase = "hold"; refresh(); } return; }
+  if (!r || r.ok === false){ note((r && r.error) || "Couldn't draw."); await load(); return; }
+  for (i = 0; i < 5; i++){ if (!held[i]){ setFace(i, r.cards[i]); flipUp(i); if (STAGGER) await wait(STAGGER); } }
+  await wait(FLIP / 2);
+  balance = r.balance; phase = "done"; marks(r.win_idx, true);
+  if (r.payout > 0){
+    status(r.hand_name + "!", r.net > 0 ? "You win " + n(r.payout) + " coins" + (r.mult > 1 ? " (" + r.mult + "× your bet)" : "") + "." : "Your bet comes back.", "win");
+    countUp($("mWin"), r.payout);
+  } else { status("No win", "Deal again?", "lose"); $("mWin").textContent = "0"; }
+  var extra = []; if (r.new_best) extra.push("New personal best"); (r.achievements || []).forEach(function(a){ extra.push("🏆 " + a); });
+  if (extra.length) $("status").insertAdjacentHTML("beforeend", '<span class="sub" style="color:var(--gold-ink)">' + esc(extra.join(" · ")) + '</span>');
+  refresh(r.hand, r.payout > r.bet);
+  renderStats(r.stats); renderBoard(r.board); $("fSeal").textContent = r.next_seal; verify(r);
+  if (navigator.vibrate && r.payout > r.bet && !REDUCED) try { navigator.vibrate([20, 40, 20]); } catch (e) {}
+}
+$("go").addEventListener("click", function(){ if (phase === "hold") draw(); else deal(); });
+window.addEventListener("keydown", function(e){
+  if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SUMMARY")) return;
+  if (e.key === "Enter" || e.key === " "){ if (e.target && e.target.classList && (e.target.classList.contains("card") || e.target.classList.contains("chip")) && e.key === " ") return;
+    e.preventDefault(); if (!$("go").disabled) $("go").click(); return; }
+  if (phase === "hold" && /^[1-5]$/.test(e.key)){ toggle(Number(e.key) - 1); return; }
+  if ((phase === "idle" || phase === "done") && (e.key === "ArrowLeft" || e.key === "ArrowRight")){
+    var opts = CHIPS.filter(function(c){ return c >= info.min_bet && c <= info.max_bet && c <= balance; }), at = opts.indexOf(bet);
+    if (!opts.length) return; at = Math.max(0, Math.min(opts.length - 1, (at < 0 ? 0 : at) + (e.key === "ArrowRight" ? 1 : -1)));
+    bet = opts[at]; store("vp_bet", String(bet)); refresh();
+  }
+});
+load();
+})();
+</script>
+</body>
+</html>
