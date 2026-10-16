@@ -26780,6 +26780,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _pnd_dispatch(uid, action, payload)
     if game == "videopoker":
         return await _vp_dispatch(uid, action, payload)
+    if game == "city":
+        return await _city_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27504,6 +27506,541 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🌃 THE CITY — the whole economy as one shared isometric night city on the web
+# dashboard (/city). Everyone's venues, businesses and properties stand on the
+# map in their district; you manage your own by tapping them.
+#
+# Parity with Discord is the rule: web actions don't reimplement anything. They
+# run the SAME command handlers Discord runs (/collectvenue, /stockliquor,
+# /realestate, _renovate, _claimturf, …) through a small adapter that looks like
+# a discord Interaction/Message. The real Member and guild are passed in, so
+# rank gates, prices, random events, achievements and quests all behave exactly
+# as in Discord. Whatever the command would have said is captured and shown on
+# the page instead of being posted to a channel.
+# ─────────────────────────────────────────────────────────────────────────────
+CITY_ACTION_GAP = 0.4          # seconds between actions per member
+_city_last_action: dict[int, float] = {}
+
+# Which district each kind of building stands in (districts = the turf corners).
+CITY_DISTRICT_OF = {
+    ("re", "studio"): "projects", ("re", "condo"): "projects", ("biz", "lemonade"): "projects", ("venue", "dive_bar"): "projects",
+    ("re", "townhouse"): "westside", ("re", "duplex"): "westside", ("biz", "barbershop"): "westside",
+    ("biz", "cafe"): "westside", ("venue", "sports_bar"): "westside",
+    ("biz", "foodtruck"): "trainyard", ("biz", "gym"): "trainyard", ("re", "loft"): "trainyard",
+    ("re", "beachhouse"): "docks", ("re", "island"): "docks", ("venue", "speakeasy"): "docks",
+    ("biz", "nightclub"): "downtown", ("biz", "casino"): "downtown", ("venue", "cocktail_lounge"): "downtown",
+    ("venue", "nightclub"): "downtown", ("re", "casino"): "downtown",
+    ("re", "mansion"): "uptown", ("re", "skytower"): "uptown", ("re", "penthouse"): "uptown",
+    ("biz", "techstartup"): "uptown", ("venue", "rooftop"): "uptown", ("venue", "mega_club"): "uptown",
+}
+
+
+def _city_district(kind: str, t: str) -> str:
+    return CITY_DISTRICT_OF.get((kind, t), "downtown")
+
+
+# ── The adapter: a Discord Interaction / Message whose output is captured ──────
+class _WebSink:
+    def __init__(self):
+        self.items: list[dict] = []
+
+    def put(self, content=None, embed=None, embeds=None, ephemeral=False, slot=None) -> int:
+        es = ([embed] if embed is not None else []) + list(embeds or [])
+        item = {"text": str(content) if content is not None else "",
+                "embeds": [e.to_dict() for e in es if hasattr(e, "to_dict")], "ephemeral": bool(ephemeral)}
+        if slot is not None and 0 <= slot < len(self.items):
+            self.items[slot] = item          # an edit replaces what that message said
+            return slot
+        self.items.append(item)
+        return len(self.items) - 1
+
+
+class _WebMsg:
+    def __init__(self, sink: _WebSink, slot: int):
+        self._sink, self._slot, self.id = sink, slot, 0
+
+    async def edit(self, content=None, *, embed=None, embeds=None, **kw):
+        self._sink.put(content, embed, embeds, slot=self._slot)
+
+    async def delete(self, *a, **kw):
+        pass
+
+    async def add_reaction(self, *a, **kw):
+        pass
+
+    async def reply(self, content=None, *, embed=None, embeds=None, **kw):
+        return _WebMsg(self._sink, self._sink.put(content, embed, embeds))
+
+
+class _WebTyping:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _WebChannel:
+    """Stands in for the channel: anything sent here is shown on the page, not posted."""
+    def __init__(self, sink: _WebSink, guild):
+        self._sink, self.guild, self.id, self.name = sink, guild, 0, "web"
+        self.mention = "#web"
+
+    async def send(self, content=None, *, embed=None, embeds=None, **kw):
+        return _WebMsg(self._sink, self._sink.put(content, embed, embeds))
+
+    def typing(self):
+        return _WebTyping()
+
+    def permissions_for(self, *a, **kw):
+        return discord.Permissions.none()
+
+
+class _WebResponse:
+    def __init__(self, sink: _WebSink):
+        self._sink, self._done = sink, False
+
+    def is_done(self):
+        return self._done
+
+    async def send_message(self, content=None, *, embed=None, embeds=None, ephemeral=False, **kw):
+        self._done = True
+        self._sink.put(content, embed, embeds, ephemeral)
+
+    async def defer(self, *a, **kw):
+        self._done = True
+
+    async def edit_message(self, content=None, *, embed=None, embeds=None, **kw):
+        self._done = True
+        self._sink.put(content, embed, embeds, slot=0)
+
+
+class _WebFollowup:
+    def __init__(self, sink: _WebSink):
+        self._sink = sink
+
+    async def send(self, content=None, *, embed=None, embeds=None, ephemeral=False, **kw):
+        return _WebMsg(self._sink, self._sink.put(content, embed, embeds, ephemeral))
+
+
+class _WebInteraction:
+    def __init__(self, member, sink: _WebSink):
+        self.user = member
+        self.guild = member.guild
+        self.guild_id = member.guild.id
+        self.client = client
+        self.channel = _WebChannel(sink, member.guild)
+        self.channel_id = 0
+        self.response = _WebResponse(sink)
+        self.followup = _WebFollowup(sink)
+        self.command = None
+        self.locale = None
+        self._sink = sink
+
+    async def edit_original_response(self, content=None, *, embed=None, embeds=None, **kw):
+        self._sink.put(content, embed, embeds, slot=0)
+        return _WebMsg(self._sink, 0)
+
+    async def original_response(self):
+        return _WebMsg(self._sink, 0)
+
+
+class _WebMessage:
+    """A stand-in prefix-command message from the member."""
+    def __init__(self, member, sink: _WebSink, content: str = ""):
+        self.author = member
+        self.guild = member.guild
+        self.channel = _WebChannel(sink, member.guild)
+        self.content = content
+        self.mentions, self.role_mentions, self.attachments = [], [], []
+        self.id, self.reference = 0, None
+        self._sink = sink
+
+    async def reply(self, content=None, *, embed=None, embeds=None, **kw):
+        return _WebMsg(self._sink, self._sink.put(content, embed, embeds))
+
+    async def add_reaction(self, *a, **kw):
+        pass
+
+    async def delete(self, *a, **kw):
+        pass
+
+
+_WEB_MENTION = re.compile(r"<@!?(\d+)>")
+
+
+def _web_clean(text: str) -> str:
+    """Mentions become @names (nobody gets pinged from the web)."""
+    return _WEB_MENTION.sub(lambda m: "@" + _dash_name(m.group(1)), text or "")
+
+
+def _web_output(sink: _WebSink) -> list:
+    out = []
+    for it in sink.items:
+        embeds = []
+        for e in it["embeds"]:
+            embeds.append({
+                "title": _web_clean(e.get("title", "")), "description": _web_clean(e.get("description", "")),
+                "fields": [{"name": _web_clean(f.get("name", "")), "value": _web_clean(f.get("value", ""))} for f in e.get("fields", [])],
+                "footer": _web_clean((e.get("footer") or {}).get("text", "")),
+            })
+        if it["text"] or embeds:
+            out.append({"text": _web_clean(it["text"])[:4000], "embeds": embeds, "private": it["ephemeral"]})
+    return out
+
+
+def _choice(v):
+    return discord.app_commands.Choice(name=str(v), value=v)
+
+
+async def _web_run_slash(member, command, **kwargs) -> list:
+    sink = _WebSink()
+    await command.callback(_WebInteraction(member, sink), **kwargs)
+    return _web_output(sink)
+
+
+async def _web_run_prefix(member, handler, rest: str = "") -> list:
+    sink = _WebSink()
+    await handler(_WebMessage(member, sink, rest), rest)
+    return _web_output(sink)
+
+
+# ── The snapshot ──────────────────────────────────────────────────────────────
+def _city_prop_id(p: dict) -> str:
+    """Properties have no id field, so identify them by type + purchase time."""
+    return f"{p.get('type')}@{int(p.get('purchased_at', 0))}"
+
+
+def _city_lock(uid: int, system: str):
+    try:
+        msg = _system_locked_message(uid, system)
+    except Exception:
+        msg = None
+    return _web_clean(msg) if msg else None
+
+
+def _city_state(uid: int) -> dict:
+    now = time.time()
+    uid_s = str(uid)
+    nl, bz, red, dealer = _load_nightlife(), _load_businesses(), _load_re(), _load_dealer()
+    try:
+        _re_update_market(red)
+    except Exception:
+        pass
+    names: dict[str, str] = {}
+
+    def name_of(u):
+        u = str(u)
+        if u not in names:
+            names[u] = _dash_name(u)
+        return names[u]
+
+    # Everyone's buildings (current members only), with just what the street can see
+    city = []
+    for owner, venues in nl.get("users", {}).items():
+        if not venues or not _is_member(None, owner):
+            continue
+        for i, v in enumerate(venues):
+            if v.get("type") not in VENUE_TYPES:
+                continue
+            city.append({"id": v.get("id") or f"v{owner}{i}", "k": "venue", "t": v["type"], "o": owner, "n": v.get("name", ""),
+                         "d": _city_district("venue", v["type"]),
+                         "closed": v.get("closed_until", 0) > now, "dry": not _venue_has_liquor(v),
+                         "hot": v.get("celebrity_until", 0) > now or v.get("packed_until", 0) > now, "rep": _venue_rep(v)})
+    for owner, bizs in bz.get("users", {}).items():
+        if not bizs or not _is_member(None, owner):
+            continue
+        for i, b in enumerate(bizs):
+            if b.get("type") not in BUSINESS_TYPES:
+                continue
+            city.append({"id": b.get("id") or f"b{owner}{i}", "k": "biz", "t": b["type"], "o": owner,
+                         "d": _city_district("biz", b["type"]), "lv": int(b.get("upgrade_level", 0)),
+                         "down": b.get("damaged_until", 0) > now})
+    for owner, props in red.get("users", {}).items():
+        if not props or not _is_member(None, owner):
+            continue
+        for p in props:
+            if p.get("type") not in PROPERTIES:
+                continue
+            _re_decay_condition(p)
+            city.append({"id": _city_prop_id(p), "k": "re", "t": p["type"], "o": owner, "d": _city_district("re", p["type"]),
+                         "cond": int(p.get("condition", 0)), "reno": int(p.get("reno_level", 0)), "bnb": bool(p.get("airbnb"))})
+    for b in city:
+        b["on"] = name_of(b["o"])
+
+    # Turf
+    crews = {}
+    try:
+        crews = _load_crews().get("crews", {})
+    except Exception:
+        pass
+    turf = []
+    for key, info in TERRITORIES.items():
+        c = dict(_territory_get(dealer, key))
+        _territory_regen(c)
+        ctl = c.get("controller")
+        crew = crews.get(c.get("crew")) if c.get("crew") else None
+        turf.append({"key": key, "name": info["name"], "emoji": info["emoji"], "claim_cost": info["claim_cost"],
+                     "bonus": info["income_bonus"], "owner": name_of(ctl) if ctl and _is_member(None, ctl) else None,
+                     "mine": ctl == uid_s, "crew": crew.get("tag") if crew else None, "defense": int(c.get("defense", 0))})
+
+    # Your own empire, in full
+    my_v = []
+    for i, v in enumerate(nl.get("users", {}).get(uid_s, [])):
+        info = VENUE_TYPES.get(v.get("type"))
+        if not info:
+            continue
+        staff = v.get("staff", [])
+        my_v.append({"id": v.get("id"), "slot": i + 1, "type": v["type"], "name": v.get("name", info["name"]),
+                     "tier": info["tier"], "income": _venue_income_per_hour(v), "overhead": _venue_overhead_per_hour(v),
+                     "pending": _venue_pending_income(v), "rep": _venue_rep(v), "rep_label": _venue_rep_label(_venue_rep(v)),
+                     "staff": {r: staff.count(r) for r in STAFF_ROLES if staff.count(r)}, "staff_n": len(staff),
+                     "max_staff": info["max_staff"], "liquor": {k: n for k, n in v.get("liquor", {}).items() if n > 0},
+                     "closed_until": v.get("closed_until", 0) if v.get("closed_until", 0) > now else 0,
+                     "celebrity_until": v.get("celebrity_until", 0) if v.get("celebrity_until", 0) > now else 0,
+                     "packed_until": v.get("packed_until", 0) if v.get("packed_until", 0) > now else 0,
+                     "lifetime": int(v.get("lifetime_revenue", 0)),
+                     "last_collected": v.get("last_collected", v.get("purchased_at", now))})
+    my_b = []
+    for i, b in enumerate(bz.get("users", {}).get(uid_s, [])):
+        info = BUSINESS_TYPES.get(b.get("type"))
+        if not info:
+            continue
+        lv = int(b.get("upgrade_level", 0))
+        my_b.append({"id": b.get("id"), "slot": i + 1, "type": b["type"], "level": lv, "max_level": BUSINESS_UPGRADE_MAX_LEVEL,
+                     "upgrade_cost": BUSINESS_UPGRADE_PRICE_PER_LEVEL * (lv + 1) if lv < BUSINESS_UPGRADE_MAX_LEVEL else None,
+                     "income": _business_income_per_hour(b), "pending": _business_pending_income(b),
+                     "employees": [{"id": str(e), "name": name_of(e)} for e in b.get("employees", [])],
+                     "max_employees": info["max_employees"],
+                     "damaged_until": b.get("damaged_until", 0) if b.get("damaged_until", 0) > now else 0,
+                     "lifetime": int(b.get("lifetime_earned", 0))})
+    my_p = []
+    for i, p in enumerate(red.get("users", {}).get(uid_s, [])):
+        info = PROPERTIES.get(p.get("type"))
+        if not info:
+            continue
+        _re_decay_condition(p)
+        cond = float(p.get("condition", 0))
+        value = _re_current_price(p["type"], red)
+        reno = int(p.get("reno_level", 0))
+        last = p.get("last_rent_collected", p.get("purchased_at", now))
+        my_p.append({"id": _city_prop_id(p), "slot": i + 1, "type": p["type"], "cond": round(cond, 1), "value": value,
+                     "rent": info["rent_per_hour"], "pending": _re_pending_rent(p),
+                     "ready_at": last + RE_RENT_COLLECT_COOLDOWN_HOURS * 3600, "reno": reno, "reno_max": RENO_MAX_LEVEL,
+                     "reno_cost": int(value * RENO_COST_PCT * (reno + 1)) if reno < RENO_MAX_LEVEL else None,
+                     "repair_cost": int(info["base_price"] * 0.005 * (RE_MAX_CONDITION - cond)) if cond < RE_MAX_CONDITION - 1 else 0,
+                     "sell_value": int(value * max(0.5, cond / RE_MAX_CONDITION * 0.5 + 0.5)),
+                     "airbnb": bool(p.get("airbnb")), "airbnb_fee": max(1000, int(value * AIRBNB_CONVERT_PCT)),
+                     "mortgage": int((p.get("mortgage") or {}).get("amount", 0)), "manager": bool(p.get("manager")),
+                     "tenant": (TENANT_TYPES.get((p.get("tenant") or {}).get("quality"), {}) or {}).get("name"),
+                     "bought_for": int(p.get("purchase_price", 0))})
+
+    legendary = red.get("legendary_owners", {})
+    economy._load()
+    rec = economy._data.get("users", {}).get(uid_s) or {}   # read-only: never creates an economy record
+    return {
+        "ok": True, "now": now, "me": {"id": uid_s, "name": name_of(uid_s), "balance": int(rec.get("balance", 0)),
+                                       "insurance": max(0, int(rec.get("insurance_until", 0) - now))},
+        "city": city, "turf": turf, "venues": my_v, "businesses": my_b, "properties": my_p,
+        "locks": {s: _city_lock(uid, s) for s in ("venues", "businesses", "realestate", "territory")},
+        "catalog": {
+            "venues": [{"key": k, "name": v["name"], "emoji": v["emoji"], "tier": v["tier"], "income": v["income_per_hour"],
+                        "max_staff": v["max_staff"], "cost": _venue_cost(uid, k), "desc": v["desc"],
+                        "district": _city_district("venue", k)} for k, v in VENUE_TYPES.items()],
+            "staff": [{"key": k, "name": r["name"], "emoji": r["emoji"], "cost": r["cost"], "boost": r["income_boost"],
+                       "desc": r["desc"]} for k, r in STAFF_ROLES.items()],
+            "liquor": [{"key": k, "name": l["name"], "emoji": l["emoji"], "tier_min": l["tier_min"],
+                        "unit": int(l["cost_per_bottle"] * _liquor_price_mult(k)), "revenue": l["revenue_per_bottle"],
+                        "mult": _liquor_price_mult(k), "bootleg": bool(l.get("bootleg"))} for k, l in LIQUOR_TYPES.items()],
+            "bulk": {"threshold": BULK_DISCOUNT_THRESHOLD, "pct": BULK_DISCOUNT_PCT},
+            "businesses": [{"key": k, "name": b["name"], "emoji": b["emoji"], "tier": b["tier"], "income": b["income_per_hour"],
+                            "max_employees": b["max_employees"], "cost": _business_cost(uid, k), "desc": b["desc"],
+                            "district": _city_district("biz", k)} for k, b in BUSINESS_TYPES.items()],
+            "properties": [{"key": k, "name": p["name"], "emoji": p["emoji"], "tier": p["tier"], "rent": p["rent_per_hour"],
+                            "price": _re_current_price(k, red), "unique": p["unique"], "desc": p["desc"],
+                            "owner": name_of(legendary[k]) if p["unique"] and legendary.get(k) else None,
+                            "district": _city_district("re", k)} for k, p in PROPERTIES.items()],
+            "max_properties": RE_MAX_PROPERTIES_PER_USER, "insurance_price": INSURANCE_PRICE,
+            "insurance_hours": INSURANCE_DURATION_HOURS, "pr_cost": VENUE_PR_COST_PER_POINT,
+            "reinforce_cost": TERRITORY_REINFORCE_COST, "reinforce_amount": TERRITORY_REINFORCE_AMOUNT,
+            "rent_cooldown_h": RE_RENT_COLLECT_COOLDOWN_HOURS, "min_cond": RE_MIN_CONDITION_FOR_RENT,
+            "venue_idle_h": NIGHTLIFE_MAX_IDLE_HOURS, "biz_idle_h": BUSINESS_MAX_IDLE_HOURS,
+        },
+    }
+
+
+# ── Actions ───────────────────────────────────────────────────────────────────
+def _city_find(lst: list, bid: str, key=lambda x: x.get("id")):
+    """Current 1-based slot of the building the page clicked on (it may have moved)."""
+    for i, x in enumerate(lst):
+        if key(x) == bid:
+            return i + 1, x
+    return None, None
+
+
+async def _city_dispatch(uid: int, action: str, payload: dict) -> dict:
+    if action == "state":
+        economy._load()
+        return _city_state(uid)
+    if action != "act":
+        return {"ok": False, "error": "Unknown action."}
+    member = _find_member_anywhere(uid)
+    if member is None:
+        return {"ok": False, "error": "You need to be in the server to run a business here."}
+    now = time.time()
+    if now - _city_last_action.get(uid, 0) < CITY_ACTION_GAP:
+        return {"ok": False, "error": "Easy — one move at a time."}
+    _city_last_action[uid] = now
+    do = str(payload.get("do", ""))
+    bid = str(payload.get("id", ""))
+    uid_s = str(uid)
+    gone = {"ok": False, "error": "That building changed since the page loaded. Refreshing.", "refresh": True}
+    out: list = []
+
+    def as_int(name, lo, hi):
+        try:
+            v = int(payload.get(name))
+        except (TypeError, ValueError):
+            return None
+        return v if lo <= v <= hi else None
+
+    if do == "members":                               # who you could hire
+        q = str(payload.get("q", "")).strip().lower()[:32]
+        hits = []
+        if len(q) >= 2:
+            for m in member.guild.members:
+                if m.bot or m.id == uid:
+                    continue
+                if q in m.display_name.lower() or q in m.name.lower():
+                    hits.append({"id": str(m.id), "name": m.display_name, "user": m.name})
+                    if len(hits) >= 8:
+                        break
+        return {"ok": True, "members": hits}
+
+    if do == "collect_all":
+        if _user_venues(uid):
+            out += await _web_run_slash(member, collectvenue_command)
+        if _user_businesses(uid):
+            out += await _web_run_slash(member, collectbusiness_command)
+        if _user_properties(uid):
+            out += await _web_run_slash(member, realestate_command, action=_choice("collect"))
+        if not out:
+            out = [{"text": "You don't own anything that earns yet. Pick an empty lot and buy your first place.", "embeds": [], "private": True}]
+    elif do == "venue_collect":
+        out = await _web_run_slash(member, collectvenue_command)
+    elif do == "venue_buy":
+        t = str(payload.get("type", ""))
+        if t not in VENUE_TYPES:
+            return {"ok": False, "error": "Unknown venue."}
+        out = await _web_run_slash(member, buyvenue_command, venue_type=_choice(t))
+    elif do in ("venue_hire", "venue_stock", "venue_pr"):
+        slot, v = _city_find(_user_venues(uid), bid)
+        if not v:
+            return gone
+        if do == "venue_hire":
+            role = str(payload.get("role", ""))
+            if role not in STAFF_ROLES:
+                return {"ok": False, "error": "Unknown role."}
+            out = await _web_run_slash(member, hirestaff_command, venue_type=_choice(v["type"]), role=_choice(role), scope=None, slot=slot)
+        elif do == "venue_stock":
+            liq, bottles = str(payload.get("liquor", "")), as_int("bottles", 1, 200)
+            if liq not in LIQUOR_TYPES or bottles is None:
+                return {"ok": False, "error": "Pick a liquor and 1–200 bottles."}
+            out = await _web_run_slash(member, stockliquor_command, venue_type=_choice(v["type"]), liquor=_choice(liq),
+                                       bottles=bottles, scope=None, slot=slot)
+        else:
+            points = as_int("points", 1, 100)
+            if points is None:
+                return {"ok": False, "error": "Pick 1–100 points."}
+            out = await _web_run_prefix(member, _handle_venue_pr, f"{slot} {points}")
+    elif do == "biz_collect":
+        out = await _web_run_slash(member, collectbusiness_command)
+    elif do == "biz_buy":
+        t = str(payload.get("type", ""))
+        if t not in BUSINESS_TYPES:
+            return {"ok": False, "error": "Unknown business."}
+        out = await _web_run_slash(member, buybusiness_command, business_type=_choice(t))
+    elif do in ("biz_upgrade", "biz_hire"):
+        slot, b = _city_find(_user_businesses(uid), bid)
+        if not b:
+            return gone
+        if do == "biz_upgrade":
+            out = await _web_run_slash(member, upgradebusiness_command, business_type=_choice(b["type"]))
+        else:
+            emp = member.guild.get_member(int(payload.get("member", 0) or 0)) if str(payload.get("member", "")).isdigit() else None
+            if emp is None:
+                return {"ok": False, "error": "Pick someone from the server."}
+            out = await _web_run_slash(member, hire_command, employee=emp, business_type=_choice(b["type"]), scope=None)
+    elif do == "biz_fire":
+        emp_id = str(payload.get("member", ""))
+        emp = member.guild.get_member(int(emp_id)) if emp_id.isdigit() else None
+        if emp is None:
+            # They left the server: the slash command can't target them, so drop them directly.
+            if not emp_id.isdigit():
+                return {"ok": False, "error": "Pick an employee."}
+            data = _load_businesses()
+            fired = 0
+            for b in data.get("users", {}).get(uid_s, []):
+                if int(emp_id) in b.get("employees", []):
+                    b["employees"].remove(int(emp_id))
+                    fired += 1
+            if not fired:
+                return {"ok": False, "error": "They don't work for you."}
+            _save_businesses(data)
+            out = [{"text": f"🚪 Let go a former member from {fired} business{'es' if fired > 1 else ''}.", "embeds": [], "private": False}]
+        else:
+            out = await _web_run_slash(member, fire_command, employee=emp)
+    elif do == "insurance":
+        out = await _web_run_slash(member, insurance_command)
+    elif do == "re_buy":
+        t = str(payload.get("type", ""))
+        if t not in PROPERTIES:
+            return {"ok": False, "error": "Unknown property."}
+        out = await _web_run_slash(member, realestate_command, action=_choice("buy"), property_type=t, slot=None)
+    elif do == "re_collect":
+        out = await _web_run_slash(member, realestate_command, action=_choice("collect"), property_type=None, slot=None)
+    elif do in ("re_repair", "re_sell", "re_renovate", "re_airbnb"):
+        slot, p = _city_find(_user_properties(uid), bid, key=_city_prop_id)
+        if not p:
+            return gone
+        if do == "re_repair":
+            out = await _web_run_slash(member, realestate_command, action=_choice("repair"), property_type=None, slot=slot)
+        elif do == "re_sell":
+            out = await _web_run_slash(member, realestate_command, action=_choice("sell"), property_type=None, slot=slot)
+        elif do == "re_renovate":
+            out = await _web_run_prefix(member, _handle_renovate, str(slot))
+        else:
+            out = await _web_run_prefix(member, _handle_airbnb, str(slot))
+    elif do in ("turf_claim", "turf_reinforce"):
+        key = str(payload.get("key", ""))
+        if key not in TERRITORIES:
+            return {"ok": False, "error": "Unknown corner."}
+        out = await _web_run_prefix(member, _handle_claim_turf if do == "turf_claim" else _handle_reinforce_turf, key)
+    else:
+        return {"ok": False, "error": "Unknown move."}
+
+    try:
+        track_command_use("city:" + do, uid)
+    except Exception:
+        pass
+    state = _city_state(uid)
+    return {"ok": True, "result": out, "state": state}
+
+
+async def _handle_city(message: discord.Message, rest: str):
+    """_empire / _citymap / _skyline — link to the city on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🌃 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🌃 **The City** — every club, business and property in the server on one map. "
+        f"Tap yours to run it: collect, restock, hire, upgrade, repair, buy: <{base}/city>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -30063,7 +30600,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
-    "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker",
+    "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -31226,6 +31763,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("videopoker", "vp", "poker"):
         await _handle_videopoker(message, rest)
+        return True
+    if cmd_name in ("citymap", "empire", "skyline"):
+        await _handle_city(message, rest)
         return True
     if cmd_name in ("arcade", "webgames"):
         await _handle_arcade(message, rest)

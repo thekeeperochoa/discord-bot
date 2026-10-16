@@ -84,10 +84,12 @@ _PROFILE_PROVIDER = None
 _GAME_PROVIDER = None
 _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "pumpdump": Path(__file__).resolve().parent / "web" / "pumpdump.html",
-          "videopoker": Path(__file__).resolve().parent / "web" / "videopoker.html"}
+          "videopoker": Path(__file__).resolve().parent / "web" / "videopoker.html",
+          "city": Path(__file__).resolve().parent / "web" / "city.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
-                 "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"}}
+                 "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
+                 "city": {"state": "GET", "act": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
@@ -232,6 +234,11 @@ def api_me():
     resp = jsonify(data)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+@app.route("/city")
+def city_page():
+    return game_page("city")
 
 
 @app.route("/games/<game>")

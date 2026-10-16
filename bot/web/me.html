@@ -157,7 +157,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
 <div class="wrap">
   <header class="top">
     <div class="who"><img id="av" alt="" hidden><span id="who">Signed in</span></div>
-    <nav class="links"><a id="adminLink" href="/" hidden>Admin dashboard</a><a href="/auth/logout">Log out</a></nav>
+    <nav class="links"><a href="/city">🌃 The City</a><a id="adminLink" href="/" hidden>Admin dashboard</a><a href="/auth/logout">Log out</a></nav>
   </header>
 
   <div class="check" id="check" role="img" aria-label="Your account statement">
@@ -388,7 +388,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
         '<div class="cols"><div>' +
           sec("Ready now", ready(d.cooldowns)) +
           sec("Where your money sits", money(d.money)) +
-          sec("Your empire", empire(d)) +
+          sec("Your empire", empire(d) + '<p class="sub" style="margin-top:10px"><a href="/city">Run it from the city map →</a></p>') +
           sec("Your record", record(d.record)) +
         '</div><div>' +
           sec("Your web", web(d)) +
