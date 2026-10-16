@@ -82,7 +82,10 @@ _PROFILE_PROVIDER = None
 # Set by bot.py: fn(user_id, game, action, payload) -> dict. Runs on the bot's loop;
 # the server there decides every payout (the browser only reports what happened).
 _GAME_PROVIDER = None
-_GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html"}
+_GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
+          "pumpdump": Path(__file__).resolve().parent / "web" / "pumpdump.html"}
+_GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
+                 "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
@@ -252,8 +255,7 @@ def game_api(game, action):
     other sites from starting or finishing runs on someone's behalf."""
     if not is_logged_in():
         return jsonify({"ok": False, "error": "Log in to play."}), 401
-    allowed = {"info": "GET", "start": "POST", "finish": "POST"}
-    if game not in _GAMES or allowed.get(action) != request.method:
+    if game not in _GAMES or _GAME_ACTIONS.get(game, {}).get(action) != request.method:
         return jsonify({"ok": False, "error": "Not found."}), 404
     if request.method == "POST" and not request.is_json:
         return jsonify({"ok": False, "error": "Expected JSON."}), 415

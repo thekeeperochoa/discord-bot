@@ -141,6 +141,8 @@ ul.rows li:last-child{border-bottom:0}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
 .chips li{background:var(--page-2);border-radius:4px;padding:4px 9px;font-size:14px}
 .up li .r-main{white-space:normal}
+.games li .r-main{white-space:normal}
+.games .r-dim{display:block;font-size:13px}
 
 /* memory */
 blockquote{margin:0;padding:2px 0 2px 16px;border-left:2px solid var(--gold);
@@ -361,13 +363,14 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
   }
 
   function games(g){
-    var x = g && g.getaway;
-    var h = '<ul class="rows"><li><span class="r-main">🏃 The Getaway <span class="r-dim">outrun the feds</span></span>' +
-            '<span class="r-side"><a href="/games/getaway">Play</a></span></li></ul>';
-    if (!x) return h;
-    h += '<p class="sub" style="margin-top:8px">' + (x.best ? 'Best run ' + n(x.best) + ' m. ' : 'No runs yet. ') +
-         'Paid today ' + n(x.today) + ' of ' + n(x.daily_cap) + '.</p>';
-    return h;
+    var x = g && g.getaway, y = g && g.pumpdump;
+    function pct(v){ return (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%'; }
+    var gx = x ? (x.best ? 'Best run ' + n(x.best) + ' m' : 'No runs yet') + ' · paid today ' + n(x.today) + ' of ' + n(x.daily_cap) : 'outrun the feds';
+    var gy = y ? (y.best != null ? 'Best round ' + pct(y.best) : 'No rounds yet') + ' · paid today ' + n(y.today) + ' of ' + n(y.daily_cap) : 'trade a penny stock for 60 seconds';
+    return '<ul class="rows games">' +
+      '<li><span class="r-main">🏃 The Getaway <span class="r-dim">' + gx + '</span></span><span class="r-side"><a href="/games/getaway">Play</a></span></li>' +
+      '<li><span class="r-main">📈 Pump &amp; Dump <span class="r-dim">' + gy + '</span></span><span class="r-side"><a href="/games/pumpdump">Play</a></span></li>' +
+      '</ul>';
   }
 
   function sec(title, body){ return '<section class="sec"><h2>'+title+'</h2>'+body+'</section>'; }

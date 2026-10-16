@@ -3168,6 +3168,8 @@ ACHIEVEMENTS = {
     "lieordie_pro":  {"emoji":"🤥", "name":"Detector",             "desc":"Win 10 /lieordie rounds",                  "reward":500},
     "getaway_first": {"emoji":"🏃", "name":"Clean Getaway",        "desc":"Finish a run in The Getaway",              "reward":200},
     "getaway_5k":    {"emoji":"🚨", "name":"Most Wanted",          "desc":"Run 5,000 m in one Getaway run",           "reward":2000},
+    "pnd_first":     {"emoji":"📈", "name":"Penny Stock Pro",      "desc":"Finish a round of Pump & Dump",            "reward":200},
+    "pnd_double":    {"emoji":"💸", "name":"Doubled Up",           "desc":"Make +100% in one Pump & Dump round",      "reward":2000},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -26748,9 +26750,10 @@ def getaway_max_coins(seed: int, distance: float) -> int:
 
 def _web_games_load() -> dict:
     data = _load_json_file(WEB_GAMES_FILE, {})
-    g = data.setdefault("getaway", {})
-    for k in ("best", "daily", "runs"):
-        g.setdefault(k, {})
+    for game in ("getaway", "pumpdump"):
+        g = data.setdefault(game, {})
+        for k in ("best", "daily", "runs"):
+            g.setdefault(k, {})
     return data
 
 
@@ -26769,6 +26772,8 @@ def _getaway_board(g: dict, uid_s: str) -> dict:
 
 async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) -> dict:
     """All web-game actions, run on the bot's event loop."""
+    if game == "pumpdump":
+        return await _pnd_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -26890,6 +26895,367 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return result
 
     return {"ok": False, "error": "Unknown action."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📈 WEB GAME: PUMP & DUMP — a 60-second penny-stock trading game.
+# Every round starts with $10,000 of house money (not your coins). Go long, go
+# short or sit flat while a pump-and-dump plays out; profit pays out in coins.
+#
+# Anti-cheat is different from The Getaway: knowing the chart in advance would
+# make trading trivial, so the chart NEVER leaves the server ahead of time. The
+# round's prices are generated here from a secret seed and released tick by tick
+# as real time passes (the page polls `tick`). Every trade is stamped by the
+# server: the page says which tick it was looking at, and the server only
+# accepts ticks that have already been released and are at most PND_TOL ticks
+# old (enough to absorb the page's playback delay and network latency). The
+# server keeps the position, prices every fill itself and computes the payout.
+# ─────────────────────────────────────────────────────────────────────────────
+PND_TICK = 0.25               # seconds per price tick
+PND_TICKS = 240               # 60-second round
+PND_COUNTDOWN = 3.0           # seconds between start and the opening bell
+PND_BANKROLL = 10_000         # house money each round starts with
+PND_FEE = 0.003               # 0.3% per fill (tag members trade free, like /stocks)
+PND_PER_PCT = 10              # coins per 1% return
+PND_RUN_CAP = 2_000           # max payout per round (before Hype Train)
+PND_DAILY_CAP = 8_000         # max paid per member per day (EST)
+PND_MIN_TICKS = 20            # rounds ended before 5 s don't pay
+PND_TOL = 5                   # how stale (in ticks) a trade may be: 1.25 s
+PND_MAX_FILLS = 40
+PND_MARGIN = 1.9              # a short is force-covered if the price hits 1.9x entry
+PND_TTL = 10 * 60             # an unfinished round expires after 10 minutes
+PND_XP_CAP = 60
+PND_RECORD_MIN = 50           # only announce new floor records of +50% or better
+
+PND_STOCKS = [
+    ("ATYN", "Aerotyne International", "radar tech out of a garage"),
+    ("DGEN", "Degen Dynamics", "nobody knows what they make"),
+    ("YCHT", "Seaborne Yacht Works", "luxury boats, allegedly"),
+    ("BRKR", "Boiler Room Capital", "a brokerage that sells itself"),
+    ("LMBX", "Lambo Exotics Leasing", "rents supercars to influencers"),
+    ("PNLM", "Penny Lane Mining", "a gold mine with no gold"),
+    ("GLDG", "Golden Goose Biotech", "a miracle pill in phase zero"),
+    ("QNTM", "Quantum Toaster Co.", "AI-powered breakfast"),
+]
+PND_BULL = ["Stratton brokers are working the phones", "A whale is rumored to be buying",
+            "Analyst slaps a Strong Buy on it", "Message boards are going nuts",
+            "CEO hints at a \"huge announcement\"", "Insider buying shows up in filings"]
+PND_GAP_UP = ["Forbes cover story drops", "Merger rumor hits the wire"]
+PND_GAP_DOWN = ["SEC sends a subpoena", "FBI agents seen at headquarters", "Auditor resigns overnight"]
+PND_DUMP = ["Brokers stop dialing", "Insiders start unloading", "Volume is drying up"]
+
+_pnd_runs: dict[int, dict] = {}          # uid -> active round
+_pnd_done: dict[str, dict] = {}          # run_id -> result (a retried finish gets the same answer)
+_pnd_last_start: dict[int, float] = {}
+
+
+def pnd_market(seed: int) -> tuple[list, list]:
+    """One round: (prices, events). Pumps are usually followed by a dump, some
+    bullish headlines are fake-outs, and news can gap the price either way.
+    Server-only — the page never sees the seed."""
+    rng = random.Random(seed)
+    p = rng.randint(180, 650) / 100.0
+    plan, events = [], []
+
+    def add(d, drift, vol):
+        plan.extend([(drift, vol)] * d)
+
+    add(rng.randint(12, 22), 0.0, 0.005)
+    while len(plan) < PND_TICKS + 10:
+        t, r = len(plan), rng.random()
+        if r < 0.36:                                    # the pump (usually followed by the dump)
+            events.append((t, "bull", rng.choice(PND_BULL)))
+            add(rng.randint(2, 4), 0.0, 0.005)
+            add(rng.randint(14, 28), rng.uniform(0.009, 0.016), 0.008)
+            if rng.random() < 0.85:
+                add(rng.randint(1, 3), 0.0, 0.006)
+                if rng.random() < 0.5:
+                    events.append((len(plan), "bear", rng.choice(PND_DUMP)))
+                add(rng.randint(8, 18), -rng.uniform(0.02, 0.032), 0.01)
+            else:
+                add(rng.randint(10, 18), -0.003, 0.006)
+        elif r < 0.45:                                  # good news gaps it up
+            events.append((t, "bull", rng.choice(PND_GAP_UP)))
+            add(1, rng.uniform(0.08, 0.15), 0.0)
+            add(rng.randint(5, 9), 0.003, 0.006)
+        elif r < 0.58:                                  # bad news gaps it down
+            events.append((t, "bear", rng.choice(PND_GAP_DOWN)))
+            add(1, -rng.uniform(0.12, 0.2), 0.0)
+            add(rng.randint(6, 10), -0.005, 0.007)
+        elif r < 0.76:                                  # fake-out: bullish headline, then it bleeds
+            events.append((t, "bull", rng.choice(PND_BULL)))
+            add(rng.randint(3, 6), 0.004, 0.006)
+            add(rng.randint(10, 16), -0.01, 0.008)
+        else:                                           # nothing happening
+            add(rng.randint(14, 28), 0.0, 0.005)
+    prices = []
+    for i in range(PND_TICKS):
+        drift, vol = plan[i]
+        p = max(0.05, p * (1 + drift + rng.gauss(0, vol)))
+        prices.append(round(p, 2))
+    return prices, [list(e) for e in events if e[0] < PND_TICKS]
+
+
+def _pnd_tick_now(run: dict, now: float) -> int:
+    """The latest tick released at server time `now` (-1 before the bell)."""
+    return int((now - run["go"]) // PND_TICK) if now >= run["go"] else -1
+
+
+def _pnd_close(run: dict, c: int, flag: str = ""):
+    p, e = run["prices"][c], run["entry"]
+    if run["pos"] == 1:
+        run["value"] *= p / e
+    elif run["pos"] == -1:
+        run["value"] *= max(0.0, 2 - p / e)
+    run["value"] *= (1 - run["fee"])
+    run["fills"].append([c, 0, p, flag] if flag else [c, 0, p])
+    run["pos"], run["entry"] = 0, None
+
+
+def _pnd_margin_check(run: dict, upto: int) -> bool:
+    """Force-cover a short that got squeezed anywhere between the last check and `upto`."""
+    if run["pos"] == -1:
+        for k in range(max(0, run["last"]), min(upto, PND_TICKS - 1) + 1):
+            if run["prices"][k] >= PND_MARGIN * run["entry"]:
+                _pnd_close(run, k, "margin")
+                run["last"] = k
+                return True
+    return False
+
+
+def _pnd_clamp_tick(run: dict, claimed, s: int) -> int:
+    """Which tick a trade executes at: what the page saw, but never a tick that
+    hasn't been released, never older than PND_TOL ticks, never before the last trade."""
+    try:
+        c = int(claimed)
+    except (TypeError, ValueError):
+        c = s
+    c = min(c, s, PND_TICKS - 1)
+    return max(c, s - PND_TOL, run["last"], 0)
+
+
+def _pnd_state(run: dict, c: int, **extra) -> dict:
+    return {"ok": True, "pos": run["pos"], "entry": run["entry"], "value": round(run["value"], 2),
+            "tick": c, "price": run["prices"][c], "fills": run["fills"],
+            "fills_left": max(0, PND_MAX_FILLS - len(run["fills"])), **extra}
+
+
+def _pnd_today_earned(g: dict, uid_s: str) -> int:
+    rec = g["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _pnd_board(g: dict, uid_s: str) -> dict:
+    present = [(int(b), u) for u, b in g["best"].items() if _is_member(None, u)]
+    present.sort(reverse=True)
+    top = [{"name": _dash_name(u), "best": round(b / 100, 1), "you": u == uid_s} for b, u in present[:10]]
+    rank = next((i + 1 for i, (_, u) in enumerate(present) if u == uid_s), None)
+    return {"top": top, "rank": rank, "of": len(present)}
+
+
+async def _pnd_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    run_id = str(payload.get("run_id", ""))
+
+    # Hot path: the page polls this a few times a second, so no file I/O here.
+    if action == "tick":
+        run = _pnd_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That round isn't active anymore."}
+        s = min(_pnd_tick_now(run, now), PND_TICKS - 1)
+        try:
+            since = max(0, int(payload.get("since", 0)))
+        except (TypeError, ValueError):
+            since = 0
+        hi = min(s, since + 160)
+        return {"ok": True, "s": s, "from": since, "prices": run["prices"][since:hi + 1] if hi >= since else [],
+                "news": [e for e in run["events"] if since <= e[0] <= hi]}
+
+    if action == "trade":
+        run = _pnd_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That round isn't active anymore."}
+        side = {"long": 1, "short": -1, "flat": 0}.get(str(payload.get("side", "")))
+        if side is None:
+            return {"ok": False, "error": "Bad order."}
+        s = _pnd_tick_now(run, now)
+        if s < 0:
+            return {"ok": False, "error": "The market isn't open yet."}
+        if s > PND_TICKS - 1 + PND_TOL:
+            return {"ok": False, "error": "The closing bell already rang."}
+        if now - run.get("last_trade", 0) < 0.12:
+            return {"ok": False, "error": "Easy — one order at a time."}
+        run["last_trade"] = now
+        c = _pnd_clamp_tick(run, payload.get("tick"), s)
+        margin = _pnd_margin_check(run, c)
+        run["last"] = max(run["last"], c)
+        if side == run["pos"]:
+            return _pnd_state(run, c, margin=margin)
+        need = (1 if run["pos"] else 0) + (1 if side else 0)
+        if len(run["fills"]) + need > PND_MAX_FILLS:
+            return {**_pnd_state(run, c, margin=margin), "ok": False,
+                    "error": f"That's the limit of {PND_MAX_FILLS} fills this round."}
+        if run["pos"]:
+            _pnd_close(run, c)
+        if side:
+            run["pos"], run["entry"] = side, run["prices"][c]
+            run["value"] *= (1 - run["fee"])
+            run["fills"].append([c, side, run["prices"][c]])
+        return _pnd_state(run, c, margin=margin)
+
+    economy._load()
+    data = _web_games_load()
+    g = data["pumpdump"]
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates a record
+        b = g["best"].get(uid_s)
+        return {"ok": True, "best": round(int(b) / 100, 1) if b is not None else None,
+                "balance": int(rec.get("balance", 0)) if rec else None,
+                "today": _pnd_today_earned(g, uid_s), "daily_cap": PND_DAILY_CAP, "run_cap": PND_RUN_CAP,
+                "per_pct": PND_PER_PCT, "bankroll": PND_BANKROLL, "hype": int(hype_train_multiplier()),
+                "fee": 0.0 if has_tag_perks(uid) else PND_FEE, "seconds": int(PND_TICKS * PND_TICK),
+                "board": _pnd_board(g, uid_s)}
+
+    if action == "start":
+        if now - _pnd_last_start.get(uid, 0) < 2:
+            return {"ok": False, "error": "Slow down — one round at a time."}
+        _pnd_last_start[uid] = now
+        for rid in [r for r, res in _pnd_done.items() if now - res.get("_ts", 0) > 600]:
+            _pnd_done.pop(rid, None)
+        for u in [u for u, r in _pnd_runs.items() if now - r["created"] > PND_TTL]:
+            _pnd_runs.pop(u, None)
+        seed = random.getrandbits(48)
+        prices, events = pnd_market(seed)
+        sym, name, blurb = PND_STOCKS[seed % len(PND_STOCKS)]
+        run = {"run_id": secrets.token_hex(12), "created": now, "go": now + PND_COUNTDOWN,
+               "prices": prices, "events": events, "symbol": sym, "fee": 0.0 if has_tag_perks(uid) else PND_FEE,
+               "pos": 0, "entry": None, "value": float(PND_BANKROLL), "fills": [], "last": 0}
+        _pnd_runs[uid] = run   # starting a new round abandons any unfinished one
+        return {"ok": True, "run_id": run["run_id"], "symbol": sym, "name": name, "blurb": blurb,
+                "go_ms": int(PND_COUNTDOWN * 1000), "tick_ms": int(PND_TICK * 1000), "ticks": PND_TICKS,
+                "open": prices[0], "fee": run["fee"], "bankroll": PND_BANKROLL, "tol": PND_TOL}
+
+    if action == "finish":
+        if run_id in _pnd_done and _pnd_done[run_id].get("_uid") == uid:
+            return {k: v for k, v in _pnd_done[run_id].items() if not k.startswith("_")}
+        run = _pnd_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That round isn't active anymore. Start a new one."}
+        if now - run["created"] > PND_TTL:
+            _pnd_runs.pop(uid, None)
+            return {"ok": False, "error": "That round expired. Start a new one."}
+        s = _pnd_tick_now(run, now)
+        if s < 0:
+            return {"ok": False, "error": "The market isn't open yet."}
+        _pnd_runs.pop(uid, None)
+        c = PND_TICKS - 1 if s >= PND_TICKS - 1 else _pnd_clamp_tick(run, payload.get("tick"), s)
+        margin = _pnd_margin_check(run, c)
+        if run["pos"]:
+            _pnd_close(run, c)
+        value = run["value"]
+        ret = (value / PND_BANKROLL - 1) * 100
+        ret_bp = int(round(ret * 100))
+        eligible = c >= PND_MIN_TICKS
+
+        base = min(int(max(0.0, ret) * PND_PER_PCT), PND_RUN_CAP) if eligible else 0
+        hype = int(hype_train_multiplier())
+        today = _pnd_today_earned(g, uid_s)
+        left = max(0, PND_DAILY_CAP - today)
+        payout = max(0, min(base * hype, left))
+        balance = economy.balance(uid)
+        if payout > 0:
+            balance = economy.add(uid, payout, "web game: pump & dump")
+            try:
+                track_economy_event("earned", payout)
+            except Exception:
+                pass
+        g["daily"][uid_s] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + payout}
+        g["runs"][uid_s] = int(g["runs"].get(uid_s, 0)) + 1
+        prev_best = g["best"].get(uid_s)
+        new_best = eligible and (prev_best is None or ret_bp > int(prev_best))
+        prev_record = max([int(b) for u, b in g["best"].items() if u != uid_s and _is_member(None, u)] or [0])
+        if new_best:
+            g["best"][uid_s] = ret_bp
+        _save_json_file(WEB_GAMES_FILE, data)
+        try:
+            track_command_use("pumpdump", uid)
+        except Exception:
+            pass
+
+        notif = None
+        try:
+            cid = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid)) if cid else None
+        except Exception:
+            notif = None
+        xp = min(PND_XP_CAP, 10 + max(0, int(ret)) // 2) if eligible else 0
+        if xp:
+            try:
+                await grant_xp(uid, xp, channel=notif)
+            except Exception:
+                log.exception("pump & dump xp failed")
+        unlocked = []
+        for ach_id, ok in (("pnd_first", eligible), ("pnd_double", eligible and ret >= 100)):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("pump & dump achievement failed")
+        if new_best and ret_bp > prev_record and ret >= PND_RECORD_MIN and notif:
+            try:
+                await notif.send(
+                    f"📈 **{_dash_name(uid)}** turned $10,000 into **${value:,.0f}** trading "
+                    f"**${run['symbol']}** in Pump & Dump — a new floor record (+{ret:.1f}%). "
+                    f"`_pumpdump` to try and beat it.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+
+        result = {"ok": True, "value": round(value, 2), "ret": round(ret, 1), "tick": c, "margin": margin, "coin_part": base,
+                  "fills": run["fills"], "trades": sum(1 for f in run["fills"] if f[1]),
+                  "early": c < PND_TICKS - 1, "eligible": eligible,
+                  "high": max(run["prices"][:c + 1]), "low": min(run["prices"][:c + 1]),
+                  "capped": eligible and max(0.0, ret) * PND_PER_PCT > PND_RUN_CAP,
+                  "hype": hype, "payout": payout, "daily_capped": base * hype > left,
+                  "today": today + payout, "daily_cap": PND_DAILY_CAP, "balance": int(balance),
+                  "xp": int(xp), "best": round(int(g["best"][uid_s]) / 100, 1) if uid_s in g["best"] else None,
+                  "new_best": new_best, "achievements": unlocked, "board": _pnd_board(g, uid_s)}
+        _pnd_done[run_id] = {**result, "_uid": uid, "_ts": now}
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_pumpdump(message: discord.Message, rest: str):
+    """_pumpdump — link to Pump & Dump on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("📈 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"📈 **Pump & Dump** — 60 seconds, $10,000 of house money, one penny stock. "
+        f"Ride the pump, short the dump, keep the profit: <{base}/games/pumpdump>\n"
+        f"Every 1% you make pays {PND_PER_PCT} coins (up to {PND_DAILY_CAP:,} a day).",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def _handle_arcade(message: discord.Message, rest: str):
+    """_arcade — every web game in one place."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🕹️ The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        "🕹️ **The Arcade** — play in your browser, get paid in coins:\n"
+        f"🏃 **The Getaway** — outrun the feds down Wall Street: <{base}/games/getaway>\n"
+        f"📈 **Pump & Dump** — trade a penny stock for 60 seconds: <{base}/games/pumpdump>\n"
+        f"Your stats are on your dashboard: <{base}/me>",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 def dashboard_game_provider(uid: int, game: str, action: str, payload: dict) -> dict:
@@ -27145,9 +27511,14 @@ async def _gather_dashboard_profile(uid: int) -> dict:
     section("memory", _memory)
 
     def _games():
-        g = _web_games_load()["getaway"]
+        data = _web_games_load()
+        g, p = data["getaway"], data["pumpdump"]
+        pb = p["best"].get(uid_s)
         return {"getaway": {"best": int(g["best"].get(uid_s, 0)), "runs": int(g["runs"].get(uid_s, 0)),
-                            "today": _getaway_today_earned(g, uid_s), "daily_cap": GETAWAY_DAILY_CAP}}
+                            "today": _getaway_today_earned(g, uid_s), "daily_cap": GETAWAY_DAILY_CAP},
+                "pumpdump": {"best": round(int(pb) / 100, 1) if pb is not None else None,
+                             "runs": int(p["runs"].get(uid_s, 0)),
+                             "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP}}
     section("games", _games)
 
     return out
@@ -29441,6 +29812,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "beef", "rivals", "whosgunning", "enemies",
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
+    "pumpdump", "pnd", "pumpanddump",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -30595,8 +30967,14 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
     if cmd_name in ("mydash", "mydashboard", "myprofile"):
         await _handle_mydash(message, rest)
         return True
-    if cmd_name in ("getaway", "arcade", "webgames"):
+    if cmd_name == "getaway":
         await _handle_getaway(message, rest)
+        return True
+    if cmd_name in ("pumpdump", "pnd", "pumpanddump"):
+        await _handle_pumpdump(message, rest)
+        return True
+    if cmd_name in ("arcade", "webgames"):
+        await _handle_arcade(message, rest)
         return True
 
     # 🛠️ Custom Commands

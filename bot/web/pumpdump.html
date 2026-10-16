@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Pump &amp; Dump</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#0D2B21; --page-2:#143A2D; --line:rgba(184,146,58,.34); --rule:rgba(163,184,171,.14);
+  --gold:#B8923A; --gold-ink:#D9B86C; --text:#E6EDE7; --muted:#A3B8AB; --faint:#7B9486;
+  --up:#4CD08A; --down:#F0776C; --ok:#A6E6BF; --term:#07120E; --panel:rgba(9,26,20,.95);
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0}
+body{background:var(--page);color:var(--text);font:400 15px/1.5 "IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  font-variant-numeric:tabular-nums;overflow:hidden;overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+a{color:var(--gold-ink);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--gold-ink);outline-offset:3px;border-radius:3px}
+.app{height:100%;display:flex;flex-direction:column;align-items:center}
+.bar{width:100%;max-width:640px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;flex:none}
+.bar h1{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.05rem;margin:0}
+.bar a,.bar .small{font-size:14px}
+.stage{position:relative;width:100%;max-width:640px;flex:1;min-height:0;display:flex;flex-direction:column;
+  background:var(--term);border:1px solid rgba(184,146,58,.22);border-bottom:0;border-radius:8px 8px 0 0;overflow:hidden}
+
+/* quote header */
+.quote{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:12px 14px 8px;border-bottom:1px solid var(--rule);flex:none}
+.sym{font:600 1.05rem/1.1 var(--mono);color:var(--gold-ink);letter-spacing:.02em}
+.co{font-size:13px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qr{text-align:right;flex:none}
+.px{font:600 1.9rem/1 var(--mono)}
+.chg{font:500 13px/1.3 var(--mono);margin-top:4px}
+.up{color:var(--up)} .down{color:var(--down)} .flatc{color:var(--muted)}
+
+/* chart */
+.chart{position:relative;flex:1;min-height:150px}
+canvas{display:block;width:100%;height:100%;touch-action:manipulation}
+.clock{position:absolute;top:9px;right:10px;font:500 12px/1 var(--mono);color:var(--muted);pointer-events:none}
+.flash{position:absolute;left:50%;top:34px;transform:translate(-50%,-8px);opacity:0;pointer-events:none;
+  max-width:calc(100% - 28px);padding:8px 12px;border-radius:6px;font:600 14px/1.3 "IBM Plex Sans",sans-serif;text-align:center;
+  background:rgba(7,18,14,.92);border:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,.45);transition:opacity .2s,transform .2s}
+.flash.on{opacity:1;transform:translate(-50%,0)}
+.flash.bull{border-color:rgba(76,208,138,.6)} .flash.bear{border-color:rgba(240,119,108,.65)}
+.flash small{display:block;font:500 11px/1.3 var(--mono);color:var(--muted);letter-spacing:.04em}
+
+/* news tape */
+.tape{display:flex;gap:10px;align-items:baseline;padding:8px 14px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  font-size:13px;min-height:37px;flex:none;color:var(--muted)}
+.tape .t{font:500 12px/1 var(--mono);color:var(--faint);flex:none}
+.tape .h{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.tape .dot{width:8px;height:8px;border-radius:50%;flex:none;align-self:center;background:var(--faint)}
+.tape .dot.bull{background:var(--up)} .tape .dot.bear{background:var(--down)}
+
+/* book */
+.book{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:10px 14px;flex:none}
+.book div{min-width:0}
+.book small{display:block;font-size:11px;color:var(--muted)}
+.book b{display:block;font:600 15px/1.3 var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.take b{color:var(--ok)}
+
+/* controls */
+.ctl{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 14px;flex:none}
+.ord{font:600 16px/1 "IBM Plex Sans",sans-serif;border-radius:8px;padding:0 8px;height:58px;cursor:pointer;border:1px solid;
+  background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;transition:background .12s,transform .06s}
+.ord small{font:500 11px/1 var(--mono);opacity:.75}
+.ord:active{transform:translateY(1px)}
+.ord:disabled{opacity:.45;cursor:default}
+.ord.short{color:var(--down);border-color:rgba(240,119,108,.5)}
+.ord.flat{color:var(--text);border-color:rgba(163,184,171,.35)}
+.ord.long{color:var(--up);border-color:rgba(76,208,138,.5)}
+.ord.short.on{background:var(--down);color:#2A0D0A;border-color:var(--down)}
+.ord.flat.on{background:#3A4A42;border-color:#3A4A42}
+.ord.long.on{background:var(--up);color:#06261A;border-color:var(--up)}
+.ord.busy{opacity:.7}
+
+/* overlays (shared look with The Getaway) */
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;z-index:5;
+  background:linear-gradient(180deg,rgba(4,10,8,.55),rgba(4,10,8,.85))}
+.overlay[hidden]{display:none}
+.panel{width:100%;max-width:440px;max-height:100%;overflow:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:20px 20px 18px;box-shadow:0 18px 40px rgba(0,0,0,.45)}
+.panel h2{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.7rem;line-height:1.15;margin:0 0 6px}
+.panel h3{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1rem;margin:18px 0 6px}
+.lede{color:var(--muted);margin:0 0 12px}
+.how{margin:0 0 12px;padding-left:18px;font-size:14px}
+.how li{margin:3px 0}
+.keys{margin:0 0 14px;font-size:14px}
+.keys kbd{font:500 12px/1 "IBM Plex Sans",sans-serif;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:3px 6px;color:var(--gold-ink)}
+.facts{list-style:none;margin:0 0 16px;padding:0}
+.facts li{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--rule)}
+.facts li:last-child{border-bottom:0}
+.facts .k{color:var(--muted)}
+.btn{display:block;width:100%;font:600 16px/1 "IBM Plex Sans",sans-serif;background:var(--gold);color:#16261F;border:0;border-radius:6px;padding:14px 16px;cursor:pointer;text-align:center;text-decoration:none}
+.btn:hover{background:#C7A048}
+.btn:disabled{opacity:.6;cursor:wait}
+.btn.ghost{background:transparent;color:var(--gold-ink);border:1px solid var(--line);margin-top:8px}
+.small{color:var(--faint);font-size:13px;margin:10px 0 0}
+.board{list-style:none;margin:0;padding:0;counter-reset:r}
+.board li{display:flex;gap:10px;padding:5px 0;font-size:14px;border-bottom:1px solid var(--rule)}
+.board li:last-child{border-bottom:0}
+.board li::before{counter-increment:r;content:counter(r);width:1.6em;color:var(--faint);text-align:right}
+.board .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.board .you{color:var(--gold-ink);font-weight:600}
+.board .v{font-family:var(--mono)}
+.count{text-align:center;pointer-events:none}
+.count b{display:block;font:600 5.5rem/1 "IBM Plex Serif",Georgia,serif;color:#FFF3D0;text-shadow:0 0 28px rgba(243,210,122,.5),0 4px 18px rgba(0,0,0,.6)}
+.count span{display:block;margin-top:10px;font:500 13px/1 var(--mono);color:var(--muted);letter-spacing:.08em}
+.big{font:600 2.4rem/1.1 var(--mono);margin:4px 0 2px}
+.paid{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;font-size:1.4rem;color:var(--gold-ink);margin:8px 0 2px}
+.badge{display:inline-block;margin:6px 6px 0 0;padding:3px 9px;border-radius:4px;background:var(--page-2);font-size:13px}
+.loss{color:var(--down)}
+#results{align-items:flex-end}
+@media (min-height:760px){#results{align-items:center}}
+@media (max-width:420px){
+  .px{font-size:1.6rem}
+  .book{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:6px}
+}
+@media (prefers-reduced-motion:reduce){.flash,.ord{transition:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="bar"><a href="/me">Your dashboard</a><h1>Pump &amp; Dump</h1><span id="bal" class="small" style="margin:0"></span></div>
+  <div class="stage" id="stage">
+    <div class="quote">
+      <div style="min-width:0"><div class="sym" id="qSym">$????</div><div class="co" id="qName">Waiting for the opening bell</div></div>
+      <div class="qr"><div class="px" id="qPx">$0.00</div><div class="chg flatc" id="qChg">+0.0% today</div></div>
+    </div>
+    <div class="chart" id="chart">
+      <canvas id="cv" aria-label="Price chart"></canvas>
+      <div class="clock" id="clock">1:00</div>
+      <div class="flash" id="flash" aria-live="polite"></div>
+    </div>
+    <div class="tape" id="tape"><span class="dot"></span><span class="h">No news yet. Watch the tape.</span></div>
+    <div class="book">
+      <div><small>Position</small><b id="bPos">Flat</b></div>
+      <div><small>Value</small><b id="bVal">$10,000</b></div>
+      <div><small>Return</small><b id="bRet">+0.0%</b></div>
+      <div class="take"><small>Your take</small><b id="bTake">+0</b></div>
+    </div>
+    <div class="ctl">
+      <button class="ord short" id="oShort" type="button" disabled><span>Short</span><small>↓ / S</small></button>
+      <button class="ord flat" id="oFlat" type="button" disabled><span>Sell all</span><small>space</small></button>
+      <button class="ord long" id="oLong" type="button" disabled><span>Buy</span><small>↑ / B</small></button>
+    </div>
+
+    <div class="overlay" id="intro">
+      <div class="panel" role="dialog" aria-labelledby="introT">
+        <h2 id="introT">Pump &amp; Dump</h2>
+        <p class="lede">60 seconds. $10,000 of house money. One penny stock that's about to get pumped, then dumped.</p>
+        <ul class="how">
+          <li><b>Buy</b> to ride it up. <b>Short</b> to cash in when it crashes. <b>Sell all</b> to lock in.</li>
+          <li>Headlines move the price, but some of them are fake-outs.</li>
+          <li>A short gets margin-called if the price nearly doubles.</li>
+          <li>The market doesn't pause. Whatever you make is paid in coins.</li>
+        </ul>
+        <p class="keys"><kbd>↑</kbd> buy, <kbd>↓</kbd> short, <kbd>space</kbd> sell all. On a phone, tap the buttons.</p>
+        <ul class="facts">
+          <li><span class="k">Your best round</span><span id="iBest">—</span></li>
+          <li><span class="k">Paid today</span><span id="iToday">—</span></li>
+          <li><span class="k">Every 1% you make</span><span id="iPer">—</span></li>
+          <li><span class="k">Trading fee</span><span id="iFee">—</span></li>
+          <li id="iHypeRow" hidden><span class="k">Hype Train</span><span style="color:var(--gold-ink)" id="iHype">2× payouts</span></li>
+        </ul>
+        <button class="btn" id="startBtn" type="button">Ring the bell</button>
+        <p class="small" id="iNote"></p>
+        <h3>Top returns</h3>
+        <ol class="board" id="iBoard"><li><span class="n">Loading…</span></li></ol>
+      </div>
+    </div>
+
+    <div class="overlay" id="countdown" hidden style="background:rgba(4,10,8,.35)"><div class="count"><b id="cnt">3</b><span>OPENING BELL</span></div></div>
+
+    <div class="overlay" id="results" hidden>
+      <div class="panel" role="dialog" aria-labelledby="resT" aria-live="polite">
+        <h2 id="resT">Closing bell.</h2>
+        <div id="resBody"><p class="lede">Settling your trades…</p></div>
+        <button class="btn" id="againBtn" type="button" hidden>Trade another one</button>
+        <a class="btn ghost" href="/me">Back to your dashboard</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(id){ return document.getElementById(id); };
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function n(v){ return Math.round(Number(v || 0)).toLocaleString("en-US"); }
+function money(v){ return "$" + Math.round(v).toLocaleString("en-US"); }
+function px(v){ return "$" + Number(v).toFixed(2); }
+function pct(v){ return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "%"; }
+function clockText(sec){ sec = Math.max(0, Math.ceil(sec)); return Math.floor(sec / 60) + ":" + ("0" + (sec % 60)).slice(-2); }
+function api(path, body){
+  return fetch(path, {method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
+    headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined})
+    .then(function(r){ if (r.status === 401){ location.href = "/auth/login"; throw new Error("login"); } return r.json(); });
+}
+function show(id, on){ $(id).hidden = !on; }
+var REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+// ── State ─────────────────────────────────────────────────────────────────────
+var DELAY = 2;            // ticks of playback delay, so the chart never stutters waiting on the network
+var info = null, R = null, mode = "intro";
+var prices = [], news = [], newsShown = 0, head = 0, goAt = 0, polling = false, lastPoll = 0, finishing = false;
+var book = {pos: 0, entry: null, value: 10000, fills: []}, margin = false, pendingSide = null;
+
+// ── Canvas ────────────────────────────────────────────────────────────────────
+var cv = $("cv"), ctx = cv.getContext("2d"), W = 0, H = 0, DPR = 1;
+var yLo = 0, yHi = 1, yInit = false;
+function resize(){
+  var r = $("chart").getBoundingClientRect(); DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = r.width; H = r.height; cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+var PADL = 12, PADR = 66, PADT = 30, PADB = 24;
+function xOf(t){ return PADL + (W - PADL - PADR) * t / ((R ? R.ticks : 240) - 1); }
+function yOf(p){ return PADT + (H - PADT - PADB) * (1 - (p - yLo) / (yHi - yLo)); }
+function priceAt(h){                        // interpolated price at a fractional tick
+  var i = Math.floor(h), f = h - i;
+  if (i >= prices.length - 1) return prices[prices.length - 1];
+  return prices[i] + (prices[i + 1] - prices[i]) * f;
+}
+function niceStep(range){
+  var raw = range / 4, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), k = raw / mag;
+  return (k < 1.5 ? 1 : k < 3.5 ? 2 : k < 7.5 ? 5 : 10) * mag;
+}
+function rrect(x, y, w, h, r){ ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+
+function drawChart(now){
+  ctx.clearRect(0, 0, W, H);
+  var plotB = H - PADB;
+  if (!R || !prices.length){
+    // idle: a faint sample tape behind the menu
+    ctx.strokeStyle = "rgba(163,184,171,.08)"; ctx.lineWidth = 1;
+    for (var g = 0; g < 5; g++){ var gy = PADT + (plotB - PADT) * g / 4; ctx.beginPath(); ctx.moveTo(PADL, gy); ctx.lineTo(W - PADR, gy); ctx.stroke(); }
+    ctx.beginPath(); ctx.strokeStyle = "rgba(217,184,108,.22)"; ctx.lineWidth = 2;
+    for (var i = 0; i <= 60; i++){ var x = PADL + (W - PADL - PADR) * i / 60, v = Math.sin(i / 5 + now / 1800) * 0.3 + Math.sin(i / 2.3) * 0.12 + (i > 30 && i < 44 ? (i - 30) * 0.06 : 0) - (i >= 44 ? Math.min(0.84, (i - 44) * 0.14) - 0.84 : 0);
+      var y = PADT + (plotB - PADT) * (0.55 - v * 0.35); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
+    ctx.stroke(); return;
+  }
+  var hi = Math.min(head, prices.length - 1), cur = priceAt(hi), open = prices[0];
+  // scale: everything shown so far plus the entry line, padded; eased so it never jumps
+  var lo = Infinity, up = -Infinity;
+  for (var k = 0; k <= Math.floor(hi) + 1 && k < prices.length; k++){ if (prices[k] < lo) lo = prices[k]; if (prices[k] > up) up = prices[k]; }
+  if (book.entry){ lo = Math.min(lo, book.entry); up = Math.max(up, book.entry); }
+  var span = Math.max(up - lo, open * 0.06), tLo = lo - span * 0.14, tHi = up + span * 0.14;
+  if (!yInit){ yLo = tLo; yHi = tHi; yInit = true; }
+  var e = REDUCED ? 1 : 0.12; yLo += (tLo - yLo) * e; yHi += (tHi - yHi) * e;
+
+  // grid + price labels
+  var step = niceStep(yHi - yLo), first = Math.ceil(yLo / step) * step;
+  ctx.font = "500 11px 'IBM Plex Mono',monospace"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  for (var gp = first; gp < yHi; gp += step){
+    var gy2 = Math.round(yOf(gp)) + 0.5; if (gy2 < PADT - 4 || gy2 > plotB) continue;
+    ctx.strokeStyle = "rgba(163,184,171,.09)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(PADL, gy2); ctx.lineTo(W - PADR + 4, gy2); ctx.stroke();
+    ctx.fillStyle = "rgba(163,184,171,.55)"; ctx.fillText(px(gp), W - PADR + 10, gy2);
+  }
+  // time labels
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "rgba(163,184,171,.45)";
+  var secs = R.ticks * R.tick_ms / 1000;
+  for (var s = 0; s <= secs; s += 15) ctx.fillText(clockText(s), Math.min(W - PADR - 14, Math.max(PADL + 14, xOf(s * 1000 / R.tick_ms))), H - 7);
+  // opening price
+  var oy = Math.round(yOf(open)) + 0.5;
+  ctx.setLineDash([2, 4]); ctx.strokeStyle = "rgba(217,184,108,.35)"; ctx.beginPath(); ctx.moveTo(PADL, oy); ctx.lineTo(W - PADR + 4, oy); ctx.stroke(); ctx.setLineDash([]);
+  // headlines
+  for (var q = 0; q < news.length; q++){
+    var ev = news[q]; if (ev[0] > hi) continue; var nx = Math.round(xOf(ev[0])) + 0.5, bull = ev[1] === "bull";
+    ctx.strokeStyle = bull ? "rgba(76,208,138,.22)" : "rgba(240,119,108,.25)"; ctx.setLineDash([1, 3]);
+    ctx.beginPath(); ctx.moveTo(nx, PADT - 8); ctx.lineTo(nx, plotB); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = bull ? "#4CD08A" : "#F0776C"; ctx.beginPath(); ctx.arc(nx, PADT - 10, 3.5, 0, 6.283); ctx.fill();
+  }
+  // price line + area
+  var upNow = cur >= open, col = upNow ? "76,208,138" : "240,119,108";
+  ctx.beginPath(); ctx.moveTo(xOf(0), yOf(prices[0]));
+  for (var j = 1; j <= Math.floor(hi); j++) ctx.lineTo(xOf(j), yOf(prices[j]));
+  ctx.lineTo(xOf(hi), yOf(cur));
+  var path = new Path2D(); path.moveTo(xOf(0), yOf(prices[0]));
+  for (j = 1; j <= Math.floor(hi); j++) path.lineTo(xOf(j), yOf(prices[j]));
+  path.lineTo(xOf(hi), yOf(cur));
+  var area = new Path2D(path); area.lineTo(xOf(hi), plotB); area.lineTo(xOf(0), plotB); area.closePath();
+  var ag = ctx.createLinearGradient(0, PADT, 0, plotB); ag.addColorStop(0, "rgba(" + col + ",.22)"); ag.addColorStop(1, "rgba(" + col + ",0)");
+  ctx.fillStyle = ag; ctx.fill(area);
+  ctx.strokeStyle = "rgb(" + col + ")"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke(path);
+  // entry line
+  if (book.pos && book.entry){
+    var ey = Math.round(yOf(book.entry)) + 0.5, lc = book.pos > 0 ? "76,208,138" : "240,119,108", ex = xOf(lastFillTick());
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = "rgba(" + lc + ",.75)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(W - PADR + 4, ey); ctx.stroke(); ctx.setLineDash([]);
+    if (book.pos < 0){ var my = yOf(book.entry * 1.9); if (my > PADT){ ctx.strokeStyle = "rgba(240,119,108,.35)"; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(ex, my); ctx.lineTo(W - PADR + 4, my); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(240,119,108,.7)"; ctx.textAlign = "right"; ctx.font = "500 10px 'IBM Plex Mono',monospace"; ctx.fillText("MARGIN CALL", W - PADR - 4, my - 4); } }
+  }
+  // fills
+  for (var f = 0; f < book.fills.length; f++){
+    var fl = book.fills[f]; if (fl[0] > hi + 0.01) continue; var fx = xOf(fl[0]), fy = yOf(fl[2]);
+    if (fl[1] === 1){ ctx.fillStyle = "#4CD08A"; ctx.beginPath(); ctx.moveTo(fx, fy + 4); ctx.lineTo(fx - 6, fy + 13); ctx.lineTo(fx + 6, fy + 13); ctx.closePath(); ctx.fill(); }
+    else if (fl[1] === -1){ ctx.fillStyle = "#F0776C"; ctx.beginPath(); ctx.moveTo(fx, fy - 4); ctx.lineTo(fx - 6, fy - 13); ctx.lineTo(fx + 6, fy - 13); ctx.closePath(); ctx.fill(); }
+    else { ctx.strokeStyle = fl[3] ? "#F0776C" : "#E6EDE7"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(fx, fy, 4.5, 0, 6.283); ctx.stroke(); }
+  }
+  // head: pulse + price tag
+  var hx = xOf(hi), hy = yOf(cur);
+  if (!REDUCED && mode === "live"){ var pr = (now % 1200) / 1200; ctx.fillStyle = "rgba(" + col + "," + (0.35 * (1 - pr)).toFixed(3) + ")"; ctx.beginPath(); ctx.arc(hx, hy, 4 + pr * 10, 0, 6.283); ctx.fill(); }
+  ctx.fillStyle = "rgb(" + col + ")"; ctx.beginPath(); ctx.arc(hx, hy, 4, 0, 6.283); ctx.fill();
+  var tagY = Math.max(PADT, Math.min(plotB - 2, hy));
+  ctx.fillStyle = "rgb(" + col + ")"; rrect(W - PADR + 4, tagY - 10, PADR - 8, 20, 4); ctx.fill();
+  ctx.fillStyle = upNow ? "#06261A" : "#2A0D0A"; ctx.font = "600 11px 'IBM Plex Mono',monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(px(cur), W - PADR / 2, tagY);
+}
+function lastFillTick(){ for (var i = book.fills.length - 1; i >= 0; i--) if (book.fills[i][1]) return book.fills[i][0]; return 0; }
+
+// ── Book (what your position is worth right now, as the server will compute it) ─
+function markValue(p){
+  var v = book.value;
+  if (book.pos === 1) v = v * p / book.entry * (1 - R.fee);
+  else if (book.pos === -1) v = v * Math.max(0, 2 - p / book.entry) * (1 - R.fee);
+  return v;
+}
+function take(ret){
+  if (!info) return 0;
+  var base = Math.min(Math.floor(Math.max(0, ret) * info.per_pct), info.run_cap) * (info.hype > 1 ? info.hype : 1);
+  return Math.max(0, Math.min(base, info.daily_cap - info.today));
+}
+var cache = {};
+function setText(id, v, cls){ if (cache[id] !== v){ cache[id] = v; $(id).textContent = v; } if (cls != null && cache[id + "c"] !== cls){ cache[id + "c"] = cls; $(id).className = cls; } }
+function renderBook(){
+  if (!R || !prices.length) return;
+  var hi = Math.min(head, prices.length - 1), cur = priceAt(hi), open = prices[0], chg = (cur / open - 1) * 100;
+  setText("qPx", px(cur), "px " + (cur >= open ? "up" : "down"));
+  setText("qChg", pct(chg) + " today", "chg " + (cur >= open ? "up" : "down"));
+  var v = markValue(cur), ret = (v / R.bankroll - 1) * 100;
+  setText("bPos", book.pos === 1 ? "Long @ " + px(book.entry) : book.pos === -1 ? "Short @ " + px(book.entry) : "Flat", book.pos === 1 ? "up" : book.pos === -1 ? "down" : "");
+  setText("bVal", money(v)); setText("bRet", pct(ret), ret >= 0 ? "up" : "down"); setText("bTake", "+" + n(take(ret)));
+  setText("clock", clockText((R.ticks - 1 - hi) * R.tick_ms / 1000) + " left");
+  ["oShort", "oFlat", "oLong"].forEach(function(id, i){
+    var side = i - 1, b = $(id), on = book.pos === side;
+    b.classList.toggle("on", on); b.classList.toggle("busy", pendingSide === side);
+    b.disabled = mode !== "live"; b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+// ── Headlines ─────────────────────────────────────────────────────────────────
+var flashT = null;
+function flash(ev){
+  var el = $("flash"), t = clockText(ev[0] * R.tick_ms / 1000);
+  el.className = "flash " + ev[1]; el.innerHTML = '<small>' + esc("$" + R.symbol + " · " + t) + '</small>' + esc(ev[2]);
+  void el.offsetWidth; el.classList.add("on");
+  clearTimeout(flashT); flashT = setTimeout(function(){ el.classList.remove("on"); }, 2600);
+  $("tape").innerHTML = '<span class="dot ' + ev[1] + '"></span><span class="t">' + t + '</span><span class="h">' + esc(ev[2]) + '</span>';
+}
+function tapeMsg(msg, bad){
+  $("tape").innerHTML = '<span class="dot' + (bad ? ' bear' : '') + '"></span><span class="h"' + (bad ? ' style="color:var(--down)"' : '') + '>' + esc(msg) + '</span>';
+}
+
+// ── Market data + orders ──────────────────────────────────────────────────────
+function poll(){
+  if (!R || polling || mode === "results" || mode === "intro") return;
+  polling = true; lastPoll = performance.now();
+  var rid = R.run_id;
+  api("/api/games/pumpdump/tick", {run_id: rid, since: prices.length}).then(function(d){
+    polling = false;
+    if (!R || R.run_id !== rid || !d) return;
+    if (d.ok === false){ lost(d.error); return; }
+    if (d.from === prices.length) Array.prototype.push.apply(prices, d.prices || []);
+    (d.news || []).forEach(function(ev){ if (!news.some(function(x){ return x[0] === ev[0] && x[2] === ev[2]; })) news.push(ev); });
+  }).catch(function(){ polling = false; });
+}
+function order(side){
+  if (mode !== "live" || pendingSide !== null) return;
+  if (side === book.pos){ return; }
+  pendingSide = side; renderBook();
+  var rid = R.run_id;
+  api("/api/games/pumpdump/trade", {run_id: rid, side: side === 1 ? "long" : side === -1 ? "short" : "flat", tick: Math.floor(head)}).then(function(d){
+    pendingSide = null;
+    if (!R || R.run_id !== rid) return;
+    if (d && d.fills){ book.pos = d.pos; book.entry = d.entry; book.value = d.value; book.fills = d.fills; }
+    if (d && d.margin) tapeMsg("Margin call — your short was force-covered.", true);
+    if (!d || d.ok === false){ tapeMsg((d && d.error) || "Order failed.", true); return; }
+    if (navigator.vibrate && !REDUCED) try { navigator.vibrate(12); } catch (e) {}
+  }).catch(function(e){ pendingSide = null; if (e.message !== "login") tapeMsg("Order didn't go through. Try again.", true); });
+}
+$("oLong").addEventListener("click", function(){ order(1); });
+$("oShort").addEventListener("click", function(){ order(-1); });
+$("oFlat").addEventListener("click", function(){ order(0); });
+window.addEventListener("keydown", function(e){
+  if (mode !== "live" || e.repeat) return;
+  var k = e.key, m = {ArrowUp: 1, b: 1, B: 1, w: 1, W: 1, ArrowDown: -1, s: -1, S: -1, " ": 0, f: 0, F: 0, x: 0, X: 0}[k];
+  if (m === undefined) return; e.preventDefault(); order(m);
+});
+
+// ── Round flow ────────────────────────────────────────────────────────────────
+function renderBoard(el, b){
+  if (!b || !b.top || !b.top.length){ el.innerHTML = '<li><span class="n">Nobody has traded yet. Be the first.</span></li>'; return; }
+  el.innerHTML = b.top.map(function(r){ return '<li><span class="n' + (r.you ? ' you' : '') + '">' + esc(r.name) + '</span><span class="v ' + (r.best >= 0 ? 'up' : 'down') + '">' + pct(r.best) + '</span></li>'; }).join("");
+}
+function loadInfo(){
+  return api("/api/games/pumpdump/info").then(function(d){
+    if (!d || d.ok === false){ $("iNote").textContent = (d && d.error) || "Couldn't load your stats."; return; }
+    info = d;
+    $("iBest").textContent = d.best != null ? pct(d.best) : "No rounds yet";
+    if (d.balance != null) $("bal").textContent = "Balance " + n(d.balance);
+    $("iToday").textContent = n(d.today) + " of " + n(d.daily_cap);
+    $("iPer").textContent = n(d.per_pct) + " coins";
+    $("iFee").textContent = d.fee ? (d.fee * 100).toFixed(1) + "% a trade" : "Free (tag perk)";
+    $("iHypeRow").hidden = !(d.hype > 1); $("iHype").textContent = d.hype + "× payouts";
+    $("iNote").textContent = d.today >= d.daily_cap
+      ? "You've hit today's limit. Rounds still count for your best return and the leaderboard."
+      : "Pays up to " + n(d.run_cap) + " a round. Losing rounds cost you nothing.";
+    renderBoard($("iBoard"), d.board);
+  }).catch(function(e){ if (e.message !== "login") $("iNote").textContent = "Couldn't reach the server."; });
+}
+function start(){
+  var btn = $("startBtn"), again = $("againBtn"); btn.disabled = true; again.disabled = true; btn.textContent = "Getting a stock…";
+  api("/api/games/pumpdump/start", {}).then(function(d){
+    btn.disabled = false; again.disabled = false; btn.textContent = "Ring the bell";
+    if (!d || d.ok === false){ $("iNote").textContent = (d && d.error) || "Couldn't start a round."; show("results", false); show("intro", true); return; }
+    R = d; prices = []; news = []; newsShown = 0; head = 0; yInit = false; finishing = false; margin = false; pendingSide = null;
+    book = {pos: 0, entry: null, value: d.bankroll, fills: []}; cache = {};
+    goAt = performance.now() + d.go_ms;
+    $("qSym").textContent = "$" + d.symbol; $("qName").textContent = d.name + " · " + d.blurb;
+    tapeMsg("No news yet. Watch the tape.");
+    show("intro", false); show("results", false);
+    mode = "countdown"; show("countdown", true); $("cnt").textContent = "3";
+    renderBook();
+  }).catch(function(e){ btn.disabled = false; again.disabled = false; btn.textContent = "Ring the bell"; if (e.message !== "login") $("iNote").textContent = "Couldn't reach the server."; });
+}
+var pending = null;
+function finish(){
+  if (finishing) return; finishing = true; mode = "closing";
+  pending = {run_id: R.run_id, tick: R.ticks - 1};
+  renderBook();
+  setTimeout(function(){ show("results", true); $("againBtn").hidden = true; $("resT").textContent = "Closing bell.";
+    $("resBody").innerHTML = '<p class="lede">Settling your trades…</p>'; submit(); }, 700);
+}
+function submit(){
+  api("/api/games/pumpdump/finish", pending).then(function(r){
+    if (!r || r.ok === false){ resultError((r && r.error) || "Couldn't settle that round."); return; }
+    book.fills = r.fills || book.fills; book.pos = 0; book.entry = null;
+    var cls = r.ret >= 0 ? "up" : "down";
+    var h = '<p class="big ' + cls + '">' + pct(r.ret) + '</p><p class="lede">' + money(R.bankroll) + ' → ' + money(r.value) + ' on $' + esc(R.symbol) + '</p>';
+    h += '<p class="paid">+' + n(r.payout) + ' coins</p><p class="lede" style="margin-top:0">' + (r.payout ? 'added to your balance' : (r.ret > 0 ? 'No payout on this round' : 'House money, so you lost nothing')) + '</p><ul class="facts">';
+    h += '<li><span class="k">Return × ' + n(info ? info.per_pct : 10) + ' coins</span><span>' + n(r.coin_part) + '</span></li>';
+    if (r.capped) h += '<li><span class="k">Per-round limit</span><span>' + n(info ? info.run_cap : 2000) + '</span></li>';
+    if (r.hype > 1) h += '<li><span class="k">Hype Train</span><span>×' + r.hype + '</span></li>';
+    if (r.xp) h += '<li><span class="k">XP</span><span>+' + n(r.xp) + '</span></li>';
+    h += '<li><span class="k">Trades</span><span>' + n(r.trades) + '</span></li>';
+    h += '<li><span class="k">Day range</span><span>' + px(r.low) + ' – ' + px(r.high) + '</span></li>';
+    h += '<li><span class="k">Paid today</span><span>' + n(r.today) + ' of ' + n(r.daily_cap) + '</span></li></ul>';
+    if (r.margin) h += '<p class="small loss">Your short got margin-called.</p>';
+    if (!r.trades) h += '<p class="small">You never traded. Next time, buy the pump and short the dump.</p>';
+    if (!r.eligible) h += '<p class="small">Rounds that end in the first 5 seconds don’t pay.</p>';
+    if (r.daily_capped) h += '<p class="small">You’ve reached today’s limit, so this round paid what was left.</p>';
+    if (r.new_best) h += '<span class="badge">New personal best</span>';
+    (r.achievements || []).forEach(function(a){ h += '<span class="badge">🏆 ' + esc(a) + '</span>'; });
+    $("resBody").innerHTML = h;
+    $("bal").textContent = "Balance " + n(r.balance);
+    if (info){ info.best = r.best; info.today = r.today; }
+    $("iBest").textContent = r.best != null ? pct(r.best) : "No rounds yet"; $("iToday").textContent = n(r.today) + " of " + n(r.daily_cap);
+    renderBoard($("iBoard"), r.board);
+    mode = "results"; $("againBtn").hidden = false; $("againBtn").focus();
+  }).catch(function(e){ if (e.message !== "login") resultError("Couldn't reach the server. Try again in a moment."); });
+}
+function lost(msg){                         // the server dropped this round (expired, or started again in another tab)
+  if (mode === "results" || finishing) return;
+  finishing = true; mode = "results"; show("countdown", false); renderBook(); show("results", true);
+  $("resT").textContent = "Round closed.";
+  $("resBody").innerHTML = '<p class="lede">' + esc((msg || "This round isn't active anymore.") + " If you started a round in another tab, finish it there.") + '</p>';
+  $("againBtn").hidden = false;
+}
+function resultError(msg){
+  $("resBody").innerHTML = '<p class="lede loss">' + esc(msg) + '</p><button class="btn ghost" id="retryBtn" type="button">Try settling again</button>';
+  $("retryBtn").addEventListener("click", function(){ $("resBody").innerHTML = '<p class="lede">Settling your trades…</p>'; submit(); });
+  mode = "results"; $("againBtn").hidden = false;
+}
+$("startBtn").addEventListener("click", start);
+$("againBtn").addEventListener("click", start);
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+function frame(now){
+  requestAnimationFrame(frame);
+  try {
+    if (R && (mode === "countdown" || mode === "live" || mode === "closing")){
+      var t = (now - goAt) / R.tick_ms;
+      if (mode === "countdown"){
+        var left = Math.ceil(-t * R.tick_ms / 1000);
+        if (t >= 0){ mode = "live"; show("countdown", false); } else if (String(left) !== $("cnt").textContent) $("cnt").textContent = Math.max(1, left);
+      }
+      if (t >= -1 && now - lastPoll > 300) poll();
+      if (mode === "live"){
+        head = Math.max(0, Math.min(t - DELAY, prices.length - 1, R.ticks - 1));
+        while (newsShown < news.length && news[newsShown][0] <= head){ flash(news[newsShown]); newsShown++; }
+        // a squeezed short gets force-covered; mirror it here (the server does the same on settle)
+        if (book.pos === -1 && prices.length && priceAt(head) >= 1.9 * book.entry && !margin){
+          margin = true; var mt = Math.floor(head); book.value = markValue(prices[mt]); book.fills = book.fills.concat([[mt, 0, prices[mt], "margin"]]);
+          book.pos = 0; book.entry = null; tapeMsg("Margin call — your short was force-covered.", true);
+        }
+        if (prices.length >= R.ticks && t - DELAY >= R.ticks - 0.2) { head = R.ticks - 1; finish(); }
+      }
+      renderBook();
+    }
+    drawChart(now);
+  } catch (e){ if (!frame.warned){ frame.warned = true; console.error(e); } }
+}
+window.addEventListener("resize", resize);
+resize(); loadInfo(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
