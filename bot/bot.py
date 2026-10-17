@@ -27547,6 +27547,32 @@ async def _handle_videopoker(message: discord.Message, rest: str):
     )
 
 
+async def _web_bounded(coro, seconds: float = 4.0):
+    """Discord-side extras (XP, achievement messages) after a web game has already paid
+    and saved. The web request gives up after 10 s and cancels the coroutine, so these
+    get a short time budget instead of being able to hold the answer hostage."""
+    try:
+        return await asyncio.wait_for(coro, seconds)
+    except asyncio.TimeoutError:
+        log.warning("web game extras timed out")
+    except Exception:
+        log.exception("web game extras failed")
+    return None
+
+
+def _web_background(coro):
+    """Fire-and-forget for announcements: the player's answer never waits on them."""
+    async def _run():
+        try:
+            await coro
+        except Exception:
+            pass
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        coro.close()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 🐦 WEB GAME: FLAPPY DEGEN — tap to flap through neon candlestick pipes.
 # Pays coins like The Getaway (never costs any): every pipe passed, every coin
@@ -27733,6 +27759,16 @@ async def _flap_dispatch(uid: int, action: str, payload: dict) -> dict:
         except Exception:
             pass
 
+        result = {"ok": True, "pipes": pipes, "coins": coins, "perfects": perfects, "seconds": round(seconds, 1),
+                  "pipe_part": pipe_part, "coin_part": coin_part, "perfect_part": perfect_part,
+                  "capped": pipe_part + coin_part + perfect_part > FLAP_RUN_CAP, "hype": hype, "payout": payout,
+                  "daily_capped": base * hype > left, "today": today + payout, "daily_cap": FLAP_DAILY_CAP,
+                  "balance": int(balance), "xp": 0, "best": max(prev_best, pipes), "new_best": new_best,
+                  "record": new_best and pipes > prev_record, "achievements": [],
+                  "stats": _flap_public_stats(g, uid_s), "boards": _flap_boards(g, uid_s)}
+        done = {**result, "_uid": uid, "_ts": now}
+        _flap_done[run_id] = done          # paid and saved: from here on a retry gets this same answer
+
         notif = None
         try:
             cid = get_notification_channel_id(load_config())
@@ -27740,36 +27776,30 @@ async def _flap_dispatch(uid: int, action: str, payload: dict) -> dict:
         except Exception:
             notif = None
         xp = min(FLAP_XP_CAP, pipes) if seconds >= FLAP_MIN_SECONDS else 0
-        if xp:
-            try:
-                await grant_xp(uid, xp, channel=notif)
-            except Exception:
-                log.exception("flappy xp failed")
         unlocked = []
-        for ach_id, ok in (("flappy_10", pipes >= 10), ("flappy_50", pipes >= 50), ("flappy_100", pipes >= 100)):
-            if ok:
+
+        async def _extras():
+            if xp:
                 try:
-                    if await _grant_achievement(uid, ach_id, notif):
-                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                    await grant_xp(uid, xp, channel=notif)
                 except Exception:
-                    log.exception("flappy achievement failed")
+                    log.exception("flappy xp failed")
+            for ach_id, ok in (("flappy_10", pipes >= 10), ("flappy_50", pipes >= 50), ("flappy_100", pipes >= 100)):
+                if ok:
+                    try:
+                        if await _grant_achievement(uid, ach_id, notif):
+                            unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                    except Exception:
+                        log.exception("flappy achievement failed")
+        await _web_bounded(_extras())
+        result["xp"] = done["xp"] = int(xp)
+        result["achievements"] = done["achievements"] = list(unlocked)
         if new_best and pipes > prev_record and pipes >= FLAP_RECORD_MIN and notif:
-            try:
-                await notif.send(
-                    f"🐦 **{_dash_name(uid)}** just flapped through **{pipes:,}** pipes in Flappy Degen — "
-                    f"a new server record. `_flappy` if you think you can beat it.",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except Exception:
-                pass
-        result = {"ok": True, "pipes": pipes, "coins": coins, "perfects": perfects, "seconds": round(seconds, 1),
-                  "pipe_part": pipe_part, "coin_part": coin_part, "perfect_part": perfect_part,
-                  "capped": pipe_part + coin_part + perfect_part > FLAP_RUN_CAP, "hype": hype, "payout": payout,
-                  "daily_capped": base * hype > left, "today": today + payout, "daily_cap": FLAP_DAILY_CAP,
-                  "balance": int(balance), "xp": int(xp), "best": max(prev_best, pipes), "new_best": new_best,
-                  "record": new_best and pipes > prev_record, "achievements": unlocked,
-                  "stats": _flap_public_stats(g, uid_s), "boards": _flap_boards(g, uid_s)}
-        _flap_done[run_id] = {**result, "_uid": uid, "_ts": now}
+            _web_background(notif.send(
+                f"🐦 **{_dash_name(uid)}** just flapped through **{pipes:,}** pipes in Flappy Degen — "
+                f"a new server record. `_flappy` if you think you can beat it.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            ))
         return result
 
     return {"ok": False, "error": "Unknown action."}
@@ -27988,6 +28018,15 @@ async def _reels_dispatch(uid: int, action: str, payload: dict) -> dict:
         recent.insert(0, {"bet": bet, "payout": payout, "mult": mult, "fs": n_free, "ts": int(now)})
         del recent[12:]
 
+        next_seal = _reels_next_seal(g, uid_s)
+        result = {"ok": True, "spin_id": spin_id, "bet": bet, "base": rnd["base"], "free": rnd["free"],
+                  "payout": payout, "net": payout - bet, "mult": mult, "capped": raw > payout,
+                  "balance": int(balance), "server_seed": server_seed, "client_seed": client_seed, "seal": seal,
+                  "next_seal": next_seal, "new_best": new_best, "achievements": [],
+                  "stats": _reels_public_stats(g, uid_s), "board": _reels_board(g, uid_s), "recent": recent[:12]}
+        g["last"][uid_s] = result
+        _save_json_file(WEB_GAMES_FILE, data)   # paid and saved before any Discord work: a retry replays this spin
+
         notif = None
         try:
             cid = get_notification_channel_id(load_config())
@@ -28009,32 +28048,25 @@ async def _reels_dispatch(uid: int, action: str, payload: dict) -> dict:
         except Exception:
             log.exception("reels bookkeeping failed")
         unlocked = []
-        for ach_id, ok in (("reels_fs", n_free > 0), ("reels_25x", mult >= 2500), ("reels_100x", mult >= 10000),
-                           ("reels_wolfpack", wolf5)):
-            if ok:
-                try:
-                    if await _grant_achievement(uid, ach_id, notif):
-                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
-                except Exception:
-                    log.exception("reels achievement failed")
+
+        async def _extras():
+            for ach_id, ok in (("reels_fs", n_free > 0), ("reels_25x", mult >= 2500), ("reels_100x", mult >= 10000),
+                               ("reels_wolfpack", wolf5)):
+                if ok:
+                    try:
+                        if await _grant_achievement(uid, ach_id, notif):
+                            unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                    except Exception:
+                        log.exception("reels achievement failed")
+        await _web_bounded(_extras())
+        result["achievements"] = list(unlocked)
         if notif and (payout >= REELS_ANNOUNCE_WIN or mult >= 10000):
-            try:
-                how = f" out of **{n_free}** free spins" if n_free else ""
-                await notif.send(
-                    f"🐺 **{_dash_name(uid)}** hit **{mult / 100:,.0f}×** on Wolf's Fortune{how} and took **{payout:,}** coins"
-                    f"{' — a new slots record' if payout > prev_record else ''}. `_reels` to take your shot.",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except Exception:
-                pass
-        next_seal = _reels_next_seal(g, uid_s)
-        result = {"ok": True, "spin_id": spin_id, "bet": bet, "base": rnd["base"], "free": rnd["free"],
-                  "payout": payout, "net": payout - bet, "mult": mult, "capped": raw > payout,
-                  "balance": int(balance), "server_seed": server_seed, "client_seed": client_seed, "seal": seal,
-                  "next_seal": next_seal, "new_best": new_best, "achievements": unlocked,
-                  "stats": _reels_public_stats(g, uid_s), "board": _reels_board(g, uid_s), "recent": recent[:12]}
-        g["last"][uid_s] = result
-        _save_json_file(WEB_GAMES_FILE, data)
+            how = f" out of **{n_free}** free spins" if n_free else ""
+            _web_background(notif.send(
+                f"🐺 **{_dash_name(uid)}** hit **{mult / 100:,.0f}×** on Wolf's Fortune{how} and took **{payout:,}** coins"
+                f"{' — a new slots record' if payout > prev_record else ''}. `_reels` to take your shot.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            ))
         return result
 
     return {"ok": False, "error": "Unknown action."}
@@ -28169,24 +28201,24 @@ async def _mines_finish(uid: int, g: dict, act: dict, boom: bool, hit_tile=None)
     except Exception:
         log.exception("mines bookkeeping failed")
     unlocked = []
-    for ach_id, ok in (("mines_first", not boom and safe > 0), ("mines_10x", not boom and mult >= 1000),
-                       ("mines_100x", not boom and mult >= 10000)):
-        if ok:
-            try:
-                if await _grant_achievement(uid, ach_id, notif):
-                    unlocked.append(ACHIEVEMENTS[ach_id]["name"])
-            except Exception:
-                log.exception("mines achievement failed")
+
+    async def _extras():
+        for ach_id, ok in (("mines_first", not boom and safe > 0), ("mines_10x", not boom and mult >= 1000),
+                           ("mines_100x", not boom and mult >= 10000)):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("mines achievement failed")
+    await _web_bounded(_extras())
     if notif and not boom and (payout >= MINES_ANNOUNCE_WIN or mult >= 10000):
-        try:
-            await notif.send(
-                f"💣 **{_dash_name(uid)}** walked through **{act['mines']}** bomb{'s' if act['mines'] > 1 else ''} in Mines, "
-                f"cashed out at **{mult / 100:,.2f}×** and took **{payout:,}** coins"
-                f"{' — a new casino record' if payout > prev_record else ''}. `_mines` if you've got the nerve.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            pass
+        _web_background(notif.send(
+            f"💣 **{_dash_name(uid)}** walked through **{act['mines']}** bomb{'s' if act['mines'] > 1 else ''} in Mines, "
+            f"cashed out at **{mult / 100:,.2f}×** and took **{payout:,}** coins"
+            f"{' — a new casino record' if payout > prev_record else ''}. `_mines` if you've got the nerve.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        ))
     seal = _mines_next_seal(g, uid_s)
     result = {"ok": True, "game_id": act["game_id"], "over": True, "boom": boom, "hit": hit_tile,
               "bombs": act["bombs"], "revealed": act["revealed"], "mines": act["mines"], "safe": safe,

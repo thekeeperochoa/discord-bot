@@ -567,6 +567,18 @@ function collide(){
   }
 }
 function hitRect(cx0, cy0, r, nx, y0, y1){ var ny = clamp(cy0, y0, y1), dx = cx0 - nx, dy = cy0 - ny; return dx * dx + dy * dy < r * r; }
+// Send the flight in. A retry with the same run_id gets the same answer, so it's safe to try again.
+function report(payload, tries){
+  function again(){ return new Promise(function(r){ setTimeout(r, 1200); }).then(function(){ return report(payload, tries + 1); }); }
+  return api("/api/games/flappy/finish", payload).then(function(d){
+    if (d && d.ok === false && tries < 2 && /too long|went wrong|try again/i.test(d.error || "")) return again();
+    return d;
+  }, function(e){
+    if (e && e.message === "login") throw e;
+    if (tries < 2) return again();
+    return {ok: false, error: "Couldn't reach the server. If you earned coins they'll show in your balance."};
+  });
+}
 function die(){
   if (S.state !== "play") return;
   S.state = "dying"; S.vy = Math.min(S.vy, -180); S.shake = REDUCED ? 0 : 12; S.flash = .9; S.slow = REDUCED ? 1 : .22; S.overShown = false;
@@ -579,9 +591,7 @@ function die(){
   var run = S.run, payload = {run_id: run && run.run_id, duration_ms: Math.round(S.t * 1000), pipes: S.passed, coins: S.coins, perfects: S.perfects};
   S.result = null;
   if (run){
-    pending = api("/api/games/flappy/finish", payload).then(function(d){ S.result = d; if (S.state === "dead" && S.overShown) showResult(d); })
-      .catch(function(){ S.result = {ok: false, error: "Couldn't reach the server."}; })
-      .then(function(){ prefetch(); });
+    pending = report(payload, 0).then(function(d){ S.result = d; showResult(d); }).then(prefetch, prefetch);
   } else { S.result = {ok: false, offline: true}; pending = Promise.resolve().then(prefetch); }
 }
 
@@ -765,7 +775,7 @@ function gameOver(){
   setTimeout(function(){ $("again").focus({preventScroll: true}); }, 50);
 }
 function showResult(d){
-  if (!d || S.state !== "over") return;
+  if (!d || S.state !== "over" || $("over").hidden) return;   // not on the card yet: gameOver() picks S.result up when it opens
   if (!d.ok){ $("earn").textContent = d.offline ? "Offline flight — nothing paid." : (d.error || "Couldn't record that flight."); return; }
   var ln = function(a, b){ return '<div class="ln"><span>' + a + '</span><span>' + b + '</span></div>'; };
   var h = ln(n(d.pipes) + " pipes × " + info.pipe_value, n(d.pipe_part)) + (d.coins ? ln(n(d.coins) + " coins × " + info.coin_value, n(d.coin_part)) : "") + (d.perfects ? ln(n(d.perfects) + " perfect × " + info.perfect_value, n(d.perfect_part)) : "");
