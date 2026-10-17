@@ -3176,6 +3176,10 @@ ACHIEVEMENTS = {
     "mines_first":   {"emoji":"💣", "name":"Sweeper",              "desc":"Cash out a game of Mines",                 "reward":200},
     "mines_10x":     {"emoji":"🧨", "name":"Steady Hands",         "desc":"Cash out at 10× or more in Mines",          "reward":1000},
     "mines_100x":    {"emoji":"💥", "name":"Bomb Squad",           "desc":"Cash out at 100× or more in Mines",         "reward":10000},
+    "reels_fs":      {"emoji":"🎟️", "name":"Free Ride",            "desc":"Trigger free spins in Wolf's Fortune",      "reward":500},
+    "reels_25x":     {"emoji":"🐺", "name":"Howl at the Moon",     "desc":"Win 25× your bet on one spin of Wolf's Fortune", "reward":2000},
+    "reels_100x":    {"emoji":"🌕", "name":"Wolf of the Strip",    "desc":"Win 100× your bet on one spin of Wolf's Fortune", "reward":10000},
+    "reels_wolfpack":{"emoji":"👑", "name":"Pack Leader",          "desc":"Land five Wolves on a line in Wolf's Fortune", "reward":25000},
     "nr_first":      {"emoji":"📦", "name":"Package Delivered",    "desc":"Deliver a route in Night Run",             "reward":300},
     "nr_clean":      {"emoji":"🧼", "name":"Not a Scratch on It",  "desc":"Deliver 100% of the load on Night Run route 3 or later", "reward":2500},
     "nr_allstars":   {"emoji":"🌙", "name":"Five-Star Driver",     "desc":"Earn every star in Night Run",             "reward":7500},
@@ -26774,6 +26778,7 @@ def _web_games_load() -> dict:
         nr.setdefault(k, {})
     _vp_store(data)
     _mines_store(data)
+    _reels_store(data)
     return data
 
 
@@ -26802,6 +26807,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _nr_dispatch(uid, action, payload)
     if game == "mines":
         return await _mines_dispatch(uid, action, payload)
+    if game == "reels":
+        return await _reels_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27284,6 +27291,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better, royal flush pays 800×: <{base}/games/videopoker>\n"
         f"🌙 **Night Run** — run the package across town, unlock and buy cars: <{base}/games/nightrun>\n"
         f"💣 **Mines** — flip tiles, dodge bombs, cash out before it blows: <{base}/games/mines>\n"
+        f"🐺 **Wolf's Fortune** — 3D slots, wild wolves and tripled free spins: <{base}/games/reels>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -27528,6 +27536,272 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🐺 WEB GAME: WOLF'S FORTUNE — a 5-reel, 20-line slot machine, real coin bets.
+# Bet is split across 20 fixed lines (bets are whole multiples of 20). Three or
+# more matching symbols left to right on a line pay; the Wolf is wild for
+# everything but the Bonus coin. Three or more Bonus coins anywhere pay and start
+# 10/15/20 free spins where every win is tripled (they can retrigger, up to 100).
+# Everything is decided on the server: the bet is taken, the whole round (the paid
+# spin plus every free spin it triggers) is settled, and the page just plays it back.
+# Provably fair: before each spin the page is shown sha256(server_seed) (the seal).
+# Reel r on spin i of a round stops at int(sha256(f"{server}:{client}:{i}:{r}")) mod
+# the strip length. The seed is revealed after the spin so the page can check it.
+# Return to player is 96.02% exactly (worked out over every reel combination);
+# the house keeps about 4%.
+# ─────────────────────────────────────────────────────────────────────────────
+REELS_LINES_N = 20
+REELS_MIN_BET = 20               # bets are whole multiples of 20 (at least one coin per line)
+REELS_MAX_BET = 25_000
+REELS_MAX_WIN = 5_000_000        # one spin, free spins included, pays at most this
+REELS_RTP_PCT = 96
+REELS_FS_MULT = 3
+REELS_FS_CAP = 100               # most free spins one feature can run
+REELS_ANNOUNCE_WIN = 250_000     # announce wins this big, or any 100×+ spin
+_reels_last: dict[int, float] = {}
+# W wolf (wild) · S bonus coin (scatter) · 7 seven · D diamond · C cash · B bell · R bar · H cherry · L lemon
+REELS_STRIPS = [
+    "WRDHCLBRHLS7HRBCLDHRLBHCLR7HBL",
+    "WDRHCLBHRLS7HBCLWDRHLBHRCL7HBL",
+    "WDRHCLBRHLDS7BCLWHRLDBHRCL7HBL",
+    "WRDHCLBRHLS7RBCLWHDRLBHCLR7HBL",
+    "WRDHCLBRHLS7HRBCLDHRLBHCLR7HBL",
+]
+# Rows: 0 top, 1 middle, 2 bottom — one entry per reel. Mirrored in bot/web/reels.html (drawing only).
+REELS_LINES = [
+    (1, 1, 1, 1, 1), (0, 0, 0, 0, 0), (2, 2, 2, 2, 2), (0, 1, 2, 1, 0), (2, 1, 0, 1, 2),
+    (0, 0, 1, 0, 0), (2, 2, 1, 2, 2), (1, 2, 2, 2, 1), (1, 0, 0, 0, 1), (1, 0, 1, 0, 1),
+    (1, 2, 1, 2, 1), (0, 1, 0, 1, 0), (2, 1, 2, 1, 2), (1, 1, 0, 1, 1), (1, 1, 2, 1, 1),
+    (0, 1, 1, 1, 0), (2, 1, 1, 1, 2), (0, 2, 0, 2, 0), (2, 0, 2, 0, 2), (0, 2, 2, 2, 0),
+]
+REELS_PAYS = {   # × line bet for 3 / 4 / 5 in a row from the left
+    "W": (30, 150, 1000), "7": (25, 100, 500), "D": (20, 75, 300), "C": (15, 50, 200),
+    "B": (10, 30, 120), "R": (8, 20, 80), "H": (6, 15, 50), "L": (5, 11, 40),
+}
+REELS_SCATTER_PAY = {3: 2, 4: 10, 5: 50}     # × total bet, anywhere on screen
+REELS_FS_SPINS = {3: 10, 4: 15, 5: 20}
+
+
+def reels_stops(server_seed: str, client_seed: str, spin: int) -> list:
+    """Where each reel stops on spin `spin` of a round (0 = the paid spin, 1+ = free spins).
+    Mirrored in bot/web/reels.html for verification."""
+    return [int(hashlib.sha256(f"{server_seed}:{client_seed}:{spin}:{r}".encode()).hexdigest(), 16) % len(REELS_STRIPS[r])
+            for r in range(5)]
+
+
+def reels_grid(stops: list) -> list:
+    """grid[reel][row] for the three visible rows."""
+    return [[REELS_STRIPS[r][(stops[r] + row) % len(REELS_STRIPS[r])] for row in range(3)] for r in range(5)]
+
+
+def reels_line_pay(syms) -> tuple:
+    """(pay × line bet, symbol, count) for one line, left to right. The Wolf stands in for anything but the Bonus coin."""
+    best = (0, None, 0)
+    k = 0
+    while k < 5 and syms[k] == "W":
+        k += 1
+    if k >= 3:
+        best = (REELS_PAYS["W"][k - 3], "W", k)
+    target = next((s for s in syms if s != "W"), None)
+    if target and target != "S":
+        k = 0
+        while k < 5 and syms[k] in ("W", target):
+            k += 1
+        if k >= 3 and REELS_PAYS[target][k - 3] > best[0]:
+            best = (REELS_PAYS[target][k - 3], target, k)
+    return best
+
+
+def reels_eval(stops: list, line_bet: int, mult: int) -> dict:
+    grid = reels_grid(stops)
+    wins, units = [], 0
+    for i, line in enumerate(REELS_LINES):
+        pay, sym, k = reels_line_pay([grid[r][line[r]] for r in range(5)])
+        if pay:
+            units += pay
+            wins.append({"line": i, "sym": sym, "n": k, "pay": pay * line_bet * mult})
+    scat = [[r, row] for r in range(5) for row in range(3) if grid[r][row] == "S"]
+    scat_pay = REELS_SCATTER_PAY.get(len(scat), 0) * line_bet * REELS_LINES_N * mult
+    return {"stops": stops, "grid": ["".join(c) for c in grid], "wins": wins, "scatter": scat,
+            "scatter_pay": scat_pay, "win": units * line_bet * mult + scat_pay, "mult": mult,
+            "fs": REELS_FS_SPINS.get(len(scat), 0)}
+
+
+def reels_round(server_seed: str, client_seed: str, bet: int) -> dict:
+    """One paid spin plus every free spin it triggers. `fs` on a spin = free spins it added."""
+    line_bet = bet // REELS_LINES_N
+    base = reels_eval(reels_stops(server_seed, client_seed, 0), line_bet, 1)
+    spins, left, total_fs, i = [], base["fs"], base["fs"], 0
+    while left > 0:
+        i += 1
+        left -= 1
+        s = reels_eval(reels_stops(server_seed, client_seed, i), line_bet, REELS_FS_MULT)
+        s["fs"] = min(s["fs"], REELS_FS_CAP - total_fs)
+        total_fs += s["fs"]
+        left += s["fs"]
+        spins.append(s)
+    raw = base["win"] + sum(s["win"] for s in spins)
+    return {"base": base, "free": spins, "raw": raw, "payout": min(REELS_MAX_WIN, raw)}
+
+
+def _reels_store(data: dict) -> dict:
+    g = data.setdefault("reels", {})
+    for k in ("stats", "seeds", "last", "recent"):
+        g.setdefault(k, {})
+    return g
+
+
+def _reels_next_seal(g: dict, uid_s: str) -> str:
+    if uid_s not in g["seeds"]:
+        g["seeds"][uid_s] = secrets.token_hex(32)
+    return hashlib.sha256(g["seeds"][uid_s].encode()).hexdigest()
+
+
+def _reels_board(g: dict, uid_s: str) -> dict:
+    rows = [(int(s.get("best_win", 0)), u, s.get("best_mult", 0)) for u, s in g["stats"].items()
+            if int(s.get("best_win", 0)) > 0 and _is_member(None, u)]
+    rows.sort(reverse=True)
+    return {"top": [{"name": _dash_name(u), "win": w, "mult": round(m / 100, 2), "you": u == uid_s} for w, u, m in rows[:10]]}
+
+
+def _reels_public_stats(g: dict, uid_s: str) -> dict:
+    s = g["stats"].get(uid_s, {})
+    return {"spins": int(s.get("spins", 0)), "wagered": int(s.get("wagered", 0)), "won": int(s.get("won", 0)),
+            "best_win": int(s.get("best_win", 0)), "best_mult": round(int(s.get("best_mult", 0)) / 100, 2),
+            "features": int(s.get("features", 0))}
+
+
+async def _reels_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    data = _web_games_load()
+    g = _reels_store(data)
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
+        fresh = uid_s not in g["seeds"]
+        seal = _reels_next_seal(g, uid_s)
+        if fresh:
+            _save_json_file(WEB_GAMES_FILE, data)
+        return {"ok": True, "balance": int(rec.get("balance", 0)) if rec else 0,
+                "min_bet": REELS_MIN_BET, "max_bet": REELS_MAX_BET, "max_win": REELS_MAX_WIN, "rtp": REELS_RTP_PCT,
+                "lines": [list(l) for l in REELS_LINES], "strips": REELS_STRIPS,
+                "pays": {k: list(v) for k, v in REELS_PAYS.items()},
+                "scatter_pay": {str(k): v for k, v in REELS_SCATTER_PAY.items()},
+                "fs_spins": {str(k): v for k, v in REELS_FS_SPINS.items()}, "fs_mult": REELS_FS_MULT,
+                "seal": seal, "stats": _reels_public_stats(g, uid_s), "board": _reels_board(g, uid_s),
+                "recent": g["recent"].get(uid_s, [])[:12]}
+
+    if action == "spin":
+        spin_id = re.sub(r"[^A-Za-z0-9]", "", str(payload.get("spin_id", "")))[:32]
+        last = g["last"].get(uid_s)
+        if spin_id and last and last.get("spin_id") == spin_id:
+            return last                                   # a retried request gets the same answer, never a second spin
+        if now - _reels_last.get(uid, 0) < 0.5:
+            return {"ok": False, "error": "Let the reels stop first.", "retry": True}
+        try:
+            bet = int(payload.get("bet", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Pick a bet."}
+        if bet < REELS_MIN_BET or bet > REELS_MAX_BET or bet % REELS_LINES_N:
+            return {"ok": False, "error": f"Bets are {REELS_MIN_BET:,} to {REELS_MAX_BET:,} coins, in steps of {REELS_LINES_N}."}
+        bal = economy.balance(uid)
+        if bet > bal:
+            return {"ok": False, "error": f"You only have {bal:,} coins.", "balance": int(bal)}
+        _reels_last[uid] = now
+        client_seed = re.sub(r"[^A-Za-z0-9]", "", str(payload.get("client_seed", "")))[:32] or secrets.token_hex(8)
+        seal = _reels_next_seal(g, uid_s)
+        server_seed = g["seeds"].pop(uid_s)
+        economy.add(uid, -bet, "slots bet")
+        rnd = reels_round(server_seed, client_seed, bet)
+        payout, raw = rnd["payout"], rnd["raw"]
+        balance = economy.add(uid, payout, "slots win") if payout else economy.balance(uid)
+        mult = payout * 100 // bet
+        n_free = len(rnd["free"])
+        wolf5 = any(w["sym"] == "W" and w["n"] == 5 for s in [rnd["base"]] + rnd["free"] for w in s["wins"])
+
+        s = g["stats"].setdefault(uid_s, {})
+        s["spins"] = int(s.get("spins", 0)) + 1
+        s["wagered"] = int(s.get("wagered", 0)) + bet
+        s["won"] = int(s.get("won", 0)) + payout
+        if n_free:
+            s["features"] = int(s.get("features", 0)) + 1
+        new_best = payout > bet and payout > int(s.get("best_win", 0))
+        prev_record = max([int(x.get("best_win", 0)) for u, x in g["stats"].items() if u != uid_s and _is_member(None, u)] or [0])
+        if new_best:
+            s["best_win"] = payout
+        if mult > int(s.get("best_mult", 0)):
+            s["best_mult"] = mult
+        recent = g["recent"].setdefault(uid_s, [])
+        recent.insert(0, {"bet": bet, "payout": payout, "mult": mult, "fs": n_free, "ts": int(now)})
+        del recent[12:]
+
+        notif = None
+        try:
+            cid = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid)) if cid else None
+        except Exception:
+            notif = None
+        try:
+            if payout > bet:
+                economy.record_win(uid, "slots", notif)
+                track_quest_progress(uid, "games_won")
+                track_quest_progress(uid, "coins_earned", payout - bet)
+                add_tournament_score(uid, coins_earned=payout - bet, games_won=1)
+                track_economy_event("earned", payout - bet)
+            elif payout == 0:
+                economy.record_loss(uid, "slots", notif)
+            else:
+                track_quest_progress(uid, "games_played")
+            track_command_use("reels", uid)
+        except Exception:
+            log.exception("reels bookkeeping failed")
+        unlocked = []
+        for ach_id, ok in (("reels_fs", n_free > 0), ("reels_25x", mult >= 2500), ("reels_100x", mult >= 10000),
+                           ("reels_wolfpack", wolf5)):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("reels achievement failed")
+        if notif and (payout >= REELS_ANNOUNCE_WIN or mult >= 10000):
+            try:
+                how = f" out of **{n_free}** free spins" if n_free else ""
+                await notif.send(
+                    f"🐺 **{_dash_name(uid)}** hit **{mult / 100:,.0f}×** on Wolf's Fortune{how} and took **{payout:,}** coins"
+                    f"{' — a new slots record' if payout > prev_record else ''}. `_reels` to take your shot.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+        next_seal = _reels_next_seal(g, uid_s)
+        result = {"ok": True, "spin_id": spin_id, "bet": bet, "base": rnd["base"], "free": rnd["free"],
+                  "payout": payout, "net": payout - bet, "mult": mult, "capped": raw > payout,
+                  "balance": int(balance), "server_seed": server_seed, "client_seed": client_seed, "seal": seal,
+                  "next_seal": next_seal, "new_best": new_best, "achievements": unlocked,
+                  "stats": _reels_public_stats(g, uid_s), "board": _reels_board(g, uid_s), "recent": recent[:12]}
+        g["last"][uid_s] = result
+        _save_json_file(WEB_GAMES_FILE, data)
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_reels(message: discord.Message, rest: str):
+    """_reels — link to Wolf's Fortune on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🐺 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🐺 **Wolf's Fortune** — a 5-reel, 20-line slot machine. Wolves are wild, three Bonus coins start "
+        f"free spins where every win is tripled: <{base}/games/reels>\n"
+        f"Bets {REELS_MIN_BET:,}–{REELS_MAX_BET:,} coins. Every spin is provably fair.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -29730,7 +30004,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                              "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP},
                 "videopoker": _vp_public_stats(data["videopoker"], uid_s),
                 "nightrun": _nr_public_stats(data["nightrun"], uid_s),
-                "mines": _mines_public_stats(data["mines"], uid_s)}
+                "mines": _mines_public_stats(data["mines"], uid_s),
+                "reels": _reels_public_stats(data["reels"], uid_s)}
     section("games", _games)
 
     return out
@@ -32025,7 +32300,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage", "mines", "minesweeper",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -33194,6 +33469,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("mines", "minesweeper"):
         await _handle_mines(message, rest)
+        return True
+    if cmd_name in ("reels", "vegas", "wolfslots"):
+        await _handle_reels(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)

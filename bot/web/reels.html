@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#0A0614">
+<title>Wolf's Fortune</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0A0614; --bg2:#140B2A; --ink:#F4EEDC; --muted:#B9ADD3; --faint:#8679A6; --rule:rgba(185,173,211,.16);
+  --gold:#F5C64B; --gold-hi:#FFE9A3; --gold-lo:#B07A12; --neon:#FF3D9A; --cyan:#3DE0FF; --violet:#8B5CFF;
+  --ok:#8EF0B4; --bad:#FF7A7A; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace; --disp:"Bungee","Impact",system-ui,sans-serif;
+  --face1:#FFFDF6; --face2:#EDE3CB; --rim:#2A1B4F;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;min-height:100%}
+body{color:var(--ink);font:400 15px/1.5 "IBM Plex Sans",system-ui,-apple-system,sans-serif;font-variant-numeric:tabular-nums;
+  -webkit-tap-highlight-color:transparent;overflow-x:hidden;
+  background:radial-gradient(900px 520px at 50% -8%,rgba(139,92,255,.32),transparent 70%),
+             radial-gradient(700px 500px at 10% 110%,rgba(255,61,154,.16),transparent 70%),
+             radial-gradient(700px 500px at 95% 100%,rgba(61,224,255,.12),transparent 70%),var(--bg);
+  background-attachment:fixed;transition:background-color .8s}
+body.fsmode{background-color:#120626}
+a{color:var(--gold);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--gold-hi);outline-offset:3px;border-radius:6px}
+button{font:inherit}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px 48px}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 2px}
+.bar h1{font:400 1rem/1 var(--disp);letter-spacing:.04em;margin:0;color:var(--gold)}
+.bar a,.bar .bal{font-size:14px}
+.bar .bal{color:var(--muted)} .bar .bal b{color:var(--ink);font-family:var(--mono);font-weight:600}
+.stars{position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.55;
+  background-image:radial-gradient(1px 1px at 12% 18%,#fff,transparent),radial-gradient(1px 1px at 72% 12%,#fff,transparent),radial-gradient(1.5px 1.5px at 38% 8%,#fff,transparent),
+  radial-gradient(1px 1px at 88% 32%,#fff,transparent),radial-gradient(1px 1px at 22% 46%,#cfc2ff,transparent),radial-gradient(1.5px 1.5px at 60% 28%,#fff,transparent),
+  radial-gradient(1px 1px at 6% 72%,#fff,transparent),radial-gradient(1px 1px at 94% 64%,#cfc2ff,transparent),radial-gradient(1px 1px at 50% 52%,#fff,transparent)}
+
+/* ── Cabinet ─────────────────────────────────────────────────────────── */
+.stage{perspective:1600px;padding:6px 0 0;position:relative}
+.cab{position:relative;margin:0 auto;max-width:860px;border-radius:26px;padding:0 18px 18px;
+  background:linear-gradient(180deg,#2A1858,#170C33 38%,#0F0824);
+  box-shadow:0 0 0 2px #4A2E8F,0 0 0 5px #0B0618,0 0 0 7px rgba(245,198,75,.55),0 40px 90px rgba(0,0,0,.6),0 0 120px rgba(139,92,255,.25),inset 0 2px 0 rgba(255,255,255,.12);
+  transform:rotateX(var(--tx,3deg)) rotateY(var(--ty,0deg));transition:transform .5s cubic-bezier(.2,.8,.2,1)}
+.cab.shake{animation:cabshake .5s cubic-bezier(.36,.07,.19,.97)}
+.cab.thud{animation:thud .18s ease-out}
+@keyframes cabshake{10%,90%{translate:-2px 0}20%,80%{translate:4px 1px}30%,50%,70%{translate:-7px -1px}40%,60%{translate:7px 1px}}
+@keyframes thud{40%{translate:0 2px}}
+
+.marquee{position:relative;margin:0 -18px;padding:15px 20px 12px;border-radius:26px 26px 0 0;text-align:center;overflow:hidden;
+  background:radial-gradient(120% 140% at 50% 120%,#3A1C7A,#1A0C3A 60%,#100726);border-bottom:2px solid rgba(245,198,75,.45)}
+.marquee .title{font:400 clamp(26px,6vw,50px)/1 var(--disp);letter-spacing:.02em;margin:0;position:relative;z-index:2;
+  background:linear-gradient(180deg,#FFF7D6 0%,#FFE08A 38%,#F5B72E 60%,#C8811A 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 3px 0 #6B3B05) drop-shadow(0 6px 0 #3A1F02) drop-shadow(0 0 18px rgba(245,198,75,.45))}
+.marquee .tag{font:600 11px/1 var(--mono);letter-spacing:.32em;color:#E6D8FF;margin-top:10px;position:relative;z-index:2;text-transform:uppercase;opacity:.85}
+.marquee .tag{margin-top:8px}
+.moon{position:absolute;width:74px;height:74px;border-radius:50%;right:7%;top:12px;z-index:1;
+  background:radial-gradient(circle at 38% 36%,#FFFBEA,#F2E3B4 55%,#C9B27A);box-shadow:0 0 34px rgba(255,240,190,.55),0 0 90px rgba(255,240,190,.25);transition:transform .8s, box-shadow .8s}
+.moon::after{content:"";position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle at 64% 60%,rgba(150,120,70,.35) 0 9%,transparent 10%),radial-gradient(circle at 40% 70%,rgba(150,120,70,.25) 0 6%,transparent 7%),radial-gradient(circle at 30% 34%,rgba(150,120,70,.22) 0 5%,transparent 6%)}
+.moon.howl{transform:scale(1.18);box-shadow:0 0 50px rgba(255,240,190,.9),0 0 140px rgba(200,170,255,.6)}
+.howler{position:absolute;left:6%;bottom:0;width:86px;height:70px;z-index:1;opacity:.9}
+.bulbs{position:absolute;inset:6px;pointer-events:none;z-index:3}
+.bulb{position:absolute;width:9px;height:9px;margin:-4.5px;border-radius:50%;background:#FFE7A0;box-shadow:0 0 8px #FFD25E,0 0 2px #fff;
+  animation:chase var(--chase,1.2s) steps(1) infinite;opacity:.25}
+@keyframes chase{0%{opacity:1}33%{opacity:.22}100%{opacity:.22}}
+.cab.flash .bulb{animation:flash .32s steps(1) infinite}
+@keyframes flash{0%{opacity:1;background:#fff}50%{opacity:.2;background:#FF7AC0}}
+.cab.fs .bulb{background:#E2CCFF;box-shadow:0 0 8px #B58CFF,0 0 2px #fff}
+
+.screen{position:relative;margin-top:14px;padding:11px;border-radius:18px;
+  background:linear-gradient(180deg,#B88A2A,#FFE9A3 12%,#C8901E 30%,#7A4E0A 70%,#E8B84A);box-shadow:0 10px 26px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.6)}
+.window{position:relative;display:flex;gap:6px;border-radius:10px;overflow:hidden;background:#0B0618;padding:0 6px;
+  box-shadow:inset 0 0 0 2px #1A0F36,inset 0 8px 18px rgba(0,0,0,.7)}
+.reelbox{position:relative;flex:1 1 0;min-width:0;overflow:hidden;border-radius:4px;background:#1A1030}
+.reelbox::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:3;
+  background:linear-gradient(180deg,rgba(8,4,20,.92) 0%,rgba(8,4,20,.35) 13%,rgba(0,0,0,0) 27%,rgba(255,255,255,.07) 50%,rgba(0,0,0,0) 73%,rgba(8,4,20,.35) 87%,rgba(8,4,20,.92) 100%)}
+.reelbox.tension{box-shadow:0 0 0 2px var(--gold),0 0 26px rgba(245,198,75,.85);animation:tension .5s ease-in-out infinite alternate}
+@keyframes tension{to{box-shadow:0 0 0 3px #FFF1B8,0 0 40px rgba(255,214,90,1)}}
+.reelbox.tension::after{box-shadow:inset 0 0 0 3px #FFE38A,inset 0 0 34px rgba(255,190,50,.95);animation:tglow .5s ease-in-out infinite alternate}
+@keyframes tglow{from{opacity:.75}to{opacity:1}}
+.face.coin svg{animation:hit .7s ease-in-out infinite;filter:drop-shadow(0 0 8px rgba(255,200,60,.95))}
+.reelbox.landed::before{content:"";position:absolute;inset:0;z-index:4;pointer-events:none;background:linear-gradient(180deg,transparent 30%,rgba(255,255,255,.28) 50%,transparent 70%);animation:land .35s ease-out forwards}
+@keyframes land{from{opacity:1}to{opacity:0}}
+.reel{position:absolute;left:0;right:0;top:50%;height:0;transform-style:preserve-3d;will-change:transform}
+.face{position:absolute;left:0;right:0;display:flex;align-items:center;justify-content:center;backface-visibility:hidden;-webkit-backface-visibility:hidden;
+  background:linear-gradient(180deg,var(--face2),var(--face1) 18%,var(--face1) 82%,var(--face2));border-top:1px solid rgba(60,40,10,.18);border-bottom:1px solid rgba(60,40,10,.18)}
+.cab.fs .face{background:linear-gradient(180deg,#CDB7F5,#F3EBFF 18%,#F3EBFF 82%,#CDB7F5)}
+.face svg{width:82%;height:82%;overflow:visible;transition:transform .25s}
+.reelbox.fast .face svg{filter:url(#vblur)}
+.face.dim{filter:brightness(.42) saturate(.55)}
+.face.hit svg{animation:hit .9s ease-in-out infinite}
+.face.hit{box-shadow:inset 0 0 0 3px var(--gold),inset 0 0 22px rgba(245,198,75,.85)}
+.face.hit.wolf svg{animation:howl 1s ease-in-out infinite}
+@keyframes hit{0%,100%{transform:scale(1)}45%{transform:scale(1.14) translateY(-2%)}}
+@keyframes howl{0%,100%{transform:scale(1) rotate(0)}30%{transform:scale(1.16) rotate(-5deg)}60%{transform:scale(1.12) rotate(5deg)}}
+.lines{position:absolute;inset:0;z-index:5;pointer-events:none;overflow:visible}
+.lines path{fill:none;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 5px currentColor) drop-shadow(0 0 1px #000)}
+.lines path.draw{animation:draw .45s ease-out forwards}
+@keyframes draw{from{stroke-dashoffset:var(--len)}to{stroke-dashoffset:0}}
+.lines circle{stroke:#fff;stroke-width:2}
+.lines text{font:600 11px var(--mono);fill:#0A0614;text-anchor:middle;dominant-baseline:central}
+.glass{position:absolute;inset:0;z-index:6;pointer-events:none;border-radius:10px;
+  background:linear-gradient(115deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.04) 26%,transparent 40%,transparent 70%,rgba(255,255,255,.05) 85%,transparent)}
+
+.ticker{margin:10px 0 0;min-height:38px;border-radius:10px;padding:8px 14px;display:flex;align-items:center;justify-content:center;text-align:center;
+  background:#07040F;box-shadow:inset 0 0 0 1px rgba(245,198,75,.25),inset 0 4px 14px rgba(0,0,0,.8);font:600 13px/1.3 var(--mono);color:#FFD872;
+  text-shadow:0 0 8px rgba(255,200,80,.55);letter-spacing:.04em}
+.ticker.big{color:#fff;text-shadow:0 0 10px var(--neon),0 0 2px #fff}
+.ticker.bad{color:var(--bad);text-shadow:0 0 8px rgba(255,122,122,.4)}
+
+.led{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:10px 0 0}
+.led div{background:#07040F;border-radius:10px;padding:8px 12px;box-shadow:inset 0 0 0 1px rgba(185,173,211,.18),inset 0 4px 12px rgba(0,0,0,.8);min-width:0}
+.led small{display:block;font:600 10px/1 var(--mono);letter-spacing:.18em;color:var(--faint);text-transform:uppercase}
+.led b{display:block;font:400 clamp(17px,3.4vw,26px)/1.25 var(--disp);color:#FFD872;text-shadow:0 0 12px rgba(255,200,80,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px}
+.led .win b{color:#7CFFB2;text-shadow:0 0 12px rgba(124,255,178,.55)}
+.led .win.pop b{animation:ledpop .4s ease-out}
+@keyframes ledpop{40%{transform:scale(1.08)}}
+.cab.fs .led .fsl b{color:#E2CCFF;text-shadow:0 0 12px rgba(200,160,255,.8)}
+
+.deck{margin:12px -18px -18px;padding:12px 18px 14px;border-radius:0 0 26px 26px;
+  background:linear-gradient(180deg,#24124D,#130A2B);border-top:1px solid rgba(255,255,255,.08);
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:14px}
+.betbox{display:flex;flex-direction:column;gap:6px;min-width:0}
+.betbox label{font:600 10px/1 var(--mono);letter-spacing:.18em;color:var(--faint);text-transform:uppercase}
+.stepper{display:flex;align-items:center;gap:6px}
+.stepper button{width:40px;height:40px;border-radius:50%;border:0;cursor:pointer;color:#1A0F36;font:400 20px/1 var(--disp);
+  background:radial-gradient(circle at 40% 30%,#FFF1B8,#F5C64B 55%,#B07A12);box-shadow:0 3px 0 #6B4A0B,0 6px 14px rgba(0,0,0,.4);transition:transform .08s}
+.stepper button:active:not(:disabled){transform:translateY(2px);box-shadow:0 1px 0 #6B4A0B}
+.stepper button:disabled{filter:grayscale(.8) brightness(.6);cursor:not-allowed}
+.stepper output{flex:1;min-width:0;text-align:center;font:400 20px/1 var(--disp);color:var(--gold);text-shadow:0 0 10px rgba(245,198,75,.4)}
+.betbox .per{font:500 11px/1 var(--mono);color:var(--faint);text-align:center}
+.spinwrap{position:relative;width:108px;height:108px}
+.spin{position:absolute;inset:0;border-radius:50%;border:0;cursor:pointer;color:#fff;font:400 22px/1 var(--disp);letter-spacing:.04em;
+  background:radial-gradient(circle at 50% 30%,#FF8CC6,#FF3D9A 45%,#B5005C 80%);
+  box-shadow:0 7px 0 #6E0038,0 0 0 5px #2A0F45,0 0 0 8px rgba(245,198,75,.85),0 14px 30px rgba(0,0,0,.55),0 0 40px rgba(255,61,154,.55),inset 0 -6px 14px rgba(0,0,0,.25),inset 0 4px 10px rgba(255,255,255,.4);
+  text-shadow:0 2px 0 #7A0040;transition:transform .08s, box-shadow .08s, filter .2s}
+.spin small{display:block;font:600 9px/1 var(--mono);letter-spacing:.2em;margin-top:6px;opacity:.85;text-shadow:none}
+.spin:hover:not(:disabled){filter:brightness(1.08)}
+.spin:active:not(:disabled),.spin.pressed{transform:translateY(6px);box-shadow:0 1px 0 #6E0038,0 0 0 5px #2A0F45,0 0 0 8px rgba(245,198,75,.85),0 6px 16px rgba(0,0,0,.55),0 0 30px rgba(255,61,154,.5),inset 0 -2px 8px rgba(0,0,0,.3)}
+.spin:disabled{filter:grayscale(.7) brightness(.7);cursor:not-allowed}
+.spin.busy{background:radial-gradient(circle at 50% 30%,#9DE9FF,#3DB8FF 45%,#1460B5 80%);box-shadow:0 7px 0 #0B3A70,0 0 0 5px #2A0F45,0 0 0 8px rgba(245,198,75,.85),0 14px 30px rgba(0,0,0,.55),0 0 40px rgba(61,184,255,.55),inset 0 4px 10px rgba(255,255,255,.4);text-shadow:0 2px 0 #0B3A70}
+.ring{position:absolute;inset:-14px;border-radius:50%;pointer-events:none;border:2px solid rgba(255,61,154,.7);opacity:0}
+.ring.go{animation:ring .55s ease-out}
+@keyframes ring{from{opacity:1;transform:scale(.8)}to{opacity:0;transform:scale(1.35)}}
+.spinwrap.idle .spin:not(:disabled){animation:breathe 2.4s ease-in-out infinite}
+@keyframes breathe{50%{box-shadow:0 7px 0 #6E0038,0 0 0 5px #2A0F45,0 0 0 8px rgba(255,233,163,1),0 14px 30px rgba(0,0,0,.55),0 0 64px rgba(255,61,154,.85),inset 0 -6px 14px rgba(0,0,0,.25),inset 0 4px 10px rgba(255,255,255,.4)}}
+.opts{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.pill{font:600 12px/1 var(--mono);letter-spacing:.08em;color:var(--muted);background:rgba(255,255,255,.04);border:1px solid var(--rule);border-radius:999px;padding:10px 12px;cursor:pointer;white-space:nowrap}
+.pill.on{color:#1A0F36;background:var(--gold);border-color:var(--gold);box-shadow:0 0 16px rgba(245,198,75,.45)}
+.pill.auto.on{background:var(--cyan);border-color:var(--cyan);box-shadow:0 0 16px rgba(61,224,255,.45)}
+.pill:disabled{opacity:.4;cursor:not-allowed}
+.autopop{position:absolute;right:18px;bottom:76px;z-index:20;background:#1C0F3E;border:1px solid rgba(245,198,75,.4);border-radius:12px;padding:10px;display:flex;gap:6px;box-shadow:0 18px 40px rgba(0,0,0,.6)}
+.autopop button{font:600 13px/1 var(--mono);color:var(--ink);background:rgba(255,255,255,.06);border:1px solid var(--rule);border-radius:8px;padding:10px 12px;cursor:pointer}
+.autopop button:hover{border-color:var(--gold);color:var(--gold)}
+.note{min-height:20px;text-align:center;font-size:13px;color:var(--bad);margin:10px 0 0}
+.note .ok{color:var(--ok)}
+
+/* ── Lever ─────────────────────────────────────────────────────────────── */
+.lever{position:absolute;right:-64px;top:210px;width:56px;height:240px;perspective:420px;z-index:2;touch-action:none}
+.lever .base{position:absolute;left:8px;bottom:0;width:40px;height:66px;border-radius:10px;
+  background:linear-gradient(90deg,#6B6F80,#E9ECF5 40%,#8A8EA0 70%,#4A4D5A);box-shadow:0 8px 18px rgba(0,0,0,.5)}
+.lever .base::after{content:"";position:absolute;left:8px;right:8px;top:10px;height:20px;border-radius:50%;background:#16121F;box-shadow:inset 0 3px 6px #000}
+.lever .arm{position:absolute;left:23px;bottom:44px;width:10px;height:178px;transform-origin:50% 100%;transform:rotateX(var(--la,0deg));cursor:grab;transform-style:preserve-3d;
+  background:linear-gradient(90deg,#7C8090,#F4F6FC 45%,#9A9EAE 70%,#5A5D6A);border-radius:5px}
+.lever .knob{position:absolute;left:50%;top:-30px;width:44px;height:44px;margin-left:-22px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#FFB1D5,#FF3D9A 45%,#9C0050 85%);box-shadow:0 6px 14px rgba(0,0,0,.45),0 0 10px rgba(255,61,154,.5);
+  transform:rotateX(calc(-1 * var(--la,0deg)))}
+.lever.drag .arm{cursor:grabbing}
+
+/* ── Overlays ──────────────────────────────────────────────────────────── */
+#fx{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:60}
+.over{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px;
+  background:radial-gradient(circle at 50% 50%,rgba(40,14,80,.72),rgba(5,2,12,.9));cursor:pointer;animation:fadein .25s ease-out}
+@keyframes fadein{from{opacity:0}}
+.over .rays{position:absolute;left:50%;top:50%;width:160vmax;height:160vmax;margin:-80vmax 0 0 -80vmax;pointer-events:none;opacity:.5;
+  background:repeating-conic-gradient(from 0deg,rgba(255,214,90,.22) 0deg 7deg,transparent 7deg 18deg);animation:spinrays 14s linear infinite;
+  -webkit-mask:radial-gradient(circle,#000 0,transparent 55%);mask:radial-gradient(circle,#000 0,transparent 55%)}
+.over.fsov .rays{background:repeating-conic-gradient(from 0deg,rgba(190,150,255,.24) 0deg 7deg,transparent 7deg 18deg)}
+@keyframes spinrays{to{transform:rotate(360deg)}}
+.over .tier{position:relative;font:400 clamp(44px,12vw,120px)/.95 var(--disp);margin:0;
+  background:linear-gradient(180deg,#FFFBE6 0%,#FFE27A 35%,#F5A623 62%,#C25E00 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 4px 0 #7A3A00) drop-shadow(0 8px 0 #3D1C00) drop-shadow(0 0 30px rgba(255,190,60,.6));animation:tierin .7s cubic-bezier(.2,1.6,.3,1)}
+.over .tier.bump{animation:tierbump .5s cubic-bezier(.2,1.6,.3,1)}
+.over.fsov .tier{background:linear-gradient(180deg,#FFFFFF 0%,#E2CCFF 40%,#A57BFF 70%,#5B2BC9 100%);-webkit-background-clip:text;background-clip:text;
+  filter:drop-shadow(0 4px 0 #3A1580) drop-shadow(0 8px 0 #1C0A40) drop-shadow(0 0 30px rgba(170,120,255,.7))}
+@keyframes tierin{from{transform:scale(.2) rotate(-8deg);opacity:0}}
+@keyframes tierbump{0%{transform:scale(1)}40%{transform:scale(1.18)}100%{transform:scale(1)}}
+.over .amt{position:relative;font:400 clamp(34px,8vw,72px)/1 var(--disp);color:#fff;margin-top:18px;text-shadow:0 0 24px rgba(255,214,90,.8),0 4px 0 #7A3A00}
+.over .sub{position:relative;font:600 13px/1.4 var(--mono);color:#E6D8FF;margin-top:16px;letter-spacing:.12em;text-transform:uppercase}
+.over .tap{position:relative;font:500 11px var(--mono);color:var(--faint);margin-top:28px;letter-spacing:.2em;text-transform:uppercase}
+.modal{position:fixed;inset:0;z-index:55;background:rgba(5,2,12,.82);display:flex;align-items:flex-start;justify-content:center;padding:28px 12px;overflow-y:auto}
+.sheet{width:100%;max-width:720px;background:linear-gradient(180deg,#1E1042,#120A2A);border:1px solid rgba(245,198,75,.35);border-radius:16px;padding:18px 18px 22px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.sheet h2{font:400 22px/1 var(--disp);color:var(--gold);margin:0 0 4px}
+.sheet h3{font:600 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:20px 0 10px}
+.sheet p{color:var(--muted);font-size:14px;margin:6px 0}
+.sheet .x{float:right;background:none;border:1px solid var(--rule);color:var(--ink);border-radius:8px;padding:6px 10px;cursor:pointer}
+.ptab{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.ptab .it{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.25);border:1px solid var(--rule);border-radius:10px;padding:8px 10px}
+.ptab svg{width:46px;height:46px;flex:none}
+.ptab ul{list-style:none;margin:0;padding:0;font:500 12px/1.55 var(--mono);color:var(--ink)}
+.ptab ul span{color:var(--faint)}
+.ptab .it.wide{grid-column:1/-1}
+.lgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px}
+.lgrid div{background:rgba(0,0,0,.3);border-radius:6px;padding:5px;text-align:center;font:600 10px var(--mono);color:var(--faint)}
+.lgrid svg{display:block;width:100%;height:auto;margin-bottom:3px}
+
+/* ── Below the machine ─────────────────────────────────────────────────── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:22px}
+.box{background:rgba(20,11,42,.75);border:1px solid var(--rule);border-radius:14px;padding:16px}
+.box h2{font:400 15px/1.2 var(--disp);color:var(--gold);margin:0 0 10px;letter-spacing:.02em}
+.facts{list-style:none;margin:0;padding:0}
+.facts li{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--rule);font-size:14px}
+.facts li:last-child{border-bottom:0}
+.facts .k{color:var(--muted)} .facts .v{font-family:var(--mono)}
+.board{list-style:none;margin:0;padding:0;counter-reset:r}
+.board li{display:flex;gap:8px;padding:6px 0;font-size:14px;border-bottom:1px solid var(--rule)}
+.board li:last-child{border-bottom:0}
+.board li::before{counter-increment:r;content:counter(r);width:1.4em;color:var(--faint);text-align:right;flex:none}
+.board .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.board .h{color:var(--faint);font-size:12px;margin-left:6px}
+.board .you{color:var(--gold);font-weight:600}
+.board .v{font-family:var(--mono);color:var(--gold)}
+.recent{display:flex;flex-wrap:wrap;gap:5px;margin:12px 0 0}
+.recent span{font:600 11px/1 var(--mono);padding:5px 7px;border-radius:4px;background:rgba(255,255,255,.05);color:var(--faint)}
+.recent span.w{background:rgba(142,240,180,.14);color:var(--ok)}
+.recent span.f{background:rgba(139,92,255,.22);color:#E2CCFF}
+details.fair{margin-top:14px}
+details.fair summary{cursor:pointer;font-weight:600;list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.fair summary::-webkit-details-marker{display:none}
+details.fair summary::after{content:"+";color:var(--gold);font-family:var(--mono)}
+details.fair[open] summary::after{content:"−"}
+.fair p{font-size:13px;color:var(--muted);margin:8px 0}
+.hash{font:500 12px/1.45 var(--mono);word-break:break-all;color:var(--ink);background:rgba(0,0,0,.3);border-radius:6px;padding:6px 8px;margin:4px 0 8px}
+.fair label{font-size:12px;color:var(--muted);display:block}
+.fair input{width:100%;font:500 13px var(--mono);color:var(--ink);background:rgba(0,0,0,.35);border:1px solid var(--rule);border-radius:6px;padding:8px}
+.ok{color:var(--ok)} .bad{color:var(--bad)}
+.linkbtn{background:none;border:0;color:var(--gold);cursor:pointer;padding:0;font:600 14px "IBM Plex Sans",sans-serif;text-decoration:underline;text-underline-offset:3px}
+
+@media (max-width:1020px){ .lever{display:none} }
+@media (max-width:640px){
+  .wrap{padding:0 10px 40px}
+  .cab{padding:0 10px 12px;border-radius:20px}
+  .marquee{margin:0 -10px;padding:16px 12px 12px;border-radius:20px 20px 0 0}
+  .bar h1{display:none}
+  .marquee .title{font-size:clamp(20px,6.1vw,30px)}
+  .marquee .tag{font-size:9px;letter-spacing:.14em;margin-top:7px}
+  .moon{width:32px;height:32px;top:7px;right:3%}
+  .howler{width:56px;height:46px;left:3%}
+  .screen{padding:7px;margin-top:12px;border-radius:14px}
+  .window{gap:3px;padding:0 3px}
+  .led{gap:6px}
+  .led div{padding:6px 8px}
+  .deck{margin:12px -10px -12px;padding:14px 10px 14px;grid-template-columns:1fr auto;grid-template-areas:"bet spin" "opts opts";border-radius:0 0 20px 20px}
+  .betbox{grid-area:bet}.spinwrap{grid-area:spin;width:100px;height:100px}.opts{grid-area:opts;justify-content:space-between}
+  .opts .pill{flex:1;text-align:center;padding:11px 6px}
+  .grid2{grid-template-columns:1fr}
+  .autopop{right:10px;bottom:64px;flex-wrap:wrap}
+}
+@media (prefers-reduced-motion:reduce){
+  .cab{transition:none}.bulb{animation:none;opacity:.8}.cab.flash .bulb,.cab.shake,.cab.thud,.face.hit svg,.over .rays,.spinwrap.idle .spin{animation:none}
+}
+</style>
+</head>
+<body>
+<div class="stars" aria-hidden="true"></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <filter id="vblur" x="-10%" y="-40%" width="120%" height="180%"><feGaussianBlur stdDeviation="0 7"/></filter>
+    <linearGradient id="gGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF4C2"/><stop offset=".45" stop-color="#F5C64B"/><stop offset="1" stop-color="#A86E0C"/></linearGradient>
+    <radialGradient id="gWbg" cx=".5" cy=".35" r=".75"><stop offset="0" stop-color="#5A3FB0"/><stop offset=".6" stop-color="#2A1868"/><stop offset="1" stop-color="#120A33"/></radialGradient>
+    <linearGradient id="gWolf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#A9B3D8"/></linearGradient>
+    <radialGradient id="gCoin" cx=".38" cy=".32" r=".8"><stop offset="0" stop-color="#FFF8CF"/><stop offset=".45" stop-color="#FFD54A"/><stop offset="1" stop-color="#C98A0A"/></radialGradient>
+    <linearGradient id="gCoinEdge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F2B935"/><stop offset="1" stop-color="#7A4A00"/></linearGradient>
+    <linearGradient id="g7" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF7A7A"/><stop offset=".5" stop-color="#E0001F"/><stop offset="1" stop-color="#7E0011"/></linearGradient>
+    <linearGradient id="gCash" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8CEBAE"/><stop offset="1" stop-color="#2E9A57"/></linearGradient>
+    <linearGradient id="gBell" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFE38A"/><stop offset=".55" stop-color="#F7A81B"/><stop offset="1" stop-color="#B85F00"/></linearGradient>
+    <linearGradient id="gBar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset=".55" stop-color="#D9DCEA"/><stop offset="1" stop-color="#8E93AE"/></linearGradient>
+    <radialGradient id="gCherry" cx=".35" cy=".32" r=".75"><stop offset="0" stop-color="#FF9C9C"/><stop offset=".45" stop-color="#E8002D"/><stop offset="1" stop-color="#6E0012"/></radialGradient>
+    <radialGradient id="gLemon" cx=".4" cy=".35" r=".8"><stop offset="0" stop-color="#FFFCD0"/><stop offset=".5" stop-color="#FFE23E"/><stop offset="1" stop-color="#D9A600"/></radialGradient>
+    <radialGradient id="gGem" cx=".5" cy=".3" r=".8"><stop offset="0" stop-color="#E6FDFF"/><stop offset="1" stop-color="#2AB4E0"/></radialGradient>
+
+    <symbol id="s-W" viewBox="0 0 100 100">
+      <path d="M50 3 L90 21 L90 69 L50 95 L10 69 L10 21 Z" fill="url(#gWbg)" stroke="url(#gGold)" stroke-width="4" stroke-linejoin="round"/>
+      <g transform="translate(-11 -8) scale(1.22)">
+        <path d="M50 72 L41 63 L33 53 L27 42 L28 30 L31 13 L41 27 L50 25 L59 27 L69 13 L72 30 L73 42 L67 53 L59 63 Z" fill="url(#gWolf)"/>
+        <path d="M32 19 L39 28 L30 31 Z M68 19 L61 28 L70 31 Z" fill="#4A3A86"/>
+        <path d="M27 42 L38 47 L33 53 Z M73 42 L62 47 L67 53 Z" fill="#7F89B2"/>
+        <path d="M50 25 L46 40 L50 46 L54 40 Z" fill="#8E97BE"/>
+        <path d="M50 72 L43 62 L46 50 L50 47 L54 50 L57 62 Z" fill="#fff"/>
+        <path d="M46 60 L54 60 L50 65 Z" fill="#1B1530"/>
+        <path d="M36 40 L44 43 L38 45 Z M64 40 L56 43 L62 45 Z" fill="#FFB020"/>
+        <circle cx="40" cy="43" r="5" fill="#FFB020" opacity=".25"/><circle cx="60" cy="43" r="5" fill="#FFB020" opacity=".25"/>
+      </g>
+      <path d="M4 73 H96 L90 82.5 L96 92 H4 L10 82.5 Z" fill="url(#gGold)" stroke="#7A4A00" stroke-width="1.5"/>
+      <text x="50" y="88" text-anchor="middle" font-family="Bungee,Impact,sans-serif" font-size="15" fill="#3A1F00" letter-spacing="1">WILD</text>
+    </symbol>
+    <symbol id="s-S" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="45" fill="url(#gCoinEdge)"/>
+      <circle cx="50" cy="50" r="39" fill="url(#gCoin)"/>
+      <circle cx="50" cy="50" r="33" fill="none" stroke="#A86B00" stroke-width="2" stroke-dasharray="2 3" opacity=".7"/>
+      <polygon points="50,23 54.7,35.5 68.1,36.1 57.6,44.5 61.2,57.4 50,50 38.8,57.4 42.4,44.5 31.9,36.1 45.3,35.5" fill="#8B2BE0" stroke="#4A0E86" stroke-width="2" stroke-linejoin="round"/>
+      <rect x="20" y="61" width="60" height="17" rx="8.5" fill="#5B1BA8" stroke="#FFE38A" stroke-width="1.5"/>
+      <text x="50" y="74" text-anchor="middle" font-family="Bungee,Impact,sans-serif" font-size="11.5" fill="#FFF3C4" letter-spacing=".5">BONUS</text>
+      <ellipse cx="35" cy="26" rx="10" ry="5" fill="#fff" opacity=".45" transform="rotate(-28 35 26)"/>
+    </symbol>
+    <symbol id="s-7" viewBox="0 0 100 100">
+      <path d="M23 21 H83 V35 L57 89 H35 L61 37 H23 Z" fill="#000" opacity=".25"/>
+      <path d="M20 17 H80 V31 L54 85 H32 L58 33 H20 Z" fill="url(#g7)" stroke="url(#gGold)" stroke-width="5" stroke-linejoin="round"/>
+      <path d="M24 21 H76 V25 H24 Z" fill="#fff" opacity=".45"/>
+    </symbol>
+    <symbol id="s-D" viewBox="0 0 100 100">
+      <polygon points="14,38 30,18 70,18 86,38 50,88" fill="#000" opacity=".2" transform="translate(2 3)"/>
+      <polygon points="14,38 30,18 70,18 86,38" fill="#6FDDF7"/>
+      <polygon points="30,18 50,18 38,38" fill="#C4F8FF"/><polygon points="50,18 70,18 62,38" fill="#9BEBFF"/><polygon points="38,38 50,18 62,38" fill="#E8FDFF"/>
+      <polygon points="14,38 38,38 50,88" fill="#4BCBF0"/><polygon points="62,38 86,38 50,88" fill="#138CC0"/><polygon points="38,38 62,38 50,88" fill="#7EDFF8"/>
+      <polygon points="14,38 30,18 70,18 86,38 50,88" fill="none" stroke="#0B5E87" stroke-width="2.5" stroke-linejoin="round"/>
+      <path d="M74 8 L76 14 L82 16 L76 18 L74 24 L72 18 L66 16 L72 14 Z" fill="#fff"/>
+    </symbol>
+    <symbol id="s-C" viewBox="0 0 100 100">
+      <rect x="12" y="58" width="76" height="26" rx="3" fill="#1C6E3E"/>
+      <rect x="12" y="48" width="76" height="26" rx="3" fill="#258C4E"/>
+      <rect x="12" y="34" width="76" height="30" rx="3" fill="url(#gCash)" stroke="#16603A" stroke-width="1.5"/>
+      <rect x="17" y="39" width="66" height="20" rx="2" fill="none" stroke="#E2FBEA" stroke-width="1.5" opacity=".7"/>
+      <circle cx="29" cy="49" r="7" fill="#E2FBEA"/><text x="29" y="53.5" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-weight="600" font-size="12" fill="#16603A">$</text>
+      <circle cx="71" cy="49" r="7" fill="#E2FBEA"/><text x="71" y="53.5" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-weight="600" font-size="12" fill="#16603A">$</text>
+      <rect x="43" y="31" width="14" height="56" rx="2" fill="url(#gGold)" stroke="#7A4A00" stroke-width="1"/>
+      <rect x="12" y="16" width="76" height="14" rx="3" fill="none"/>
+      <path d="M30 26 C34 18 44 16 50 22 C56 16 66 18 70 26" stroke="#8CEBAE" stroke-width="3" fill="none" stroke-linecap="round" opacity=".0"/>
+    </symbol>
+    <symbol id="s-B" viewBox="0 0 100 100">
+      <circle cx="50" cy="13" r="6" fill="#E9A21C" stroke="#8A4E00" stroke-width="1.5"/>
+      <path d="M50 16 C35 16 29 28 29 42 V57 C29 63 23 67 18 71 H82 C77 67 71 63 71 57 V42 C71 28 65 16 50 16 Z" fill="url(#gBell)" stroke="#8A4E00" stroke-width="2"/>
+      <rect x="15" y="69" width="70" height="9" rx="4.5" fill="#C06A00" stroke="#8A4E00" stroke-width="1.5"/>
+      <circle cx="50" cy="85" r="7" fill="#A85A00" stroke="#6E3A00" stroke-width="1.5"/>
+      <path d="M40 24 C35 31 35 43 36 55" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round" opacity=".5"/>
+    </symbol>
+    <symbol id="s-R" viewBox="0 0 100 100">
+      <rect x="7" y="28" width="86" height="44" rx="9" fill="#1A1238" stroke="url(#gGold)" stroke-width="4.5"/>
+      <rect x="13" y="34" width="74" height="4" rx="2" fill="#fff" opacity=".12"/>
+      <text x="50" y="62" text-anchor="middle" font-family="Bungee,Impact,sans-serif" font-size="27" fill="url(#gBar)" letter-spacing="1">BAR</text>
+    </symbol>
+    <symbol id="s-H" viewBox="0 0 100 100">
+      <path d="M36 58 C38 42 48 28 62 18" stroke="#2F7D2A" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+      <path d="M68 62 C68 46 66 32 62 18" stroke="#2F7D2A" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+      <path d="M62 18 C70 7 86 9 91 16 C82 25 69 25 62 18 Z" fill="#4DB83E" stroke="#2F7D2A" stroke-width="1.5"/>
+      <circle cx="34" cy="68" r="17" fill="url(#gCherry)"/><circle cx="68" cy="72" r="17" fill="url(#gCherry)"/>
+      <ellipse cx="28" cy="61" rx="5" ry="3.2" fill="#fff" opacity=".65" transform="rotate(-30 28 61)"/>
+      <ellipse cx="62" cy="65" rx="5" ry="3.2" fill="#fff" opacity=".65" transform="rotate(-30 62 65)"/>
+    </symbol>
+    <symbol id="s-L" viewBox="0 0 100 100">
+      <g transform="rotate(-18 50 52)">
+        <path d="M7 52 C14 35 32 24 50 24 C68 24 86 35 93 52 C86 69 68 80 50 80 C32 80 14 69 7 52 Z" fill="url(#gLemon)" stroke="#C49300" stroke-width="2.5"/>
+        <ellipse cx="38" cy="40" rx="12" ry="5" fill="#fff" opacity=".55"/>
+        <circle cx="60" cy="60" r="1.6" fill="#D9A600"/><circle cx="68" cy="50" r="1.6" fill="#D9A600"/><circle cx="52" cy="66" r="1.6" fill="#D9A600"/>
+      </g>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="wrap">
+  <div class="bar"><a href="/me">Your dashboard</a><h1>Wolf's Fortune</h1><span class="bal">Balance <b id="bal">—</b></span></div>
+
+  <div class="stage" id="stage">
+    <div class="cab" id="cab">
+      <div class="marquee">
+        <div class="bulbs" id="bulbs" aria-hidden="true"></div>
+        <div class="moon" id="moon" aria-hidden="true"></div>
+        <svg class="howler" viewBox="0 0 86 70" aria-hidden="true"><path d="M4 70 L10 52 L18 46 L22 34 L30 30 L36 18 L40 4 L46 16 L52 14 L48 24 L56 30 L54 40 L62 46 L70 56 L82 62 L86 70 Z" fill="#0A0518"/></svg>
+        <p class="title">Wolf's Fortune</p>
+        <div class="tag">5 reels · 20 lines · free spins pay ×3</div>
+      </div>
+      <div class="screen">
+        <div class="window" id="win" aria-label="Reels">
+          <svg class="lines" id="lines" aria-hidden="true"></svg>
+          <div class="glass" aria-hidden="true"></div>
+        </div>
+      </div>
+      <div class="ticker" id="ticker" aria-live="polite">Loading the machine…</div>
+      <div class="led">
+        <div class="win" id="ledWin"><small id="ledWinL">Win</small><b id="mWin">0</b></div>
+        <div class="fsl"><small id="ledMidL">Bet</small><b id="mMid">—</b></div>
+        <div><small>Balance</small><b id="mBal">—</b></div>
+      </div>
+      <div class="deck">
+        <div class="betbox">
+          <label for="betOut">Total bet</label>
+          <div class="stepper"><button type="button" id="betDn" aria-label="Lower bet">−</button><output id="betOut">—</output><button type="button" id="betUp" aria-label="Raise bet">+</button></div>
+          <div class="per" id="per">20 lines</div>
+        </div>
+        <div class="spinwrap idle" id="spinwrap"><span class="ring" id="ring"></span><button class="spin" id="spin" type="button" disabled>Spin<small>space</small></button></div>
+        <div class="opts">
+          <button class="pill" id="maxBtn" type="button">Max</button>
+          <button class="pill auto" id="autoBtn" type="button" aria-haspopup="true">Auto</button>
+          <button class="pill" id="turboBtn" type="button" aria-pressed="false">Turbo</button>
+          <button class="pill" id="soundBtn" type="button" aria-pressed="true">Sound</button>
+          <button class="pill" id="payBtn" type="button">Pays</button>
+        </div>
+        <div class="autopop" id="autopop" hidden role="menu" aria-label="Autoplay spins">
+          <button type="button" data-auto="10">10</button><button type="button" data-auto="25">25</button><button type="button" data-auto="50">50</button><button type="button" data-auto="100">100</button>
+        </div>
+      </div>
+      <div class="lever" id="lever" aria-hidden="true"><div class="base"></div><div class="arm" id="arm"><div class="knob"></div></div></div>
+    </div>
+  </div>
+  <p class="note" id="note"></p>
+
+  <div class="grid2">
+    <div class="box">
+      <h2>Your machine</h2>
+      <ul class="facts">
+        <li><span class="k">Spins</span><span class="v" id="sSpins">0</span></li>
+        <li><span class="k">Net</span><span class="v" id="sNet">0</span></li>
+        <li><span class="k">Biggest win</span><span class="v" id="sBest">—</span></li>
+        <li><span class="k">Free spin rounds</span><span class="v" id="sFeat">0</span></li>
+      </ul>
+      <div class="recent" id="recent"></div>
+      <details class="fair" id="fair">
+        <summary>Provably fair</summary>
+        <p>Before each spin the house locks in a secret seed and shows you its fingerprint (the seal). Your seed is mixed in when you spin, and every reel stop comes from both. The seed is revealed after the spin so your browser can check nothing moved.</p>
+        <label>Seal for your next spin</label><div class="hash" id="fSeal">—</div>
+        <label for="fClient">Your seed (change it any time between spins)</label><input id="fClient" maxlength="32" autocomplete="off" spellcheck="false">
+        <div id="fLast"></div>
+      </details>
+    </div>
+    <div class="box">
+      <h2>Biggest wins</h2>
+      <ol class="board" id="board"><li><span class="n">Loading…</span></li></ol>
+      <p style="font-size:12px;color:var(--faint);margin:12px 0 0" id="edgeNote">Bets are real coins. The machine pays back about 96% over time, so the house wins in the long run.</p>
+      <p style="margin:10px 0 0"><button class="linkbtn" id="payBtn2" type="button">See what everything pays</button></p>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="paysheet" hidden role="dialog" aria-modal="true" aria-labelledby="payTitle">
+  <div class="sheet">
+    <button class="x" type="button" id="payClose">Close</button>
+    <h2 id="payTitle">Pays</h2>
+    <p id="payIntro">Three or more in a row from the leftmost reel pay on any of the 20 lines.</p>
+    <div class="ptab" id="ptab"></div>
+    <h3>The 20 lines</h3>
+    <div class="lgrid" id="lgrid"></div>
+  </div>
+</div>
+<div class="over" id="over" hidden><div class="rays"></div><p class="tier" id="ovTier"></p><div class="amt" id="ovAmt"></div><div class="sub" id="ovSub"></div><div class="tap">tap to continue</div></div>
+<canvas id="fx" aria-hidden="true"></canvas>
+
+<script>
+(function(){
+"use strict";
+var $ = function(id){ return document.getElementById(id); };
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function n(v){ return Math.round(Number(v || 0)).toLocaleString("en-US"); }
+function short(v){ return v >= 1000 ? (v % 1000 ? (v / 1000).toFixed(1) : v / 1000) + "K" : String(v); }
+function mod(a, m){ return ((a % m) + m) % m; }
+function api(path, body){
+  return fetch(path, {method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
+    headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined})
+    .then(function(r){ if (r.status === 401){ location.href = "/auth/login"; throw new Error("login"); } return r.json(); });
+}
+var REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+var HOVER = !!(window.matchMedia && window.matchMedia("(hover: hover) and (pointer: fine)").matches);
+function store(k, v){ try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+function now(){ return performance.now(); }
+
+var NAMES = {W: "Wolf", S: "Bonus", "7": "Seven", D: "Diamond", C: "Cash", B: "Bell", R: "Bar", H: "Cherry", L: "Lemon"};
+var ORDER = ["W", "7", "D", "C", "B", "R", "H", "L"];
+var BETS = [20, 40, 100, 200, 500, 1000, 2000, 5000, 10000, 25000];
+var K = 12, ALPHA = 30;               // faces per reel cylinder, degrees per face
+var LINE_COLORS = ["#FF3D9A", "#3DE0FF", "#7CFFB2", "#FFD54A", "#B58CFF", "#FF8A3D", "#3DFFEA", "#FF5C5C", "#9DFF3D", "#5C8DFF",
+                   "#FF3DF0", "#FFE93D", "#3DFF8A", "#FF9DC4", "#8AF0FF", "#FFB23D", "#C4FF3D", "#D08CFF", "#3D9DFF", "#FF6E9D"];
+
+// ── Sound: tiny Web Audio synth, nothing to download ─────────────────────────
+var Snd = (function(){
+  var ctx = null, on = store("reels_sound") !== "0", master = null;
+  function init(){ if (ctx || !on) return; try { ctx = new (window.AudioContext || window.webkitAudioContext)(); master = ctx.createGain(); master.gain.value = .55; master.connect(ctx.destination); } catch (e) { ctx = null; } }
+  function tone(f, d, type, vol, when, slide){
+    if (!ctx || !on) return; var t = ctx.currentTime + (when || 0), o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type || "sine"; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + d);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol || .2, t + .01); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + d + .02);
+  }
+  function noise(d, vol, f0, f1){
+    if (!ctx || !on) return; var t = ctx.currentTime, len = Math.floor(ctx.sampleRate * d), b = ctx.createBuffer(1, len, ctx.sampleRate), x = b.getChannelData(0);
+    for (var i = 0; i < len; i++) x[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    var s = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain(); s.buffer = b; f.type = "bandpass"; f.Q.value = 1.2;
+    f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + d); g.gain.value = vol;
+    s.connect(f); f.connect(g); g.connect(master); s.start(t);
+  }
+  return {
+    init: init, get on(){ return on; },
+    toggle: function(){ on = !on; store("reels_sound", on ? "1" : "0"); if (on) init(); return on; },
+    spin: function(){ noise(.45, .35, 400, 2400); tone(180, .2, "triangle", .12, 0, 420); },
+    stop: function(i){ tone(95 - i * 4, .16, "sine", .5); noise(.06, .25, 2200, 900); },
+    tick: function(){ tone(1800, .03, "square", .03); },
+    scatter: function(k){ tone(880 * Math.pow(1.26, k), .5, "triangle", .22); tone(1320 * Math.pow(1.26, k), .6, "sine", .12, .05); },
+    tense: function(){ tone(220, 1.1, "sawtooth", .05, 0, 660); },
+    win: function(level){
+      var seq = level >= 3 ? [523, 659, 784, 1047, 1319, 1568] : level === 2 ? [523, 659, 784, 1047] : [659, 880, 1047];
+      seq.forEach(function(f, i){ tone(f, .28, "triangle", .16, i * .08); tone(f * 2, .2, "sine", .05, i * .08); });
+    },
+    coin: function(){ tone(1900 + Math.random() * 500, .07, "square", .035); },
+    big: function(){ [392, 523, 659, 784, 1047].forEach(function(f, i){ tone(f, .5, "sawtooth", .07, i * .12); tone(f, .7, "triangle", .14, i * .12); }); },
+    howl: function(){ tone(330, 1.2, "sine", .14, 0, 520); tone(335, 1.2, "triangle", .06, .05, 500); },
+    lever: function(){ noise(.12, .3, 900, 300); tone(140, .12, "square", .08); }
+  };
+})();
+
+// ── Reels ─────────────────────────────────────────────────────────────────────
+var info = null, reels = [], H = 100, R = 186, PERSP = 600, rowY = [0, 0, 0], reelX = [];
+function Reel(i, strip){
+  var box = document.createElement("div"); box.className = "reelbox";
+  var el = document.createElement("div"); el.className = "reel"; box.appendChild(el);
+  this.i = i; this.box = box; this.el = el; this.strip = strip; this.L = strip.length;
+  this.faces = []; this.uses = []; this.v = []; this.sym = [];
+  for (var k = 0; k < K; k++){
+    var f = document.createElement("div"); f.className = "face";
+    f.innerHTML = '<svg viewBox="0 0 100 100" aria-hidden="true"><use href="#s-L"/></svg>';
+    el.appendChild(f); this.faces.push(f); this.uses.push(f.querySelector("use")); this.v.push(null); this.sym.push(null);
+  }
+  this.offset = Math.floor(Math.random() * this.L); this.p = 1; this.vel = 0; this.state = "idle"; this.lastTick = 1;
+}
+Reel.prototype.symAt = function(v){ return this.strip[mod(v + this.offset, this.L)]; };
+Reel.prototype.sync = function(){
+  for (var k = 0; k < K; k++){
+    var v = k + K * Math.round((this.p - k) / K);
+    if (this.v[k] !== v){
+      this.v[k] = v; var s = this.symAt(v);
+      if (this.sym[k] !== s){ this.sym[k] = s; this.uses[k].setAttribute("href", "#s-" + s); }
+    }
+  }
+  this.el.style.transform = "translateZ(" + (-R).toFixed(2) + "px) rotateX(" + (this.p * ALPHA).toFixed(3) + "deg)";
+};
+Reel.prototype.layout = function(){
+  for (var k = 0; k < K; k++){
+    var f = this.faces[k]; f.style.height = H + "px"; f.style.top = (-H / 2) + "px";
+    f.style.transform = "rotateX(" + (-k * ALPHA) + "deg) translateZ(" + R.toFixed(2) + "px)";
+  }
+  this.box.style.perspective = PERSP + "px";
+  this.sync();
+};
+Reel.prototype.faceAt = function(row){ return this.faces[mod(Math.round(this.p) - 1 + row, K)]; };   // at rest only
+Reel.prototype.showStop = function(stop){ this.offset = mod(stop - (Math.round(this.p) - 1), this.L); this.v = this.v.map(function(){ return null; }); this.sync(); };
+
+function buildReels(){
+  var win = $("win"); reels.forEach(function(r){ r.box.remove(); }); reels = [];
+  for (var i = 0; i < 5; i++){ var r = new Reel(i, info.strips[i]); reels.push(r); win.insertBefore(r.box, $("lines")); }
+  layout();
+}
+function layout(){
+  if (!reels.length) return;
+  var w = reels[0].box.clientWidth || 100;
+  H = Math.round(Math.max(w * 0.62, Math.min(w * 0.94, (window.innerHeight - 512) / 3)));   // keep the whole machine on screen where we can
+  R = H / (2 * Math.tan(Math.PI / K));
+  PERSP = Math.max(400, H * 6);
+  $("win").style.height = Math.round(H * 3) + "px";
+  reels.forEach(function(r){ r.layout(); });
+  // where each row's centre lands on screen (perspective included) and each reel's centre — for the paylines
+  var cy = H * 1.5;
+  [-1, 0, 1].forEach(function(d, row){
+    var a = d * ALPHA * Math.PI / 180, y = R * Math.sin(a), z = -R * (1 - Math.cos(a));
+    rowY[row] = cy + y * PERSP / (PERSP - z);
+  });
+  var wr = $("win").getBoundingClientRect();
+  reelX = reels.map(function(r){ var b = r.box.getBoundingClientRect(); return b.left - wr.left + b.width / 2; });
+  var ln = $("lines"); ln.setAttribute("viewBox", "0 0 " + wr.width + " " + wr.height); ln.setAttribute("width", wr.width); ln.setAttribute("height", wr.height);
+}
+var rz = null; window.addEventListener("resize", function(){ clearTimeout(rz); rz = setTimeout(function(){ layout(); if (lastLines) drawLines(lastLines.list, lastLines.anim); }, 120); });
+
+// ── Motion: one animation loop for reels and particles ────────────────────────
+var V_NORMAL = 22, V_TURBO = 30, OVER = 0.22;
+var looping = false;
+function kick(){ if (!looping){ looping = true; lastT = now(); requestAnimationFrame(loop); } }
+var lastT = 0;
+function loop(t){
+  var dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
+  var moving = false;
+  reels.forEach(function(r){
+    if (r.state !== "idle"){ step(r, t, dt); moving = true; }
+    var f = !REDUCED && r.state !== "idle" && Math.abs(r.vel) > 12;
+    if (f !== r.fast){ r.fast = f; r.box.classList.toggle("fast", f); }
+  });
+  var parts = FX.step(dt);
+  if (moving || parts) requestAnimationFrame(loop); else looping = false;
+}
+function step(r, t, dt){
+  var e;
+  if (r.state === "wind"){
+    e = (t - r.t0) / 130; if (e >= 1){ r.state = "run"; r.vel = 0; r.t0 = t; }
+    else { r.p = r.p0 + 0.32 * Math.sin(e * Math.PI / 2); }
+  }
+  if (r.state === "run"){
+    r.vel = Math.max(-r.vmax, r.vel - r.vmax * dt / 0.22);
+    r.p += r.vel * dt;
+    if (r.stopAt != null && t >= r.stopAt && (r.vel <= -r.vmax + 0.01 || r.slam)) beginDecel(r, t);
+  }
+  if (r.state === "decel"){
+    e = Math.min(1, (t - r.t0) / r.T);
+    r.p = r.p0 - r.D * (2 * e - e * e);
+    r.vel = -2 * r.D / r.T * (1 - e);
+    if (e >= 1){ r.state = "settle"; r.t0 = t; landed(r); }
+  }
+  if (r.state === "settle"){
+    e = Math.min(1, (t - r.t0) / 200); var ease = 1 - Math.pow(1 - e, 3);
+    r.p = r.pt - OVER + OVER * ease;
+    if (e >= 1){ r.p = r.pt; r.state = "idle"; r.vel = 0; if (r.done){ var d = r.done; r.done = null; d(); } }
+  }
+  if (r.state === "decel" && Math.floor(r.p) !== r.lastTick){ r.lastTick = Math.floor(r.p); if (Math.abs(r.vel) < 9) Snd.tick(); }
+  r.sync();
+}
+function beginDecel(r, t){
+  var vv = Math.abs(r.vel) || r.vmax, Dmin = r.dmin;
+  var pt = Math.floor(r.p - Dmin);
+  r.offset = mod(r.target - (pt - 1), r.L);        // the faces that will show the result haven't been drawn yet — they're behind the reel
+  r.p0 = r.p; r.pt = pt; r.D = (r.p - pt) + OVER; r.T = 2 * r.D / vv; if (r.slam) r.T = Math.min(r.T, 0.42); r.t0 = t; r.state = "decel";
+}
+function landed(r){
+  Snd.stop(r.i);
+  if (!REDUCED){ r.box.classList.remove("landed"); void r.box.offsetWidth; r.box.classList.add("landed"); var c = $("cab"); c.classList.remove("thud"); void c.offsetWidth; c.classList.add("thud"); }
+  r.box.classList.remove("tension");
+  if (r.onLand) r.onLand();
+}
+function startReels(turbo){
+  var t = now(), vmax = turbo ? V_TURBO : V_NORMAL;
+  reels.forEach(function(r, i){
+    r.state = "wind"; r.t0 = t + (turbo ? 0 : i * 45); r.p0 = r.p; r.vmax = vmax; r.stopAt = null; r.target = null; r.done = null; r.onLand = null; r.slam = false;
+    if (r.t0 > t){ r.state = "wait"; (function(rr){ setTimeout(function(){ if (rr.state === "wait"){ rr.state = "wind"; rr.t0 = now(); rr.p0 = rr.p; kick(); } }, rr.t0 - t); })(r); }
+  });
+  kick();
+}
+// Bring every reel to rest on `stops`. Reels after two Bonus coins spin longer (the tease).
+function stopReels(stops, grid, opts){
+  return new Promise(function(resolve){
+    var t = now(), turbo = opts.turbo, base = Math.max(t + (turbo ? 60 : 0), opts.earliest || 0);
+    var gap = turbo ? 90 : 260, extra = 0, scat = 0, left = 5;
+    reels.forEach(function(r, i){
+      var tease = !opts.slam && scat >= 2;
+      if (tease) extra += turbo ? 650 : 1050;
+      r.target = stops[i]; r.dmin = tease ? 15 : (turbo ? 9 : 11);
+      r.stopAt = opts.slam ? t + i * 50 : base + i * gap + extra; r.slam = !!opts.slam; if (opts.slam) r.dmin = 9;
+      if (tease){ r.tease = true; (function(rr, at){ setTimeout(function(){ if (rr.state === "run" || rr.state === "wind"){ rr.box.classList.add("tension"); Snd.tense(); if (!$("cab").classList.contains("fs")) ticker("Two Bonus coins… one more for free spins!", "big"); } }, Math.max(0, at - now() - (turbo ? 650 : 1050))); })(r, r.stopAt); }
+      var col = grid ? grid[i] : "", s = col.split("S").length - 1;
+      r.onLand = (function(rr, sc, total){ return function(){ if (sc){ Snd.scatter(total); for (var row = 0; row < 3; row++){ var f = rr.faceAt(row); if (rr.symAt(Math.round(rr.p) - 1 + row) === "S") f.classList.add("coin"); } } }; })(r, s, scat + s);
+      scat += s;
+      r.done = function(){ if (--left === 0) resolve(); };
+      if (r.state === "idle"){ r.done = null; if (--left === 0) resolve(); }
+    });
+    kick();
+  });
+}
+var slamReq = false;
+function slam(){ slamReq = true; reels.forEach(function(r, i){ if (r.state === "run" || r.state === "wind" || r.state === "wait"){ if (r.target != null){ r.stopAt = now() + i * 50; r.dmin = 9; r.slam = true; r.box.classList.remove("tension"); } } }); }
+
+// ── Particles: coins and confetti ─────────────────────────────────────────────
+var FX = (function(){
+  var cv = $("fx"), cx = cv.getContext("2d"), parts = [], dpr = 1;
+  function size(){ dpr = Math.min(2, window.devicePixelRatio || 1); cv.width = innerWidth * dpr; cv.height = innerHeight * dpr; }
+  size(); window.addEventListener("resize", size);
+  var CONF = ["#FF3D9A", "#3DE0FF", "#FFD54A", "#7CFFB2", "#B58CFF", "#FFFFFF"];
+  var MAXP = innerWidth < 640 ? 160 : 320;
+  function add(p){ if (parts.length < MAXP) parts.push(p); }
+  function burst(x, y, count, power){
+    if (REDUCED) count = Math.min(count, 8);
+    for (var i = 0; i < count; i++){
+      var a = -Math.PI / 2 + (Math.random() - .5) * 1.9, s = (300 + Math.random() * 520) * (power || 1);
+      add({k: Math.random() < .78 ? "c" : "f", x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: 7 + Math.random() * 7,
+           ph: Math.random() * 6, vph: 6 + Math.random() * 10, rot: Math.random() * 6, life: 2.6 + Math.random(), col: CONF[i % CONF.length]});
+    }
+    kick();
+  }
+  function rain(count){
+    if (REDUCED) count = Math.min(count, 12);
+    for (var i = 0; i < count; i++)
+      add({k: Math.random() < .7 ? "c" : "f", x: Math.random() * innerWidth, y: -20 - Math.random() * innerHeight * .9, vx: (Math.random() - .5) * 90, vy: 120 + Math.random() * 220,
+           r: 8 + Math.random() * 9, ph: Math.random() * 6, vph: 5 + Math.random() * 9, rot: Math.random() * 6, life: 5, col: CONF[i % CONF.length]});
+    kick();
+  }
+  function step(dt){
+    if (!parts.length){ if (cv._dirty){ cx.clearRect(0, 0, cv.width, cv.height); cv._dirty = false; } return false; }
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0); cx.clearRect(0, 0, innerWidth, innerHeight); cv._dirty = true;
+    for (var i = parts.length - 1; i >= 0; i--){
+      var p = parts[i]; p.vy += 900 * dt; p.vx *= (1 - 0.6 * dt); p.x += p.vx * dt; p.y += p.vy * dt; p.ph += p.vph * dt; p.life -= dt;
+      if (p.life <= 0 || p.y > innerHeight + 40){ parts.splice(i, 1); continue; }
+      var c = Math.cos(p.ph), w = Math.max(1.2, p.r * Math.abs(c));
+      cx.globalAlpha = Math.min(1, p.life * 2);
+      if (p.k === "c"){
+        cx.beginPath(); cx.ellipse(p.x, p.y, w, p.r, 0, 0, 6.2832); cx.fillStyle = c > 0 ? "#F5C64B" : "#C98A0A"; cx.fill();
+        cx.lineWidth = 1.5; cx.strokeStyle = "#8A5A00"; cx.stroke();
+        if (w > p.r * .45){ cx.beginPath(); cx.ellipse(p.x, p.y, w * .62, p.r * .62, 0, 0, 6.2832); cx.fillStyle = c > 0 ? "#FFE58A" : "#E0A52A"; cx.fill(); }
+      } else {
+        cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot + p.ph * .3); cx.scale(1, Math.abs(c) + .15); cx.fillStyle = p.col; cx.fillRect(-p.r * .5, -p.r * .28, p.r, p.r * .56); cx.restore();
+      }
+    }
+    cx.globalAlpha = 1;
+    return true;
+  }
+  return {burst: burst, rain: rain, step: step, clear: function(){ parts.length = 0; }};
+})();
+
+// ── Bulbs ─────────────────────────────────────────────────────────────────────
+function buildBulbs(){
+  var b = $("bulbs"), w = b.clientWidth, h = b.clientHeight, gap = innerWidth < 640 ? 22 : 28, pts = [];
+  var nx = Math.max(4, Math.round(w / gap)), ny = Math.max(2, Math.round(h / gap));
+  for (var i = 0; i <= nx; i++) pts.push([i / nx * w, 0]);
+  for (i = 1; i <= ny; i++) pts.push([w, i / ny * h]);
+  for (i = nx - 1; i >= 0; i--) pts.push([i / nx * w, h]);
+  for (i = ny - 1; i >= 1; i--) pts.push([0, i / ny * h]);
+  b.innerHTML = pts.map(function(p, i){ return '<i class="bulb" style="left:' + p[0].toFixed(1) + 'px;top:' + p[1].toFixed(1) + 'px;animation-delay:calc(var(--chase,1.2s) * ' + (-(i % 3) / 3).toFixed(3) + ')"></i>'; }).join("");
+}
+function chase(speed){ $("cab").style.setProperty("--chase", speed + "s"); }
+
+// ── Paylines ──────────────────────────────────────────────────────────────────
+var lastLines = null;
+function linePath(li){
+  var L = info.lines[li], pts = [[0, rowY[L[0]]]];
+  for (var r = 0; r < 5; r++) pts.push([reelX[r], rowY[L[r]]]);
+  pts.push([$("win").clientWidth, rowY[L[4]]]);
+  return "M" + pts.map(function(p){ return p[0].toFixed(1) + " " + p[1].toFixed(1); }).join(" L");
+}
+function drawLines(list, anim){
+  lastLines = list.length ? {list: list, anim: false} : null;
+  var svg = $("lines"), h = "";
+  list.forEach(function(li){
+    var col = LINE_COLORS[li % 20], y = rowY[info.lines[li][0]];
+    h += '<path d="' + linePath(li) + '" stroke="' + col + '" style="color:' + col + '"' + (anim && !REDUCED ? ' class="draw"' : '') + '/>' +
+         '<circle cx="12" cy="' + y.toFixed(1) + '" r="10" fill="' + col + '"/><text x="12" y="' + y.toFixed(1) + '">' + (li + 1) + '</text>';
+  });
+  svg.innerHTML = h;
+  if (anim && !REDUCED) Array.prototype.forEach.call(svg.querySelectorAll("path"), function(p){ var len = p.getTotalLength(); p.style.strokeDasharray = len; p.style.setProperty("--len", len); });
+}
+function clearMarks(){
+  reels.forEach(function(r){ r.faces.forEach(function(f){ f.classList.remove("hit", "dim", "wolf", "coin"); }); });
+  drawLines([]);
+}
+function markCells(cells){
+  reels.forEach(function(r, ri){
+    for (var row = 0; row < 3; row++){
+      var f = r.faceAt(row), key = ri + "," + row, on = cells[key];
+      f.classList.toggle("hit", !!on); f.classList.toggle("dim", !on); f.classList.toggle("wolf", on === "W");
+    }
+  });
+}
+function cellsFor(spin, onlyLine){
+  var cells = {};
+  spin.wins.forEach(function(w){
+    if (onlyLine != null && w.line !== onlyLine) return;
+    var L = info.lines[w.line];
+    for (var r = 0; r < w.n; r++) cells[r + "," + L[r]] = spin.grid[r][L[r]];
+  });
+  if (onlyLine == null && spin.scatter_pay) spin.scatter.forEach(function(c){ cells[c[0] + "," + c[1]] = "S"; });
+  return cells;
+}
+
+// ── Waiting that the player can hurry along ───────────────────────────────────
+var waiters = [], hurry = false;
+function wait(ms){ return new Promise(function(res){ if (hurry) ms = Math.min(ms, 120); var id = setTimeout(done, ms); function done(){ clearTimeout(id); var i = waiters.indexOf(done); if (i >= 0) waiters.splice(i, 1); res(); } waiters.push(done); }); }
+function rushAll(){ hurry = true; waiters.slice().forEach(function(f){ f(); }); }
+function countTo(el, from, to, ms, onStep){
+  return new Promise(function(res){
+    if (REDUCED || ms <= 0 || from === to){ el.textContent = n(to); if (onStep) onStep(to); res(); return; }
+    var t0 = now(), lastCoin = 0;
+    (function f(){
+      var e = hurry ? 1 : Math.min(1, (now() - t0) / ms), v = from + (to - from) * (1 - Math.pow(1 - e, 2));
+      el.textContent = n(v); if (onStep) onStep(v);
+      if (now() - lastCoin > 70 && e < 1){ lastCoin = now(); Snd.coin(); }
+      if (e < 1) requestAnimationFrame(f); else res();
+    })();
+  });
+}
+
+// ── UI bits ───────────────────────────────────────────────────────────────────
+var balance = 0, shownBal = 0, bet = 100, phase = "idle", turbo = store("reels_turbo") === "1", autoLeft = 0;
+function ticker(t, cls){ var k = $("ticker"); k.className = "ticker" + (cls ? " " + cls : ""); k.textContent = t; }
+function note(t){ $("note").textContent = t || ""; }
+function setBal(b){ balance = b; shownBal = b; $("bal").textContent = n(b); $("mBal").textContent = n(b); }
+function showBal(b){ shownBal = b; $("bal").textContent = n(b); $("mBal").textContent = n(b); }
+function setWin(v){ $("mWin").textContent = n(v); }
+function popWin(){ var w = $("ledWin"); w.classList.remove("pop"); void w.offsetWidth; w.classList.add("pop"); }
+function midLed(label, val){ $("ledMidL").textContent = label; $("mMid").textContent = val; }
+function renderBet(){
+  $("betOut").textContent = n(bet); $("per").textContent = "20 lines × " + n(bet / 20);
+  var i = BETS.indexOf(bet), busy = phase !== "idle";
+  $("betDn").disabled = busy || i <= 0; $("betUp").disabled = busy || i >= BETS.length - 1 || BETS[i + 1] > Math.max(balance, BETS[0]);
+  $("maxBtn").disabled = busy;
+  if (phase === "idle") midLed("Bet", n(bet));
+  var s = $("spin");
+  if (phase === "idle"){ s.className = "spin"; s.innerHTML = "Spin<small>space</small>"; s.disabled = !info || bet > balance; }
+  else { s.className = "spin busy"; s.innerHTML = (phase === "spinning" ? "Stop" : "Skip") + "<small>space</small>"; s.disabled = false; }
+  $("spinwrap").classList.toggle("idle", phase === "idle");
+  $("turboBtn").classList.toggle("on", turbo); $("turboBtn").setAttribute("aria-pressed", turbo);
+  $("soundBtn").classList.toggle("on", Snd.on); $("soundBtn").setAttribute("aria-pressed", Snd.on); $("soundBtn").textContent = Snd.on ? "Sound" : "Muted";
+  var ab = $("autoBtn"); ab.classList.toggle("on", autoLeft > 0); ab.textContent = autoLeft > 0 ? "Stop " + autoLeft : "Auto";
+  var pr = $("payBtn"); pr.disabled = false;
+}
+function setBet(b){ bet = b; store("reels_bet", b); renderBet(); }
+$("betDn").addEventListener("click", function(){ var i = BETS.indexOf(bet); if (i > 0) setBet(BETS[i - 1]); });
+$("betUp").addEventListener("click", function(){ var i = BETS.indexOf(bet); if (i < BETS.length - 1 && BETS[i + 1] <= balance) setBet(BETS[i + 1]); });
+$("maxBtn").addEventListener("click", function(){ var fit = BETS.filter(function(b){ return b <= balance; }); if (fit.length) setBet(fit[fit.length - 1]); });
+$("turboBtn").addEventListener("click", function(){ turbo = !turbo; store("reels_turbo", turbo ? "1" : "0"); renderBet(); });
+$("soundBtn").addEventListener("click", function(){ Snd.toggle(); renderBet(); });
+$("autoBtn").addEventListener("click", function(e){
+  e.stopPropagation();
+  if (autoLeft > 0){ autoLeft = 0; renderBet(); return; }
+  $("autopop").hidden = !$("autopop").hidden;
+});
+Array.prototype.forEach.call(document.querySelectorAll("[data-auto]"), function(b){
+  b.addEventListener("click", function(e){ e.stopPropagation(); $("autopop").hidden = true; autoLeft = Number(b.dataset.auto); renderBet(); if (phase === "idle") spin(); });
+});
+document.addEventListener("click", function(){ $("autopop").hidden = true; });
+
+// ── Provably fair ─────────────────────────────────────────────────────────────
+function randSeed(){ var a = new Uint8Array(8); if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a); else for (var i = 0; i < 8; i++) a[i] = Math.random() * 256;
+  return Array.prototype.map.call(a, function(v){ return ("0" + v.toString(16)).slice(-2); }).join(""); }
+$("fClient").value = store("reels_seed") || randSeed();
+$("fClient").addEventListener("change", function(){ $("fClient").value = $("fClient").value.replace(/[^A-Za-z0-9]/g, "").slice(0, 32) || randSeed(); store("reels_seed", $("fClient").value); });
+function sha(s){
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function(buf){
+    return Array.prototype.map.call(new Uint8Array(buf), function(v){ return ("0" + v.toString(16)).slice(-2); }).join(""); });
+}
+function stopsFrom(server, client, i, strips){
+  return Promise.all([0, 1, 2, 3, 4].map(function(r){ return sha(server + ":" + client + ":" + i + ":" + r); })).then(function(h){
+    return h.map(function(x, r){ return Number(BigInt("0x" + x) % BigInt(strips[r].length)); }); });
+}
+window.__reelsStops = stopsFrom;   // parity tests
+function verify(d){
+  var spins = [d.base].concat(d.free || []);
+  $("fLast").innerHTML = '<label>Last spin</label><div class="hash">seal ' + esc(d.seal) + '<br>server seed ' + esc(d.server_seed) + '<br>your seed ' + esc(d.client_seed) +
+    '<br>reel stops ' + esc(d.base.stops.join(", ")) + (d.free && d.free.length ? ' (+' + d.free.length + ' free spins)' : '') + '</div><p id="fVerdict">Checking…</p>';
+  if (!(window.crypto && crypto.subtle && window.TextEncoder && window.BigInt)){ $("fVerdict").textContent = "Your browser can't check this here, but you can with any SHA-256 tool."; return; }
+  Promise.all([sha(d.server_seed)].concat(spins.map(function(s, i){ return stopsFrom(d.server_seed, d.client_seed, i, info.strips); }))).then(function(res){
+    var ok = res[0] === d.seal;
+    spins.forEach(function(s, i){
+      var st = res[i + 1]; ok = ok && st.join(",") === s.stops.join(",");
+      for (var r = 0; r < 5; r++) for (var row = 0; row < 3; row++) ok = ok && info.strips[r][(st[r] + row) % info.strips[r].length] === s.grid[r][row];
+    });
+    $("fVerdict").innerHTML = ok ? '<span class="ok">✓ Verified.</span> The seal matches, and every reel stopped exactly where the seeds put it.'
+                                 : '<span class="bad">✗ This spin didn\'t verify.</span> Screenshot this and tell an admin.';
+  }).catch(function(){ $("fVerdict").textContent = "Couldn't run the check in this browser."; });
+}
+
+// ── Stats / board / pays ──────────────────────────────────────────────────────
+function renderStats(s){
+  $("sSpins").textContent = n(s.spins);
+  var net = s.won - s.wagered; $("sNet").textContent = (net > 0 ? "+" : "") + n(net); $("sNet").className = "v " + (net > 0 ? "ok" : (net < 0 ? "bad" : ""));
+  $("sBest").textContent = s.best_win ? n(s.best_win) + " (" + Math.round(s.best_mult).toLocaleString("en-US") + "×)" : "—"; $("sFeat").textContent = n(s.features);
+}
+function mx(c){ var v = c / 100; return (v >= 100 ? Math.round(v).toLocaleString("en-US") : v.toFixed(v >= 10 ? 1 : 2)) + "×"; }
+function renderRecent(list){
+  $("recent").innerHTML = (list || []).map(function(r){ return '<span class="' + (r.fs ? 'f' : (r.payout > r.bet ? 'w' : '')) + '" title="' + n(r.bet) + ' bet, won ' + n(r.payout) + '">' + (r.payout ? mx(r.mult) : '0') + (r.fs ? ' ★' : '') + '</span>'; }).join("");
+}
+function renderBoard(b){
+  if (!b || !b.top || !b.top.length){ $("board").innerHTML = '<li><span class="n">No big wins yet. Be the first.</span></li>'; return; }
+  $("board").innerHTML = b.top.map(function(r){
+    return '<li><span class="n' + (r.you ? ' you' : '') + '">' + esc(r.name) + '<span class="h">' + Math.round(r.mult).toLocaleString("en-US") + '×</span></span><span class="v">' + n(r.win) + '</span></li>'; }).join("");
+}
+function sym(s){ return '<svg viewBox="0 0 100 100" aria-hidden="true"><use href="#s-' + s + '"/></svg>'; }
+function renderPays(){
+  var lb = bet / 20, h = "";
+  ORDER.forEach(function(s){
+    var p = info.pays[s];
+    h += '<div class="it">' + sym(s) + '<ul><li><span>5×</span> ' + n(p[2] * lb) + '</li><li><span>4×</span> ' + n(p[1] * lb) + '</li><li><span>3×</span> ' + n(p[0] * lb) + '</li></ul></div>';
+  });
+  var sp = info.scatter_pay, fs = info.fs_spins;
+  h += '<div class="it wide">' + sym("W") + '<ul><li><b>Wolf is wild.</b> It stands in for every symbol except the Bonus coin.</li></ul></div>';
+  h += '<div class="it wide">' + sym("S") + '<ul><li><b>Bonus coins pay anywhere.</b> 3 pay ' + n(sp["3"] * bet) + ' and start ' + fs["3"] + ' free spins · 4 pay ' + n(sp["4"] * bet) + ' + ' + fs["4"] + ' free spins · 5 pay ' + n(sp["5"] * bet) + ' + ' + fs["5"] + ' free spins.</li><li>Every win during free spins is <b>×' + info.fs_mult + '</b>, and they can trigger again.</li></ul></div>';
+  $("ptab").innerHTML = h;
+  $("payIntro").textContent = "At your bet of " + n(bet) + " (" + n(lb) + " a line). Three or more in a row from the leftmost reel pay on any of the 20 lines; each line pays its best match.";
+  $("lgrid").innerHTML = info.lines.map(function(L, i){
+    var pts = L.map(function(row, r){ return (6 + r * 12) + "," + (5 + row * 10); }).join(" "), cells = "";
+    for (var r = 0; r < 5; r++) for (var row = 0; row < 3; row++) cells += '<rect x="' + (1 + r * 12) + '" y="' + (1 + row * 10) + '" width="10" height="8" rx="1.5" fill="' + (L[r] === row ? LINE_COLORS[i] : "rgba(255,255,255,.08)") + '"/>';
+    return '<div><svg viewBox="0 0 61 31">' + cells + '<polyline points="' + pts + '" fill="none" stroke="#fff" stroke-width="1.2" opacity=".7"/></svg>' + (i + 1) + '</div>'; }).join("");
+}
+function openPays(){ if (!info) return; renderPays(); $("paysheet").hidden = false; $("payClose").focus(); }
+$("payBtn").addEventListener("click", openPays); $("payBtn2").addEventListener("click", openPays);
+$("payClose").addEventListener("click", function(){ $("paysheet").hidden = true; });
+$("paysheet").addEventListener("click", function(e){ if (e.target === $("paysheet")) $("paysheet").hidden = true; });
+
+// ── Overlays ──────────────────────────────────────────────────────────────────
+var ovClose = null;
+$("over").addEventListener("click", function(){ if (ovClose) ovClose(); });
+function overlay(kind, tier, amtText, sub, holdMs){
+  return new Promise(function(res){
+    var o = $("over"); o.className = "over" + (kind === "fs" ? " fsov" : ""); o.hidden = false;
+    $("ovTier").textContent = tier; $("ovAmt").textContent = amtText || ""; $("ovSub").textContent = sub || "";
+    var closed = false;
+    ovClose = function(){ if (closed) return; closed = true; ovClose = null; o.hidden = true; res(); };
+    wait(holdMs).then(function(){ ovClose && ovClose(); });
+  });
+}
+var TIERS = [[10, "Big Win"], [25, "Mega Win"], [50, "Epic Win"], [100, "Legendary"]];
+function tierFor(x){ var t = null; TIERS.forEach(function(k){ if (x >= k[0]) t = k[1]; }); return t; }
+function bigWin(amount, betAmt){
+  return new Promise(function(res){
+    var o = $("over"); o.className = "over"; o.hidden = false;
+    var tierEl = $("ovTier"), amtEl = $("ovAmt"), cur = tierFor(amount / betAmt);
+    tierEl.textContent = "Big Win"; $("ovSub").textContent = Math.round(amount / betAmt).toLocaleString("en-US") + "× your bet";
+    Snd.big(); FX.rain(innerWidth < 640 ? 70 : 140); chase(.25); $("cab").classList.add("flash");
+    if (!REDUCED){ var c = $("cab"); c.classList.remove("shake"); void c.offsetWidth; c.classList.add("shake"); }
+    var shown = "Big Win", closed = false, ms = Math.min(5200, 1600 + Math.log10(amount / betAmt) * 1800);
+    if (autoLeft > 0 || turbo) ms *= .6;
+    var rainT = setInterval(function(){ if (!REDUCED) FX.rain(innerWidth < 640 ? 12 : 24); }, 380);
+    function close(){ if (closed) return; closed = true; ovClose = null; clearInterval(rainT); o.hidden = true; $("cab").classList.remove("flash"); chase(1.2); res(); }
+    var counting = true;
+    ovClose = function(){ if (counting){ hurry = true; return; } close(); };
+    countTo(amtEl, 0, amount, ms, function(v){
+      var t = tierFor(v / betAmt) || "Big Win";
+      if (t !== shown){ shown = t; tierEl.textContent = t; tierEl.classList.remove("bump"); void tierEl.offsetWidth; tierEl.classList.add("bump"); Snd.win(3); FX.burst(innerWidth / 2, innerHeight * .42, 40, 1.2); }
+    }).then(function(){ counting = false; tierEl.textContent = cur || shown; wait(autoLeft > 0 ? 1200 : 2600).then(close); });
+  });
+}
+
+// ── A round: the paid spin, then any free spins ───────────────────────────────
+var spinPending = null, lastStops = null;
+function spinId(){ return randSeed() + randSeed().slice(0, 8); }
+function spin(){
+  if (ovClose){ ovClose(); return; }
+  if (phase !== "idle"){ if (phase === "spinning") slam(); else rushAll(); return; }
+  if (!info) return;
+  if (bet > balance){ note("You don't have enough for that bet."); autoLeft = 0; renderBet(); return; }
+  Snd.init(); note(""); hurry = false; slamReq = false; $("paysheet").hidden = true;
+  phase = "spinning"; renderBet(); clearMarks(); stopCycle(); FX.clear();
+  showBal(balance - bet); setWin(0); $("ledWinL").textContent = "Win";
+  ticker(autoLeft > 0 ? "Autoplay · " + autoLeft + " left" : "Good luck…");
+  Snd.spin(); chase(.35);
+  var ring = $("ring"); ring.classList.remove("go"); void ring.offsetWidth; ring.classList.add("go");
+  pullLever();
+  var t0 = now();
+  startReels(turbo);
+  var id = spinId(), tries = 0;
+  function send(){
+    return api("/api/games/reels/spin", {bet: bet, client_seed: $("fClient").value, spin_id: id}).then(function(d){
+      if (d && d.ok === false && d.retry && tries++ < 6) return new Promise(function(r){ setTimeout(r, 450); }).then(send);
+      return d;
+    }, function(e){ if (e.message !== "login" && tries++ < 2) return new Promise(function(r){ setTimeout(r, 900); }).then(send); throw e; });
+  }
+  send().then(function(d){
+    if (!d || d.ok === false){ return failSpin((d && d.error) || "That spin didn't go through.", d); }
+    return playRound(d, t0);
+  }).catch(function(e){ if (e && e.message === "login") return; failSpin("Couldn't reach the machine. Your balance is safe — check it below.", null); });
+}
+function failSpin(msg, d){
+  var stops = lastStops || reels.map(function(r){ return mod(r.offset + Math.round(r.p) - 1, r.L); });
+  return stopReels(stops, null, {turbo: true, slam: true}).then(function(){
+    phase = "idle"; autoLeft = 0; chase(1.2); ticker(msg, "bad"); note("");
+    if (d && d.balance != null) setBal(d.balance); else { showBal(balance); load(true); }
+    renderBet();
+  });
+}
+function playRound(d, t0){
+  var minSpin = turbo ? 280 : 650, betAmt = d.bet;
+  return stopReels(d.base.stops, d.base.grid, {turbo: turbo, earliest: t0 + minSpin, slam: slamReq}).then(function(){
+    lastStops = d.base.stops; phase = "showing"; renderBet(); chase(1.2);
+    return showSpin(d.base, betAmt, 0, false);
+  }).then(function(){
+    if (!d.free.length) return d.base.win;
+    return feature(d, betAmt);
+  }).then(function(){
+    var x = d.payout / betAmt;
+    if (x >= 10) return bigWin(d.payout, betAmt);
+  }).then(function(){ finish(d); });
+}
+function showSpin(s, betAmt, running, inFeature){
+  var win = s.win, scat = s.scatter.length;
+  if (scat >= 3){ s.scatter.forEach(function(c){ var f = reels[c[0]].faceAt(c[1]); f.classList.add("hit"); }); }
+  if (!win){
+    if (scat >= 3) return wait(700);
+    if (!inFeature) ticker(scat === 2 ? "So close — two Bonus coins." : (autoLeft > 0 ? "Autoplay · " + autoLeft + " left" : "No win this time."));
+    return wait(inFeature ? 260 : 120);
+  }
+  var x = win / betAmt, level = x >= 10 ? 3 : x >= 2 ? 2 : 1;
+  markCells(cellsFor(s));
+  drawLines(s.wins.map(function(w){ return w.line; }), true);
+  if (s.wins.some(function(w){ return w.sym === "W"; })){ $("moon").classList.add("howl"); Snd.howl(); setTimeout(function(){ $("moon").classList.remove("howl"); }, 1600); }
+  Snd.win(level); popWin();
+  var b = $("ledWin").getBoundingClientRect();
+  if (!REDUCED) FX.burst(b.left + b.width / 2, b.top + 10, Math.min(60, 6 + Math.round(x * 6)), x >= 2 ? 1 : .7);
+  if (x >= 2 && !REDUCED){ $("cab").classList.add("flash"); setTimeout(function(){ $("cab").classList.remove("flash"); }, 900); }
+  var desc = s.wins.length === 1 ? lineText(s.wins[0], s.mult) : s.wins.length + " lines";
+  if (s.scatter_pay) desc += (s.wins.length ? " + " : "") + scat + " Bonus coins";
+  ticker((inFeature ? "×" + s.mult + " · " : "") + desc + " · +" + n(win), x >= 2 ? "big" : "");
+  var dur = Math.min(1600, 350 + x * 120) * (turbo || autoLeft > 0 ? .55 : 1);
+  return countTo($("mWin"), running, running + win, dur).then(function(){ return wait(inFeature ? 420 : (turbo ? 250 : 450)); });
+}
+function lineText(w, mult){ return "Line " + (w.line + 1) + " · " + w.n + "× " + NAMES[w.sym] + (mult > 1 ? " ×" + mult : ""); }
+function feature(d, betAmt){
+  var total = d.base.win, spins = d.free, given = d.base.fs, i = 0;
+  var cab = $("cab");
+  return overlay("fs", given + " Free Spins", "", "every win ×" + info.fs_mult, 2400).then(function(){
+    cab.classList.add("fs"); document.body.classList.add("fsmode"); $("moon").classList.add("howl"); chase(.6);
+    $("ledWinL").textContent = "Feature win"; setWin(total);
+    function next(){
+      if (i >= spins.length) return Promise.resolve();
+      var s = spins[i]; i++;
+      clearMarks(); midLed("Free spin", i + " / " + given); phase = "spinning"; renderBet();
+      ticker("Free spin " + i + " of " + given + " · wins ×" + info.fs_mult);
+      Snd.spin(); var t0 = now(); startReels(true);
+      return stopReels(s.stops, s.grid, {turbo: true, earliest: t0 + 380}).then(function(){
+        phase = "showing"; renderBet();
+        return showSpin(s, betAmt, total, true);
+      }).then(function(){
+        total += s.win;
+        if (s.fs){ given += s.fs; midLed("Free spin", i + " / " + given); Snd.win(2); FX.burst(innerWidth / 2, innerHeight * .4, 30, 1); return overlay("fs", "+" + s.fs + " Spins", "", "the wolves are back", 1600); }
+      }).then(next);
+    }
+    return next();
+  }).then(function(){
+    clearMarks();
+    return overlay("fs", "Feature Over", n(total), "won in " + spins.length + " free spins", total / betAmt >= 10 ? 1400 : 2600);
+  }).then(function(){
+    cab.classList.remove("fs"); document.body.classList.remove("fsmode"); $("moon").classList.remove("howl"); chase(1.2);
+    midLed("Bet", n(betAmt)); setWin(total);
+  });
+}
+function finish(d){
+  phase = "idle"; hurry = false; setBal(d.balance);
+  $("fSeal").textContent = d.next_seal; renderStats(d.stats); renderBoard(d.board); renderRecent(d.recent); verify(d);
+  var extra = (d.achievements || []).map(function(a){ return "🏆 " + a; }).join(" · ");
+  if (d.new_best) extra = (extra ? extra + " · " : "") + "New personal best";
+  if (d.capped) extra = (extra ? extra + " · " : "") + "That's the max win for one spin";
+  if (extra) $("note").innerHTML = '<span class="ok">' + esc(extra) + '</span>'; else note("");
+  if (d.payout > 0){ ticker((d.free.length ? "Round total " : "You won ") + n(d.payout) + (d.payout > d.bet ? " · " + mx(d.mult) : ""), d.payout >= d.bet * 2 ? "big" : ""); setWin(d.payout); }
+  if (bet > balance){ var fit = BETS.filter(function(b){ return b <= balance; }); if (fit.length) bet = fit[fit.length - 1]; }
+  renderBet();
+  if (autoLeft > 0){
+    autoLeft--;
+    renderBet();
+    if (autoLeft > 0 && bet <= balance){ setTimeout(function(){ if (phase === "idle" && autoLeft > 0) spin(); }, turbo ? 280 : 650); return; }
+    autoLeft = 0; renderBet();
+  }
+  startCycle(d.free.length ? null : d.base);
+}
+// After a win, step through each winning line until the next spin.
+var cycleT = null;
+function stopCycle(){ clearTimeout(cycleT); cycleT = null; }
+function startCycle(s){
+  stopCycle();
+  if (!s || s.wins.length < 2 || REDUCED) return;
+  var k = 0;
+  cycleT = setTimeout(function tick(){
+    if (phase !== "idle") return;
+    var w = s.wins[k % s.wins.length]; k++;
+    markCells(cellsFor(s, w.line)); drawLines([w.line], true);
+    ticker(lineText(w, s.mult) + " · +" + n(w.pay));
+    cycleT = setTimeout(tick, 1300);
+  }, 1600);
+}
+
+// ── Lever ─────────────────────────────────────────────────────────────────────
+var leverAnim = null;
+function setLever(a){ $("arm").style.setProperty("--la", (-a).toFixed(1) + "deg"); }
+function pullLever(){
+  if (REDUCED || getComputedStyle($("lever")).display === "none") return;
+  var t0 = now(); cancelAnimationFrame(leverAnim);
+  (function f(){ var e = (now() - t0) / 520, a = e < .3 ? 64 * (e / .3) : 64 * Math.max(0, 1 - (e - .3) / .7) * Math.cos((e - .3) * 9);
+    setLever(Math.max(0, a)); if (e < 1) leverAnim = requestAnimationFrame(f); else setLever(0); })();
+}
+(function(){
+  var lever = $("lever"), arm = $("arm"), y0 = 0, a = 0, drag = false;
+  arm.addEventListener("pointerdown", function(e){ if (phase !== "idle") return; drag = true; y0 = e.clientY; a = 0; lever.classList.add("drag"); arm.setPointerCapture(e.pointerId); Snd.init(); cancelAnimationFrame(leverAnim); });
+  arm.addEventListener("pointermove", function(e){ if (!drag) return; a = Math.max(0, Math.min(66, (e.clientY - y0) * .55)); setLever(a); });
+  function up(){ if (!drag) return; drag = false; lever.classList.remove("drag");
+    if (a > 34){ Snd.lever(); spin(); } else { var from = a, t0 = now(); (function f(){ var e = Math.min(1, (now() - t0) / 250); setLever(from * (1 - e)); if (e < 1) requestAnimationFrame(f); })(); } }
+  arm.addEventListener("pointerup", up); arm.addEventListener("pointercancel", up);
+})();
+
+// ── Tilt the cabinet toward the pointer ───────────────────────────────────────
+if (HOVER && !REDUCED){
+  var tiltQ = false, tx = 3, ty = 0;
+  document.addEventListener("pointermove", function(e){
+    tx = 3 + (e.clientY / innerHeight - .5) * -4; ty = (e.clientX / innerWidth - .5) * 6;
+    if (!tiltQ){ tiltQ = true; requestAnimationFrame(function(){ tiltQ = false; var c = $("cab"); c.style.setProperty("--tx", tx.toFixed(2) + "deg"); c.style.setProperty("--ty", ty.toFixed(2) + "deg"); }); }
+  });
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+$("spin").addEventListener("click", function(){ spin(); });
+$("spin").addEventListener("pointerdown", function(){ Snd.init(); });
+document.addEventListener("keydown", function(e){
+  var tg = e.target && e.target.tagName;
+  if (tg === "INPUT" || tg === "TEXTAREA" || tg === "SELECT") return;
+  if (e.key === "Escape"){ $("paysheet").hidden = true; $("autopop").hidden = true; if (ovClose) ovClose(); return; }
+  if (!$("paysheet").hidden) return;
+  if (e.key === " " || e.key === "Spacebar" || (e.key === "Enter" && tg !== "BUTTON" && tg !== "A" && tg !== "SUMMARY")){
+    if (tg === "BUTTON" && e.target.id !== "spin" && e.key !== "Enter"){ return; }
+    e.preventDefault(); if (e.repeat) return;
+    if (ovClose){ ovClose(); return; }
+    $("spin").classList.add("pressed"); setTimeout(function(){ $("spin").classList.remove("pressed"); }, 120);
+    spin();
+  }
+  if (phase === "idle" && (e.key === "ArrowUp" || e.key === "ArrowDown") && tg !== "BUTTON"){ e.preventDefault(); $(e.key === "ArrowUp" ? "betUp" : "betDn").click(); }
+});
+
+// ── Load ──────────────────────────────────────────────────────────────────────
+function load(quiet){
+  return api("/api/games/reels/info").then(function(d){
+    if (!d || d.ok === false){ ticker((d && d.error) || "Couldn't load the machine.", "bad"); return; }
+    var first = !info; info = d; setBal(d.balance);
+    if (first){
+      buildReels(); buildBulbs();
+      var sb = Number(store("reels_bet")); if (BETS.indexOf(sb) >= 0) bet = sb;
+      if (bet > balance){ var fit = BETS.filter(function(b){ return b <= balance; }); bet = fit.length ? fit[fit.length - 1] : BETS[0]; }
+      ticker(balance >= BETS[0] ? (getComputedStyle($("lever")).display !== "none" ? "Pick your bet and pull the lever." : "Pick your bet and hit spin.") : "You need at least " + BETS[0] + " coins to play.");
+      $("edgeNote").textContent = "Bets are real coins. The machine pays back about " + d.rtp + "% over time, so the house wins in the long run. One spin, free spins included, pays at most " + n(d.max_win) + ".";
+    }
+    $("fSeal").textContent = d.seal; renderStats(d.stats); renderBoard(d.board); renderRecent(d.recent); renderBet();
+  }).catch(function(e){ if (e.message !== "login") ticker("Couldn't reach the machine.", "bad"); });
+}
+chase(1.2); load();
+window.addEventListener("resize", function(){ clearTimeout(window.__bz); window.__bz = setTimeout(buildBulbs, 150); });
+window.__reelsState = function(){ return {phase: phase, balance: balance, bet: bet, autoLeft: autoLeft,
+  grid: reels.map(function(r){ var s = ""; for (var row = 0; row < 3; row++) s += r.symAt(Math.round(r.p) - 1 + row); return s; }),
+  states: reels.map(function(r){ return r.state; })}; };
+window.__reelsSetBet = setBet;
+})();
+</script>
+</body>
+</html>
