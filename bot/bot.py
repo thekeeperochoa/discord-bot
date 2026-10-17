@@ -3177,6 +3177,9 @@ ACHIEVEMENTS = {
     "nr_allstars":   {"emoji":"🌙", "name":"Five-Star Driver",     "desc":"Earn every star in Night Run",             "reward":7500},
     "nr_bigone":     {"emoji":"🚁", "name":"The Big One",          "desc":"Deliver The Big One in Night Run",         "reward":10000},
     "nr_fullup":     {"emoji":"🔧", "name":"Fully Loaded",         "desc":"Max every upgrade on one Night Run car",   "reward":5000},
+    "nr_midnight":   {"emoji":"🌌", "name":"Midnight Runner",      "desc":"Drive 10 km in one Midnight Run",          "reward":5000},
+    "nr_stakes":     {"emoji":"💼", "name":"High Stakes",          "desc":"Deliver your own stash in Night Run",      "reward":2000},
+    "nr_contract":   {"emoji":"🤝", "name":"Company Man",          "desc":"Help your crew finish a Night Run contract", "reward":2000},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -27832,7 +27835,7 @@ def _nr_public(g: dict, uid_s: str, rec: dict) -> dict:
             "perks": _nr_perks(rec), "stars": _nr_star_count(rec), "max_stars": 3 * len(NR_LEVELS),
             "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP, "run_cap": NR_RUN_CAP,
             "bag_value": NR_BAG_VALUE, "near_value": NR_NEAR_VALUE, "cargo_star": NR_CARGO_STAR,
-            "hype": int(hype_train_multiplier()), "board": _nr_board(g, uid_s)}
+            "hype": int(hype_train_multiplier()), "board": _nr_board(g, uid_s), "modes": _nr_modes_public(g, uid_s, rec)}
 
 
 def _nr_public_stats(g: dict, uid_s: str) -> dict:
@@ -27843,6 +27846,7 @@ def _nr_public_stats(g: dict, uid_s: str) -> dict:
                 "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP}
     rec = _nr_garage(g, uid_s)
     return {"stars": _nr_star_count(rec), "max_stars": 3 * len(NR_LEVELS), "cars": len(rec["cars"]),
+            "endless": int(g.get("endless_best", {}).get(uid_s, 0)),
             "car": NR_CARS.get(rec["car"], NR_CARS["beater"])["name"], "runs": int(g["runs"].get(uid_s, 0)),
             "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP}
 
@@ -27887,6 +27891,337 @@ def nightrun_settle(run: dict, payload: dict, elapsed: float) -> dict:
             "cargo": cargo, "bags": bags, "near": near, "mask": mask}
 
 
+# ── Night Run phase 3: Midnight Run (endless), Daily Run, High Stakes, crew
+# contracts and cosmetics ─────────────────────────────────────────────────────
+NR_ENDLESS_UNLOCK = 5            # deliver this route to unlock Midnight Run
+NR_ENDLESS_PER100 = 15           # coins per 100 m in Midnight Run
+NR_ENDLESS_RUN_CAP = 5_000
+NR_WEEKLY_PRIZES = (5_000, 3_000, 2_000)
+NR_DAILY_BONUS = 1_500           # first delivery of the Daily Run each day
+NR_DAILY_PRIZES = (3_000, 2_000, 1_000)
+NR_STAKES_COOLDOWN = 6 * 3600
+NR_STAKES_PREMIUM = 1.25         # the buyer across town pays 25% over street
+NR_STAKES_CAP = 60_000
+NR_STAKES_BUST_HEAT = 30
+NR_CONTRACT_REWARD = 5_000
+NR_CONTRACT_CREW_XP = 500
+NR_CONTRACT_WAR = 50
+NR_PLATE_PRICE = 10_000
+NR_PAINTS = {   # id: (name, hex, price or None = can't be bought)
+    "black": ("Midnight Black", "#15161B", 5_000), "white": ("Pearl White", "#E6E6E1", 5_000),
+    "red": ("Candy Red", "#B3121D", 5_000), "blue": ("Electric Blue", "#1F5BFF", 5_000),
+    "lime": ("Acid Lime", "#7BD62A", 5_000), "orange": ("Sunset Orange", "#F06A1C", 5_000),
+    "purple": ("Royal Purple", "#5B2A9C", 5_000), "pink": ("Hot Pink", "#E0368E", 5_000),
+    "gunmetal": ("Gunmetal", "#4A4F57", 5_000), "gold": ("Champion Gold", "#C9A227", None),
+}
+NR_GLOWS = {"purple": ("Purple", 12_000), "cyan": ("Ice Blue", 12_000), "green": ("Toxic Green", 12_000),
+            "red": ("Siren Red", 12_000), "gold": ("Gold", 12_000)}
+_NR_BOOT = time.time()
+
+
+def nightrun_endless(seed: int, length: int) -> dict:
+    """Midnight Run: an endless 4-lane highway that gets harder every km.
+    MUST stay identical to buildEndless() in bot/web/nightrun.html. Prefix-stable:
+    a longer `length` only appends rows, so the page can generate it in chunks."""
+    lanes = 4
+    rng = _mulberry32(seed)
+    traffic = []
+    m = 140
+    while m < length:
+        tier = min(10, m // 1000)
+        lane = int(rng() * lanes)
+        group = [lane]
+        if rng() < 0.12 + 0.02 * tier:
+            group.append((lane + 1 + int(rng() * (lanes - 1))) % lanes)
+        for L in group:
+            r = rng()
+            cops = 0.02 + 0.01 * tier
+            kind = "cop" if r < cops else ("truck" if r < cops + 0.16 else "car")
+            style = int(rng() * 5)
+            sp = int(rng() * 3)
+            ch = 0
+            if rng() < 0.1 + 0.015 * tier:
+                ch = 1 if L == 0 else (-1 if L == lanes - 1 else (1 if rng() < 0.5 else -1))
+            trig = 30 + int(rng() * 50)
+            traffic.append([m, L, kind, style, sp, ch, trig])
+        g = max(24, 42 - 2 * tier)
+        m += g + int(rng() * g)
+    crng = _mulberry32(seed ^ 0xA5A5A5A5)
+    coins = []
+    z = 70
+    while z < length:
+        n = 5 + int(crng() * 6)
+        L = int(crng() * lanes)
+        d = 0
+        if crng() < 0.35:
+            d = 1 if L == 0 else (-1 if L == lanes - 1 else (1 if crng() < 0.5 else -1))
+        for k in range(n):
+            coins.append([z + k * 9, L + (d if k >= n // 2 else 0)])
+        z += n * 9 + 55 + int(crng() * 70)
+    return {"traffic": traffic, "coins": coins}
+
+
+def _nr_week() -> str:
+    return now_est().strftime("%Y-W%U")
+
+
+def _nr_today() -> str:
+    return now_est().strftime("%Y-%m-%d")
+
+
+def nr_daily_route(date_str: str) -> tuple:
+    """(route id, seed) for a day's Daily Run — the same for everyone."""
+    h = hashlib.sha256(f"nightrun-daily-{date_str}".encode()).hexdigest()
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    return d.toordinal() % len(NR_LEVELS) + 1, int(h[:8], 16)
+
+
+def _nr_store(g: dict):
+    for k in ("weekly", "dailyb", "contracts", "escrow", "endless_best"):
+        g.setdefault(k, {})
+
+
+def _nr_cos(rec: dict) -> dict:
+    c = rec.setdefault("cos", {})
+    c.setdefault("paints", [])
+    c.setdefault("glows", [])
+    c.setdefault("plate", "")
+    c.setdefault("cars", {})
+    return c
+
+
+def _nr_ranked(board: dict, reverse: bool) -> list:
+    rows = [(v, u) for u, v in board.items() if _is_member(None, u)]
+    rows.sort(key=lambda r: -r[0] if reverse else r[0])
+    return rows
+
+
+async def _nr_settle_boards(g: dict, data: dict) -> tuple:
+    """Lazily close last week's Midnight Run board and yesterday's Daily Run
+    board: pay the top 3 and announce. Runs on the first request after the
+    rollover; returns (announcement lines, changed)."""
+    _nr_store(g)
+    lines, changed = [], False
+    wk = _nr_week()
+    w = g["weekly"]
+    if w.get("week") and w["week"] != wk:
+        rows = _nr_ranked(w.get("best", {}), True)[:3]
+        winners = []
+        for i, (dist, u) in enumerate(rows):
+            prize = NR_WEEKLY_PRIZES[i]
+            economy.add(int(u), prize, "night run: weekly midnight run prize")
+            if i == 0:
+                rec = _nr_garage(g, u, create=True)
+                cos = _nr_cos(rec)
+                if "gold" not in cos["paints"]:
+                    cos["paints"].append("gold")
+            winners.append({"uid": u, "dist": int(dist), "prize": prize})
+        g["weekly_last"] = {"week": w["week"], "winners": winners}
+        if winners:
+            medals = ["🥇", "🥈", "🥉"]
+            lines.append("🌙 **Midnight Run — week's over.** " + " · ".join(
+                f"{medals[i]} **{_dash_name(x['uid'])}** {x['dist']:,} m (+{x['prize']:,})" for i, x in enumerate(winners))
+                + "\nFirst place gets **Champion Gold** paint. New week, new board. `_nightrun`")
+        w = g["weekly"] = {"week": wk, "best": {}}
+        changed = True
+    elif not w.get("week"):
+        g["weekly"] = {"week": wk, "best": {}}
+        changed = True
+    today = _nr_today()
+    db = g["dailyb"]
+    if db.get("date") and db["date"] != today:
+        rows = _nr_ranked(db.get("best", {}), False)[:3]
+        winners = []
+        for i, (secs, u) in enumerate(rows):
+            prize = NR_DAILY_PRIZES[i]
+            economy.add(int(u), prize, "night run: daily run prize")
+            winners.append({"uid": u, "secs": round(float(secs), 1), "prize": prize})
+        g["daily_last"] = {"date": db["date"], "winners": winners}
+        if winners:
+            medals = ["🥇", "🥈", "🥉"]
+            lines.append("📅 **Yesterday's Daily Run:** " + " · ".join(
+                f"{medals[i]} **{_dash_name(x['uid'])}** {x['secs']:.1f}s (+{x['prize']:,})" for i, x in enumerate(winners)))
+        g["dailyb"] = {"date": today, "best": {}, "bonus": []}
+        changed = True
+    elif not db.get("date"):
+        g["dailyb"] = {"date": today, "best": {}, "bonus": []}
+        changed = True
+    return lines, changed
+
+
+def _nr_stash_view(uid_s: str) -> dict:
+    """The member's dealer stash and what it's worth today (read-only)."""
+    try:
+        ddata = _load_dealer()
+        record = ddata.get("users", {}).get(uid_s)
+        prices = _get_market_prices()
+    except Exception:
+        return {"items": [], "value": 0, "jail": 0}
+    if not record:
+        return {"items": [], "value": 0, "jail": 0}
+    items, value = [], 0
+    for sub, grams in (record.get("stash") or {}).items():
+        info = SUBSTANCES.get(sub)
+        if not info or grams <= 0:
+            continue
+        v = int(prices.get(sub, {}).get("sell", info["base_sell"])) * int(grams)
+        value += v
+        items.append({"name": info["name"], "emoji": info["emoji"], "grams": int(grams), "value": v})
+    return {"items": items, "value": value, "jail": _dealer_in_jail(record)}
+
+
+def _nr_resolve_escrow(g: dict, uid_s: str, outcome: str, cargo: int = 0) -> dict:
+    """Settle a High Stakes load. outcome: delivered | lost | busted | refund."""
+    esc = g["escrow"].pop(uid_s, None)
+    if not esc:
+        return {}
+    ddata = _load_dealer()
+    record = ddata.get("users", {}).get(uid_s)
+    grams = sum(int(v) for v in esc["stash"].values())
+    res = {"value": int(esc["value"]), "grams": grams, "outcome": outcome, "pay": 0}
+    if record is None:
+        return res
+    if outcome == "refund":
+        for sub, gr in esc["stash"].items():
+            record["stash"][sub] = int(record["stash"].get(sub, 0)) + int(gr)
+    elif outcome == "delivered":
+        pay = min(NR_STAKES_CAP, int(esc["value"] * cargo / 100 * NR_STAKES_PREMIUM))
+        res["pay"] = pay
+        record["lifetime_sold"] = record.get("lifetime_sold", 0) + grams
+        record["lifetime_profit"] = record.get("lifetime_profit", 0) + pay
+    elif outcome == "busted":
+        record["heat"] = min(HEAT_MAX, int(record.get("heat", 0)) + NR_STAKES_BUST_HEAT)
+    _save_dealer(ddata)
+    return res
+
+
+def _nr_clean_escrow(g: dict, uid_s: str, now: float):
+    """A load whose run can no longer finish: refunded if the bot restarted under
+    it (not the driver's fault), lost if it simply expired."""
+    esc = g["escrow"].get(uid_s)
+    if not esc:
+        return None
+    live = _nr_runs.get(int(uid_s))
+    if live and live["run_id"] == esc["run_id"] and now - live["started"] <= NR_RUN_TTL:
+        return None
+    if esc["started"] < _NR_BOOT:
+        return _nr_resolve_escrow(g, uid_s, "refund")
+    if now - esc["started"] > NR_RUN_TTL or not live or live["run_id"] != esc["run_id"]:
+        return _nr_resolve_escrow(g, uid_s, "lost")
+    return None
+
+
+def _nr_contract_goal(members: int) -> int:
+    return max(30, 15 * members)
+
+
+def _nr_contract_add(g: dict, uid_s: str, pts: float) -> dict | None:
+    """Add delivery points to the member's crew contract for this week. Returns
+    {'done': True, 'crew': ..., 'paid': [...]} the moment the goal is reached."""
+    if pts <= 0:
+        return None
+    try:
+        cdata = _load_crews()
+        cid, crew = _crew_of(uid_s, cdata)
+    except Exception:
+        return None
+    if not crew:
+        return None
+    wk = _nr_week()
+    c = g["contracts"].get(cid)
+    if not c or c.get("week") != wk:
+        c = g["contracts"][cid] = {"week": wk, "points": 0.0, "by": {}, "done": False}
+    c["points"] = round(c["points"] + pts, 1)
+    c["by"][uid_s] = round(c["by"].get(uid_s, 0) + pts, 1)
+    goal = _nr_contract_goal(len(crew.get("members", [])))
+    if c["done"] or c["points"] < goal:
+        return None
+    c["done"] = True
+    paid = []
+    for u in c["by"]:
+        if u in crew.get("members", []) and _is_member(None, u):
+            economy.add(int(u), NR_CONTRACT_REWARD, "night run: crew contract")
+            paid.append(u)
+    try:
+        crew["xp"] = crew.get("xp", 0) + NR_CONTRACT_CREW_XP
+        crew["level"] = _crew_level(crew["xp"])
+        _crew_add_war_points_by_cid(cid, NR_CONTRACT_WAR, cdata)
+        _save_crews(cdata)
+    except Exception:
+        log.exception("crew contract reward failed")
+    return {"done": True, "crew": crew, "paid": paid}
+
+
+def _nr_contract_view(g: dict, uid_s: str) -> dict | None:
+    try:
+        cdata = _load_crews()
+        cid, crew = _crew_of(uid_s, cdata)
+    except Exception:
+        return None
+    if not crew:
+        return None
+    c = g["contracts"].get(cid)
+    if not c or c.get("week") != _nr_week():
+        c = {"points": 0, "by": {}, "done": False}
+    by = sorted(((v, u) for u, v in c["by"].items() if _is_member(None, u)), reverse=True)[:5]
+    return {"name": crew.get("name", ""), "tag": crew.get("tag", ""), "points": c["points"],
+            "goal": _nr_contract_goal(len(crew.get("members", []))), "done": c["done"],
+            "reward": NR_CONTRACT_REWARD, "mine": c["by"].get(uid_s, 0),
+            "top": [{"name": _dash_name(u), "pts": v, "you": u == uid_s} for v, u in by]}
+
+
+def _nr_modes_public(g: dict, uid_s: str, rec: dict) -> dict:
+    _nr_store(g)
+    now = time.time()
+    wk = g["weekly"] if g["weekly"].get("week") == _nr_week() else {"best": {}}
+    wrows = _nr_ranked(wk.get("best", {}), True)
+    today = _nr_today()
+    db = g["dailyb"] if g["dailyb"].get("date") == today else {"best": {}, "bonus": []}
+    drows = _nr_ranked(db.get("best", {}), False)
+    droute, _ = nr_daily_route(today)
+    stash = _nr_stash_view(uid_s)
+    last_st = float(rec.get("stakes_last", 0))
+    cos = _nr_cos(rec)
+    return {
+        "endless": {"unlocked": _nr_cleared(rec, NR_ENDLESS_UNLOCK), "unlock_name": NR_LEVEL_BY_ID[NR_ENDLESS_UNLOCK]["name"],
+                    "best": int(g["endless_best"].get(uid_s, 0)), "week_best": int(wk.get("best", {}).get(uid_s, 0)),
+                    "top": [{"name": _dash_name(u), "dist": int(v), "you": u == uid_s} for v, u in wrows[:10]],
+                    "rank": next((i + 1 for i, (_, u) in enumerate(wrows) if u == uid_s), None),
+                    "prizes": list(NR_WEEKLY_PRIZES), "per100": NR_ENDLESS_PER100, "run_cap": NR_ENDLESS_RUN_CAP,
+                    "last": [{"name": _dash_name(x["uid"]), "dist": x["dist"]} for x in g.get("weekly_last", {}).get("winners", [])]},
+        "daily": {"route": droute, "name": NR_LEVEL_BY_ID[droute]["name"],
+                  "best": db.get("best", {}).get(uid_s), "bonus_claimed": uid_s in db.get("bonus", []), "bonus": NR_DAILY_BONUS,
+                  "top": [{"name": _dash_name(u), "secs": round(float(v), 1), "you": u == uid_s} for v, u in drows[:10]],
+                  "rank": next((i + 1 for i, (_, u) in enumerate(drows) if u == uid_s), None), "prizes": list(NR_DAILY_PRIZES)},
+        "stakes": {"items": stash["items"], "value": stash["value"], "jail": stash["jail"],
+                   "cooldown": max(0, int(last_st + NR_STAKES_COOLDOWN - now)), "premium": NR_STAKES_PREMIUM,
+                   "cap": NR_STAKES_CAP, "active": uid_s in g["escrow"]},
+        "crew": _nr_contract_view(g, uid_s),
+        "cos": {"paints": [{"id": k, "name": v[0], "hex": v[1], "price": v[2], "owned": k in cos["paints"]} for k, v in NR_PAINTS.items()],
+                "glows": [{"id": k, "name": v[0], "price": v[1], "owned": k in cos["glows"]} for k, v in NR_GLOWS.items()],
+                "plate": cos["plate"], "plate_price": NR_PLATE_PRICE, "cars": cos["cars"]},
+    }
+
+
+def nightrun_settle_endless(run: dict, payload: dict, elapsed: float) -> dict:
+    try:
+        claimed_s = float(payload.get("duration_ms", 0)) / 1000.0
+        outcome = str(payload.get("outcome", ""))
+        bags = int(payload.get("bags", 0))
+        near = int(payload.get("near", 0))
+        dist = float(payload.get("distance", 0))
+    except (TypeError, ValueError, OverflowError):
+        return {"valid": False}
+    if outcome not in ("wrecked", "busted") or claimed_s != claimed_s or dist != dist:
+        return {"valid": False}
+    seconds = max(0.0, min(claimed_s, elapsed))
+    dist = max(0.0, min(dist, float(run["vmax"]) * seconds, 200_000.0))
+    course = nightrun_endless(run["seed"], int(dist) + 450)
+    bags = max(0, min(bags, sum(1 for z, _ in course["coins"] if z <= dist + 3)))
+    near = max(0, min(near, sum(1 for t in course["traffic"] if t[0] <= dist + 400)))
+    return {"valid": True, "outcome": outcome, "seconds": seconds, "distance": int(dist), "bags": bags, "near": near}
+
+
 async def _nr_notify(text: str):
     try:
         cid_n = get_notification_channel_id(load_config())
@@ -27903,10 +28238,17 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
     economy._load()
     data = _web_games_load()
     g = data["nightrun"]
+    _nr_store(g)
+    lines, changed = await _nr_settle_boards(g, data)
+    if changed:
+        _save_json_file(WEB_GAMES_FILE, data)
+    for line in lines:
+        await _nr_notify(line)
 
     if action == "info":
         rec = _nr_garage(g, uid_s)
-        if _nr_grant_unlocks(rec) and uid_s in g["garage"]:
+        dirty = _nr_clean_escrow(g, uid_s, now) is not None
+        if (_nr_grant_unlocks(rec) and uid_s in g["garage"]) or dirty:
             _save_json_file(WEB_GAMES_FILE, data)
         erec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
         return {"ok": True, **_nr_public(g, uid_s, rec),
@@ -27995,40 +28337,151 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         return {"ok": True, "car": rec["car"], "balance": int(balance), "cars": _nr_cars_public(rec),
                 "achievements": achievements}
 
-    if action == "start":
-        if now - _nr_last.get(uid, 0) < 1.5:
-            return {"ok": False, "error": "Slow down — one run at a time."}
-        try:
-            level_id = int(payload.get("level", 0))
-        except (TypeError, ValueError):
-            level_id = 0
-        lv = NR_LEVEL_BY_ID.get(level_id)
-        if not lv:
-            return {"ok": False, "error": "Pick a route."}
+    if action in ("cos_buy", "cos_apply", "plate"):
+        if now - _nr_last.get(uid, 0) < 0.8:
+            return {"ok": False, "error": "Easy — one thing at a time."}
+        _nr_last[uid] = now
         rec = _nr_garage(g, uid_s)
-        if level_id > 1 and not _nr_cleared(rec, level_id - 1):
-            return {"ok": False, "error": f"Deliver {NR_LEVEL_BY_ID[level_id - 1]['name']} first."}
+        if not _nr_perks(rec)["shop"]:
+            return {"ok": False, "error": "Deliver Downtown Loop to open the shop."}
         cid = str(payload.get("car", rec["car"]))
         if cid not in rec["cars"]:
             return {"ok": False, "error": "You don't own that car."}
+        rec = _nr_garage(g, uid_s, create=True)
+        cos = _nr_cos(rec)
+        cost, label = 0, ""
+        if action == "cos_buy":
+            kind, item = str(payload.get("kind", "")), str(payload.get("id", ""))
+            table = NR_PAINTS if kind == "paint" else (NR_GLOWS if kind == "glow" else None)
+            if table is None or item not in table:
+                return {"ok": False, "error": "That isn't in the shop."}
+            owned = cos["paints"] if kind == "paint" else cos["glows"]
+            if item in owned:
+                return {"ok": False, "error": "You already own it."}
+            price = table[item][2] if kind == "paint" else table[item][1]
+            if price is None:
+                return {"ok": False, "error": "That one can't be bought. Win a week of Midnight Run."}
+            cost, label = price, table[item][0]
+        elif action == "plate":
+            text = re.sub(r"\s+", " ", str(payload.get("text", "")).upper()).strip()
+            if not re.fullmatch(r"[A-Z0-9 ]{2,7}", text):
+                return {"ok": False, "error": "Plates are 2–7 letters, numbers or spaces."}
+            cost, label = NR_PLATE_PRICE, f"plate {text}"
+        if cost:
+            bal = economy.balance(uid)
+            if bal < cost:
+                return {"ok": False, "error": f"It's {cost:,} coins. You have {bal:,}.", "balance": int(bal)}
+            economy.add(uid, -cost, f"night run: {label}")
+            try:
+                track_economy_event("spent", cost)
+            except Exception:
+                pass
+        slot = cos["cars"].setdefault(cid, {})
+        if action == "cos_buy":
+            owned.append(item)
+            slot[kind] = item                    # put it straight on the car
+        elif action == "plate":
+            cos["plate"] = text
+        else:
+            for kind, pool in (("paint", cos["paints"]), ("glow", cos["glows"])):
+                if kind in payload:
+                    v = payload.get(kind)
+                    if v in (None, "", "none"):
+                        slot.pop(kind, None)
+                    elif v in pool:
+                        slot[kind] = v
+                    else:
+                        return {"ok": False, "error": "You don't own that."}
+        _save_json_file(WEB_GAMES_FILE, data)
+        erec = economy._data.get("users", {}).get(uid_s)
+        return {"ok": True, "car": rec["car"], "modes": _nr_modes_public(g, uid_s, rec),
+                "balance": int(erec.get("balance", 0)) if erec else None}
+
+    if action == "start":
+        if now - _nr_last.get(uid, 0) < 1.5:
+            return {"ok": False, "error": "Slow down — one run at a time."}
+        mode = str(payload.get("mode", "route"))
+        if mode not in ("route", "endless", "daily", "stakes"):
+            return {"ok": False, "error": "Pick a mode."}
+        rec = _nr_garage(g, uid_s)
+        cid = str(payload.get("car", rec["car"]))
+        if cid not in rec["cars"]:
+            return {"ok": False, "error": "You don't own that car."}
+        changed = _nr_clean_escrow(g, uid_s, now) is not None
+        if uid_s in g["escrow"]:
+            if not payload.get("force"):
+                return {"ok": False, "error": "You've got a High Stakes load on the road. Starting a new run loses it.", "confirm": True}
+            _nr_resolve_escrow(g, uid_s, "lost")
+            changed = True
+        seed = random.getrandbits(32)
+        if mode == "endless":
+            if not _nr_cleared(rec, NR_ENDLESS_UNLOCK):
+                return {"ok": False, "error": f"Deliver {NR_LEVEL_BY_ID[NR_ENDLESS_UNLOCK]['name']} to unlock Midnight Run."}
+            level_id = 0
+        elif mode == "daily":
+            if not _nr_cleared(rec, 1):
+                return {"ok": False, "error": "Deliver Downtown Loop to unlock the Daily Run."}
+            level_id, seed = nr_daily_route(_nr_today())
+        else:
+            try:
+                level_id = int(payload.get("level", 0))
+            except (TypeError, ValueError):
+                level_id = 0
+            if level_id not in NR_LEVEL_BY_ID:
+                return {"ok": False, "error": "Pick a route."}
+            if level_id > 1 and not _nr_cleared(rec, level_id - 1):
+                return {"ok": False, "error": f"Deliver {NR_LEVEL_BY_ID[level_id - 1]['name']} first."}
+        stakes = None
+        if mode == "stakes":
+            if not _nr_cleared(rec, level_id):
+                return {"ok": False, "error": "Run High Stakes on a route you've already delivered."}
+            if now - float(rec.get("stakes_last", 0)) < NR_STAKES_COOLDOWN:
+                left = int(float(rec.get("stakes_last", 0)) + NR_STAKES_COOLDOWN - now)
+                return {"ok": False, "error": f"The buyer isn't ready yet. Try again in {fmt_cooldown(left)}."}
+            ddata = _load_dealer()
+            drec = ddata.get("users", {}).get(uid_s)
+            if not drec or not drec.get("stash"):
+                return {"ok": False, "error": "Your stash is empty. Pick up product with /buysupply first."}
+            if _dealer_in_jail(drec) > 0:
+                return {"ok": False, "error": "You're locked up. Post bail first."}
+            view = _nr_stash_view(uid_s)
+            stakes = {"stash": {k: int(v) for k, v in drec["stash"].items() if int(v) > 0}, "value": view["value"]}
+            drec["stash"] = {}
+            _save_dealer(ddata)
         _nr_last[uid] = now
         for rid in [r for r, res in _nr_done.items() if now - res.get("_ts", 0) > 600]:
             _nr_done.pop(rid, None)
         perks = _nr_perks(rec)
         eff = nr_effective(cid, _nr_ups(rec, cid))
-        run = {"run_id": secrets.token_hex(12), "seed": random.getrandbits(32), "started": now,
+        run = {"run_id": secrets.token_hex(12), "seed": seed, "started": now, "mode": mode,
                "level": level_id, "car": cid, "nitro": perks["nitro"], "stash": perks["stash"],
                "vmax": eff["top"] * (NR_NITRO_MULT if perks["nitro"] else 1.0)}
         _nr_runs[uid] = run   # starting a new run abandons any unfinished one
-        cfg = {k: lv[k] for k in ("length", "lanes", "pair", "cops", "trucks", "change", "par", "pay")}
-        cfg.update(gap=list(lv["gap"]), name=lv["name"], nominal=NR_NOMINAL_V, nitro_mult=NR_NITRO_MULT,
-                   heat=lv.get("heat", 0.0), chase=lv.get("chase", 0), heat_start=lv.get("heat_start", 0),
-                   heat_floor=lv.get("heat_floor", 0), tunnels=lv.get("tunnels", 0), closures=lv.get("closures", 0),
-                   rb=lv.get("rb", 0))
-        for flag in ("wind", "rain", "checkpoint", "roadblocks", "heli", "fog", "fuel"):
-            cfg[flag] = bool(lv.get(flag))
-        return {"ok": True, "run_id": run["run_id"], "seed": run["seed"], "level": level_id, "car": cid,
-                "nitro": perks["nitro"], "stash": perks["stash"], "scanner": perks["scanner"], "cfg": cfg, "stats": eff}
+        if stakes:
+            g["escrow"][uid_s] = {"run_id": run["run_id"], "started": now, "level": level_id, **stakes}
+            rec = _nr_garage(g, uid_s, create=True)
+            rec["stakes_last"] = now
+            changed = True
+        if changed:
+            _save_json_file(WEB_GAMES_FILE, data)
+        if mode == "endless":
+            cfg = {"endless": True, "length": 0, "lanes": 4, "par": 0, "pay": 0, "name": "Midnight Run",
+                   "nominal": NR_NOMINAL_V, "nitro_mult": NR_NITRO_MULT, "heat": 1.0, "chase": 3, "heat_start": 0,
+                   "heat_floor": 0, "tunnels": 0, "closures": 0, "rb": 0, "roadblocks": True, "per100": NR_ENDLESS_PER100}
+            for flag in ("wind", "rain", "checkpoint", "heli", "fog", "fuel"):
+                cfg[flag] = False
+        else:
+            lv = NR_LEVEL_BY_ID[level_id]
+            cfg = {k: lv[k] for k in ("length", "lanes", "pair", "cops", "trucks", "change", "par", "pay")}
+            cfg.update(gap=list(lv["gap"]), name=lv["name"], nominal=NR_NOMINAL_V, nitro_mult=NR_NITRO_MULT,
+                       heat=lv.get("heat", 0.0), chase=lv.get("chase", 0), heat_start=lv.get("heat_start", 0),
+                       heat_floor=lv.get("heat_floor", 0), tunnels=lv.get("tunnels", 0), closures=lv.get("closures", 0),
+                       rb=lv.get("rb", 0))
+            for flag in ("wind", "rain", "checkpoint", "roadblocks", "heli", "fog", "fuel"):
+                cfg[flag] = bool(lv.get(flag))
+        return {"ok": True, "run_id": run["run_id"], "seed": seed, "level": level_id, "car": cid, "mode": mode,
+                "nitro": perks["nitro"], "stash": perks["stash"], "scanner": perks["scanner"], "cfg": cfg, "stats": eff,
+                "stakes_value": stakes["value"] if stakes else 0}
 
     if action == "finish":
         run_id = str(payload.get("run_id", ""))
@@ -28038,38 +28491,105 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         if not run or run["run_id"] != run_id:
             return {"ok": False, "error": "That run isn't active anymore. Start a new one."}
         _nr_runs.pop(uid, None)
+        mode = run.get("mode", "route")
+        esc_live = g["escrow"].get(uid_s, {}).get("run_id") == run_id
         if now - run["started"] > NR_RUN_TTL:
+            if esc_live:
+                _nr_resolve_escrow(g, uid_s, "lost")
+                _save_json_file(WEB_GAMES_FILE, data)
             return {"ok": False, "error": "That run expired. Start a new one."}
-        st = nightrun_settle(run, payload, now - run["started"])
+        st = (nightrun_settle_endless if mode == "endless" else nightrun_settle)(run, payload, now - run["started"])
         if not st.get("valid"):
+            if esc_live:
+                _nr_resolve_escrow(g, uid_s, "lost")
+                _save_json_file(WEB_GAMES_FILE, data)
             return {"ok": False, "error": "That run didn't add up, so it wasn't counted."}
-        lv = NR_LEVEL_BY_ID[run["level"]]
         car = NR_CARS[run["car"]]
         counts = st["seconds"] >= NR_MIN_SECONDS
-        deliver_part = int(round(lv["pay"] * car["cargo"] * st["cargo"] / 100)) if st["outcome"] == "delivered" else 0
-        bag_part = st["bags"] * NR_BAG_VALUE
-        if st["outcome"] != "delivered":
-            bag_part //= 2                      # you dropped half the cash bailing out
-        near_part = st["near"] * NR_NEAR_VALUE
-        base = min(deliver_part + bag_part + near_part, NR_RUN_CAP) if counts else 0
         hype = int(hype_train_multiplier())
         today = _nr_today_earned(g, uid_s)
         left = max(0, NR_DAILY_CAP - today)
-        repeat_pay = max(0, min(base * hype, left))
-
         rec = _nr_garage(g, uid_s, create=True)
-        key = str(run["level"])
-        old_mask = int(rec["stars"].get(key, 0))
-        new_bits = st["mask"] & ~old_mask
-        new_stars = bin(new_bits).count("1")
-        star_pay = new_stars * NR_STAR_BONUS * lv["id"]       # one-time, outside the daily cap
-        rec["stars"][key] = old_mask | st["mask"]
-        prev_best = rec["best"].get(key)
-        new_best = st["outcome"] == "delivered" and (prev_best is None or st["seconds"] < float(prev_best))
-        if new_best:
-            rec["best"][key] = round(st["seconds"], 2)
-        unlocked_cars = _nr_grant_unlocks(rec)
-        payout = repeat_pay + star_pay
+        announce = []
+        extra = {}
+        star_pay = bonus_pay = stakes_pay = 0
+        new_bits = 0
+        unlocks, unlocked_cars, new_best = [], [], False
+        if mode == "endless":
+            dist_part = (st["distance"] // 100) * NR_ENDLESS_PER100
+            bag_part = st["bags"] * NR_BAG_VALUE
+            near_part = st["near"] * NR_NEAR_VALUE
+            deliver_part = 0
+            raw = dist_part + bag_part + near_part
+            base = min(raw, NR_ENDLESS_RUN_CAP) if counts else 0
+            capped = raw > NR_ENDLESS_RUN_CAP
+            prev_all = int(g["endless_best"].get(uid_s, 0))
+            if st["distance"] > prev_all:
+                g["endless_best"][uid_s] = st["distance"]
+            wk = g["weekly"]
+            wbest = wk.setdefault("best", {})
+            prev_top = max([int(v) for u, v in wbest.items() if u != uid_s and _is_member(None, u)] or [0])
+            prev_w = int(wbest.get(uid_s, 0))
+            if st["distance"] > prev_w:
+                wbest[uid_s] = st["distance"]
+                new_best = True
+            if new_best and st["distance"] > prev_top and st["distance"] >= 3000 and prev_w <= prev_top:
+                announce.append(f"🌙 **{_dash_name(uid)}** just took first place in this week's **Midnight Run** — "
+                                f"**{st['distance']:,} m**. Top 3 get paid Sunday night. `_nightrun`")
+            extra = {"dist_part": dist_part, "all_best": max(prev_all, st["distance"]), "week_best": max(prev_w, st["distance"])}
+            contract_pts = round(st["distance"] / 1000, 1)
+            st["cargo"] = 0
+        else:
+            lv = NR_LEVEL_BY_ID[run["level"]]
+            deliver_part = int(round(lv["pay"] * car["cargo"] * st["cargo"] / 100)) if st["outcome"] == "delivered" else 0
+            bag_part = st["bags"] * NR_BAG_VALUE
+            if st["outcome"] != "delivered":
+                bag_part //= 2                      # you dropped half the cash bailing out
+            near_part = st["near"] * NR_NEAR_VALUE
+            raw = deliver_part + bag_part + near_part
+            base = min(raw, NR_RUN_CAP) if counts else 0
+            capped = raw > NR_RUN_CAP
+            key = str(run["level"])
+            if mode in ("route", "stakes"):
+                old_mask = int(rec["stars"].get(key, 0))
+                new_bits = st["mask"] & ~old_mask
+                star_pay = bin(new_bits).count("1") * NR_STAR_BONUS * lv["id"]       # one-time, outside the daily cap
+                rec["stars"][key] = old_mask | st["mask"]
+                prev_best = rec["best"].get(key)
+                new_best = st["outcome"] == "delivered" and (prev_best is None or st["seconds"] < float(prev_best))
+                if new_best:
+                    rec["best"][key] = round(st["seconds"], 2)
+                unlocked_cars = _nr_grant_unlocks(rec)
+                if new_bits & 1:
+                    unlocks.append(NR_CARS["frosty"]["name"] + " joins your garage" if run["level"] == 10 else lv["unlock"])
+                    if run["level"] == NR_ENDLESS_UNLOCK:
+                        unlocks.append("Midnight Run (endless mode)")
+                extra = {"best": rec["best"].get(key)}
+            if mode == "daily" and st["outcome"] == "delivered":
+                db = g["dailyb"]
+                prev = db["best"].get(uid_s)
+                if prev is None or st["seconds"] < float(prev):
+                    db["best"][uid_s] = round(st["seconds"], 2)
+                    new_best = True
+                if uid_s not in db["bonus"]:
+                    db["bonus"].append(uid_s)
+                    bonus_pay = NR_DAILY_BONUS
+                drows = _nr_ranked(db["best"], False)
+                extra = {"daily_best": db["best"].get(uid_s), "daily_rank": next((i + 1 for i, (_, u) in enumerate(drows) if u == uid_s), None)}
+            if mode == "stakes" and esc_live:
+                res = _nr_resolve_escrow(g, uid_s, {"delivered": "delivered", "busted": "busted"}.get(st["outcome"], "lost"), st["cargo"])
+                stakes_pay = res.get("pay", 0)
+                extra["stakes"] = res
+                if stakes_pay >= 20_000:
+                    announce.append(f"💼 **{_dash_name(uid)}** ran a High Stakes load across town in Night Run "
+                                    f"and cashed out **{stakes_pay:,}** coins. `_nightrun`")
+            contract_pts = round(lv["id"] * st["cargo"] / 100, 1) if st["outcome"] == "delivered" else 0
+        repeat_pay = max(0, min(base * hype, left))
+        payout = repeat_pay + star_pay + bonus_pay + stakes_pay
+        contract = _nr_contract_add(g, uid_s, contract_pts)
+        if contract:
+            announce.append(f"🤝 **[{contract['crew'].get('tag', '')}] {contract['crew'].get('name', '')}** finished this week's "
+                            f"Night Run contract. {len(contract['paid'])} driver(s) paid **{NR_CONTRACT_REWARD:,}** each.")
         balance = economy.balance(uid)
         if payout > 0:
             balance = economy.add(uid, payout, "web game: night run")
@@ -28085,9 +28605,6 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         except Exception:
             pass
 
-        unlocks = []
-        if new_bits & 1:                         # first delivery of this route
-            unlocks.append(NR_CARS["frosty"]["name"] + " joins your garage" if run["level"] == 10 else lv["unlock"])
         notif = None
         try:
             cid_n = get_notification_channel_id(load_config())
@@ -28102,10 +28619,14 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
                 log.exception("night run xp failed")
         total_stars = _nr_star_count(rec)
         achievements = []
-        for ach_id, ok in (("nr_first", st["outcome"] == "delivered"),
-                           ("nr_clean", st["outcome"] == "delivered" and st["cargo"] >= 100 and run["level"] >= 3),
-                           ("nr_bigone", st["outcome"] == "delivered" and run["level"] == 10),
-                           ("nr_allstars", total_stars >= 3 * len(NR_LEVELS))):
+        delivered = st["outcome"] == "delivered"
+        for ach_id, ok in (("nr_first", delivered),
+                           ("nr_clean", delivered and st["cargo"] >= 100 and run["level"] >= 3),
+                           ("nr_bigone", delivered and run["level"] == 10 and mode in ("route", "stakes")),
+                           ("nr_allstars", total_stars >= 3 * len(NR_LEVELS)),
+                           ("nr_midnight", mode == "endless" and st["distance"] >= 10_000),
+                           ("nr_stakes", stakes_pay > 0),
+                           ("nr_contract", bool(contract) and uid_s in contract.get("paid", []))):
             if ok:
                 try:
                     if await _grant_achievement(uid, ach_id, notif):
@@ -28113,24 +28634,27 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
                 except Exception:
                     log.exception("night run achievement failed")
         if new_bits & 1 and run["level"] == 10:
-            await _nr_notify(f"🚁 **{_dash_name(uid)}** just delivered **The Big One** in Night Run — "
-                             f"helicopter and all — and drove off in a legendary car. `_nightrun`")
-        elif new_stars and total_stars >= 3 * len(NR_LEVELS):
-            await _nr_notify(f"🌙 **{_dash_name(uid)}** just earned every star in **Night Run**. "
-                             f"All {len(NR_LEVELS)} routes, perfect. `_nightrun`")
+            announce.append(f"🚁 **{_dash_name(uid)}** just delivered **The Big One** in Night Run — "
+                            f"helicopter and all — and drove off in a legendary car. `_nightrun`")
+        elif new_bits and total_stars >= 3 * len(NR_LEVELS):
+            announce.append(f"🌙 **{_dash_name(uid)}** just earned every star in **Night Run**. "
+                            f"All {len(NR_LEVELS)} routes, perfect. `_nightrun`")
+        for line in announce:
+            await _nr_notify(line)
 
-        result = {"ok": True, "outcome": st["outcome"], "seconds": round(st["seconds"], 1),
+        result = {"ok": True, "mode": mode, "outcome": st["outcome"], "seconds": round(st["seconds"], 1),
                   "distance": st["distance"], "cargo": st["cargo"], "bags": st["bags"], "near": st["near"],
                   "deliver_part": deliver_part, "bag_part": bag_part, "near_part": near_part,
-                  "capped": deliver_part + bag_part + near_part > NR_RUN_CAP, "counts": counts,
-                  "hype": hype, "repeat_pay": repeat_pay, "star_pay": star_pay, "payout": payout,
+                  "capped": capped, "counts": counts,
+                  "hype": hype, "repeat_pay": repeat_pay, "star_pay": star_pay, "bonus_pay": bonus_pay,
+                  "stakes_pay": stakes_pay, "payout": payout,
                   "daily_capped": counts and base * hype > left, "today": today + repeat_pay,
                   "daily_cap": NR_DAILY_CAP, "balance": int(balance), "xp": int(xp),
-                  "goals": [bool(st["mask"] & 1), bool(st["mask"] & 2), bool(st["mask"] & 4)],
+                  "goals": [bool(st.get("mask", 0) & 1), bool(st.get("mask", 0) & 2), bool(st.get("mask", 0) & 4)],
                   "new_goals": [bool(new_bits & 1), bool(new_bits & 2), bool(new_bits & 4)],
-                  "new_best": new_best, "best": rec["best"].get(key),
-                  "unlocks": unlocks, "new_cars": [NR_CARS[c]["name"] for c in unlocked_cars],
-                  "achievements": achievements, **_nr_public(g, uid_s, rec)}
+                  "new_best": new_best, "unlocks": unlocks, "new_cars": [NR_CARS[c]["name"] for c in unlocked_cars],
+                  "contract_pts": contract_pts, "contract_done": bool(contract),
+                  "achievements": achievements, **extra, **_nr_public(g, uid_s, rec)}
         _nr_done[run_id] = {**result, "_uid": uid, "_ts": now}
         return result
 
@@ -28146,8 +28670,8 @@ async def _handle_nightrun(message: discord.Message, rest: str):
     await message.channel.send(
         f"🌙 **Night Run** — get the package across town. Weave through traffic, grab the cash, "
         f"and lose the cops: <{base}/games/nightrun>\n"
-        f"{len(NR_LEVELS)} routes, {len(NR_CARS)} cars, upgrades, {3 * len(NR_LEVELS)} stars. "
-        f"Pays up to {NR_DAILY_CAP:,} a day, plus a bonus for every new star.",
+        f"{len(NR_LEVELS)} routes, {len(NR_CARS)} cars, upgrades and paint. Endless **Midnight Run** with a weekly "
+        f"leaderboard, a **Daily Run**, crew contracts, and **High Stakes** — drive your real stash across town.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 

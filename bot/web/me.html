@@ -370,7 +370,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     var z = g && g.videopoker;
     var gz = z && z.hands ? n(z.hands) + ' hands · biggest win ' + (z.best_win ? n(z.best_win) : '—') + (z.royals ? ' · 👑 ' + n(z.royals) + ' royal' + (z.royals > 1 ? 's' : '') : '') : 'Jacks or Better, royal flush pays 800×';
     var w = g && g.nightrun;
-    var gw = w ? (w.stars ? '★ ' + n(w.stars) + ' of ' + n(w.max_stars) + ' · ' + n(w.cars) + ' car' + (w.cars > 1 ? 's' : '') : 'No deliveries yet') + ' · paid today ' + n(w.today) + ' of ' + n(w.daily_cap) : 'run the package across town';
+    var gw = w ? (w.stars ? '★ ' + n(w.stars) + ' of ' + n(w.max_stars) + ' · ' + n(w.cars) + ' car' + (w.cars > 1 ? 's' : '') : 'No deliveries yet') + (w.endless ? ' · Midnight Run ' + (w.endless / 1000).toFixed(1) + ' km' : '') + ' · paid today ' + n(w.today) + ' of ' + n(w.daily_cap) : 'run the package across town';
     return '<ul class="rows games">' +
       '<li><span class="r-main">🌙 Night Run <span class="r-dim">' + gw + '</span></span><span class="r-side"><a href="/games/nightrun">Play</a></span></li>' +
       '<li><span class="r-main">🏃 The Getaway <span class="r-dim">' + gx + '</span></span><span class="r-side"><a href="/games/getaway">Play</a></span></li>' +

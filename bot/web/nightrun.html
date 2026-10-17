@@ -106,6 +106,26 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
 .goals{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--faint)}
 .goals .y{color:var(--ok)}
 .route .un{font-size:12px;color:var(--gold-ink);margin-top:5px}
+.mode{border:1px solid rgba(163,184,171,.18);border-radius:7px;padding:12px;margin:10px 0;background:rgba(255,255,255,.03)}
+.mode h3{margin:0 0 4px}.mode p{margin:2px 0 8px;color:var(--muted);font-size:13px}
+.mode .row2{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--faint);margin:4px 0 8px}
+.mode .row2 b{color:var(--text);font-weight:600}
+.mode .board{margin:4px 0 8px}.mode .board li{font-size:13px;padding:4px 0}
+.mode .btn{margin-top:4px}
+.meter{height:8px;border-radius:4px;background:rgba(255,255,255,.1);overflow:hidden;margin:6px 0}
+.meter i{display:block;height:100%;background:linear-gradient(90deg,#B8923A,#F3D27A)}
+.items{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 8px}
+.items span{font-size:12px;background:var(--page-2);border-radius:4px;padding:3px 8px}
+.sw{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+.sw button{width:34px;height:34px;border-radius:50%;border:2px solid rgba(255,255,255,.18);cursor:pointer;position:relative;padding:0}
+.sw button.on{border-color:var(--gold-ink);box-shadow:0 0 0 2px rgba(217,184,108,.35)}
+.sw button.lock::after{content:"";position:absolute;right:-3px;bottom:-3px;width:12px;height:12px;border-radius:50%;background:#16261F;border:1px solid var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
+.chips button{font-size:12px;border:1px solid rgba(163,184,171,.25);background:transparent;border-radius:14px;padding:5px 10px;cursor:pointer}
+.chips button.on{border-color:var(--gold-ink);color:var(--gold-ink)}
+.plate{display:flex;gap:8px;align-items:center}
+.plate input{flex:1;min-width:0;font:600 15px/1 "IBM Plex Sans",sans-serif;letter-spacing:2px;text-transform:uppercase;background:#E9E5DA;color:#1C2A55;border:0;border-radius:4px;padding:9px 10px}
+.plate .btn{width:auto;flex:none}
 .ups{margin:4px 0 12px}
 .up{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(163,184,171,.12)}
 .up:last-child{border-bottom:0}
@@ -169,13 +189,13 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
         <div class="pill gauges">
           <div class="spd"><span id="hSpd">0</span><span>mph</span></div>
           <div class="g hp" id="gHp"><label>Car</label><div class="t"><i id="hHp" style="width:100%"></i></div></div>
-          <div class="g ld"><label>Load</label><div class="t"><i id="hLd" style="width:100%"></i></div></div>
+          <div class="g ld" id="gLd"><label>Load</label><div class="t"><i id="hLd" style="width:100%"></i></div></div>
           <div class="g nx" id="gNx"><label>Nitro</label><div class="t"><i id="hNx" style="width:0"></i></div></div>
           <div class="g fu" id="gFu" hidden><label>Fuel</label><div class="t"><i id="hFu" style="width:100%"></i></div></div>
           <div class="g ht" id="gHt" hidden><label>Heat</label><span class="hstars" id="hHt"></span></div>
           <div class="g bs" id="gBs" hidden><label>Bust</label><div class="t"><i id="hBs" style="width:0"></i></div></div>
         </div>
-        <div class="pill take"><small id="hTime">0:00</small><b id="hTake">+0</b><small>if you deliver</small></div>
+        <div class="pill take"><small id="hTime">0:00</small><b id="hTake">+0</b><small id="hTakeL">if you deliver</small><small id="hStake" hidden></small></div>
       </div>
     </div>
     <div class="toast" id="toast" aria-live="polite"></div>
@@ -193,12 +213,14 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
           <p class="keys">Steer <kbd>←</kbd> <kbd>→</kbd> · brake <kbd>↓</kbd> · nitro <kbd>↑</kbd> or <kbd>Space</kbd> · pause <kbd>P</kbd>. On a phone, use the buttons.</p>
           <div class="tabs" role="tablist">
             <button type="button" role="tab" id="tRoutes" aria-selected="true">Routes</button>
+            <button type="button" role="tab" id="tModes" aria-selected="false">Modes</button>
             <button type="button" role="tab" id="tGarage" aria-selected="false">Garage</button>
             <button type="button" role="tab" id="tBoard" aria-selected="false">Top drivers</button>
           </div>
         </div>
         <div class="mbody">
           <div id="pRoutes"><p class="small">Loading…</p></div>
+          <div id="pModes" hidden></div>
           <div id="pGarage" hidden></div>
           <div id="pBoard" hidden></div>
         </div>
@@ -265,6 +287,32 @@ function buildCourse(seed, cfg){
   return {traffic: traffic, coins: coins};
 }
 window.__nrCourse = buildCourse;   // parity tests
+// Midnight Run: MUST match nightrun_endless() in bot.py exactly (prefix-stable)
+function buildEndless(seed, length){
+  var lanes = 4, rng = mulberry32(seed), traffic = [], m = 140;
+  while (m < length){
+    var tier = Math.min(10, Math.floor(m / 1000)), lane = Math.floor(rng() * lanes), group = [lane];
+    if (rng() < 0.12 + 0.02 * tier) group.push((lane + 1 + Math.floor(rng() * (lanes - 1))) % lanes);
+    for (var gi = 0; gi < group.length; gi++){
+      var L = group[gi], r = rng(), cops = 0.02 + 0.01 * tier;
+      var kind = r < cops ? "cop" : (r < cops + 0.16 ? "truck" : "car");
+      var style = Math.floor(rng() * 5), sp = Math.floor(rng() * 3), ch = 0;
+      if (rng() < 0.1 + 0.015 * tier) ch = L === 0 ? 1 : (L === lanes - 1 ? -1 : (rng() < 0.5 ? 1 : -1));
+      var trig = 30 + Math.floor(rng() * 50);
+      traffic.push([m, L, kind, style, sp, ch, trig]);
+    }
+    var g = Math.max(24, 42 - 2 * tier); m += g + Math.floor(rng() * g);
+  }
+  var crng = mulberry32(seed ^ 0xA5A5A5A5), coins = [], z = 70;
+  while (z < length){
+    var n = 5 + Math.floor(crng() * 6), L2 = Math.floor(crng() * lanes), d = 0;
+    if (crng() < 0.35) d = L2 === 0 ? 1 : (L2 === lanes - 1 ? -1 : (crng() < 0.5 ? 1 : -1));
+    for (var k = 0; k < n; k++) coins.push([z + k * 9, L2 + (k >= Math.floor(n / 2) ? d : 0)]);
+    z += n * 9 + 55 + Math.floor(crng() * 70);
+  }
+  return {traffic: traffic, coins: coins};
+}
+window.__nrEndless = buildEndless;
 function hash(n){ n = (n ^ 61) ^ (n >>> 16); n = n + (n << 3) | 0; n ^= n >>> 4; n = Math.imul(n, 0x27d4eb2d); n ^= n >>> 15; return (n >>> 0) / 4294967296; }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -320,6 +368,18 @@ function trafficVis(t){
   o.col = p[0]; o.col2 = p[1]; o.rear = p[1]; return o;
 }
 var SPEEDS = {car: [17, 21, 25], truck: [14, 16.5, 19], cop: [19, 22, 25]};
+function shade(hex, f){ var c = rgb(hex); return "#" + c.map(function(v){ return ("0" + Math.max(0, Math.min(255, Math.round(v * f))).toString(16)).slice(-2); }).join(""); }
+var GLOW_SPR = {purple: "purple", cyan: "cyan", green: "green", red: "red", gold: "goldg"};
+function carVis(id){                            // the car's look with your paint and underglow
+  var V = CARVIS[id] || CARVIS.beater, cos = info && info.modes && info.modes.cos, slot = cos && cos.cars && cos.cars[id];
+  if (!slot || (!slot.paint && !slot.glow)) return V;
+  var o = {}, k; for (k in V) o[k] = V[k];
+  if (slot.paint){ var pt = null; cos.paints.forEach(function(p){ if (p.id === slot.paint) pt = p.hex; });
+    if (pt){ o.col = pt; o.col2 = shade(pt, 0.7); o.rear = shade(pt, 0.82); o.primer = false;
+      if (V.box){ o.box = {}; for (k in V.box) o.box[k] = V.box[k]; o.box.col = pt; o.box.side = shade(pt, 0.85); } } }
+  if (slot.glow) o.glow = GLOW_SPR[slot.glow] || null;
+  return o;
+}
 
 // ── Themes per route ──────────────────────────────────────────────────────────
 var THEMES = {
@@ -341,6 +401,8 @@ var THEMES = {
       blocks:{d:0.25, inset:[10,16], h:[4,7], len:[10,18], win:0.1, pal:"ware"}, search:true, skyline:[0.2, 0.14, 0.08]},
   9: {sky:["#020A16","#062040","#0E3866","#3A5A86"], fog:[30,50,88], ground:"coast", lamp:"white", stars:true,
       blocks:{d:0.95, inset:[2.5,5], h:[9,26], len:[18,30], win:0, pal:"rock", side:1}, skyline:[0.25, 0.16, 0.1]},
+  11:{sky:["#020208","#0A0820","#1B1240","#3A1C5C"], fog:[40,24,72], ground:"#09080E", lamp:"warm", stars:true,
+      blocks:{d:0.85, inset:[4,9], h:[12,44], len:[12,22], win:0.5, pal:"city"}, skyline:[0.75, 0.55, 0.32]},
   10:{sky:["#0A0212","#1E0830","#3C1250","#6A2468"], fog:[80,36,96], ground:"#0C0910", lamp:"warm", stars:true,
       blocks:{d:0.9, inset:[4,9], h:[14,48], len:[12,22], win:0.55, pal:"city"}, skyline:[0.8, 0.6, 0.35]}
 };
@@ -354,6 +416,7 @@ var SIGNS = {
   7: [["TUNNEL","1/2 MI"],["MIDTOWN TUNNEL","NO HAZMAT"],["LIGHTS ON","IN TUNNEL"],["EXIT 21","FINANCIAL DIST"]],
   8: [["BORDER","2 MI"],["CUSTOMS","ALL LANES"],["LAST EXIT","BEFORE BORDER"],["PREPARE","TO STOP"]],
   9: [["COAST HWY","SCENIC ROUTE"],["NEXT GAS","40 MI"],["CURVES","AHEAD"],["VISTA POINT","2 MI"]],
+  11:[["MIDNIGHT","NO EXIT"],["KEEP DRIVING","ALL NIGHT"],["NEXT EXIT","NEVER"],["CITY LIMITS","NOWHERE"]],
   10:[["CITY CENTER","ALL LANES"],["STRATTON TOWER","EXIT 1"],["NO TURNING","BACK"],["DROP-OFF","AHEAD"]]
 };
 
@@ -410,7 +473,8 @@ function sprite(r, g, b){
   x.fillStyle = gr; x.fillRect(0, 0, 64, 64); return c;
 }
 var G = {warm: sprite(255,190,110), sodium: sprite(255,158,58), white: sprite(214,228,255), red: sprite(255,40,52), blue: sprite(60,120,255),
-         amber: sprite(255,150,30), green: sprite(80,255,140), purple: sprite(180,108,255), cyan: sprite(110,220,255), head: sprite(255,246,220)};
+         amber: sprite(255,150,30), green: sprite(80,255,140), purple: sprite(180,108,255), cyan: sprite(110,220,255), head: sprite(255,246,220),
+         goldg: sprite(255,200,60)};
 var OA = 1;
 function glow(spr, x, y, rx, ry, a){
   if (!(rx > 0.5) || !(ry > 0.2)) return;
@@ -489,6 +553,7 @@ var S = {mode: "menu", cfg: null, run: null, car: "beater", stats: null, vis: CA
          tires: 0, fuel: null, lowFuelWarned: false, scanner: false, warned: {}, reason: "", inTun: false, heatLvl: 0};
 var IN = {left: false, right: false, brake: false, boost: false};
 window.__S = S; window.__IN = IN;   // test hooks (the server never trusts the page anyway)
+window.__info = function(){ return info; };
 var ATTRACT = null;
 
 function laneX(L){ return (L - (S.lanes - 1) / 2) * LANE; }
@@ -498,11 +563,12 @@ function laneClosedAt(L, z){
   return false;
 }
 function tunnelAt(z){ for (var i = 0; i < S.tunnels.length; i++){ var T = S.tunnels[i]; if (z >= T.z0 && z <= T.z1) return T; } return null; }
-function makeTraffic(course, cfg){
+function makeTraffic(course, cfg, t0){
+  t0 = t0 || 0;
   var T = course.traffic.map(function(r){
     var t = {m: r[0], L: r[1], L0: r[1], kind: r[2], style: r[3], sp: r[4], ch: r[5], trig: r[6]};
     t.v0 = SPEEDS[t.kind][t.sp]; t.v = t.v0; t.vis = trafficVis(t); t.w = t.vis.w; t.len = t.vis.len;
-    t.z = t.m - t.v0 * (t.m / cfg.nominal);
+    t.z = t.m - t.v0 * (t.m / cfg.nominal) + t.v0 * t0;
     if (laneClosedAt(t.L, t.z) || laneClosedAt(t.L, t.z + 60)){              // never start inside a closed lane
       for (var d = 1; d < S.lanes; d++){ var a = t.L - d, b = t.L + d;
         if (a >= 0 && !laneClosedAt(a, t.z)){ t.L = a; break; } if (b < S.lanes && !laneClosedAt(b, t.z)){ t.L = b; break; } }
@@ -534,7 +600,7 @@ function buildFeatures(seed, cfg){
   if (cfg.fuel){ var fz = 480; while (fz < L - 300){ out.cans.push({z: fz, L: Math.floor(r() * lanes)}); fz += 600 + Math.floor(r() * 380); } }
   return out;
 }
-var OBS = {cone: {w: 0.45, len: 0.45}, barrel: {w: 0.85, len: 0.85}, trailer: {w: 2.1, len: 3.2}, rb: {w: 1.9, len: 4.9},
+var OBS = {wrench: {w: 0.8, len: 0.8}, cone: {w: 0.45, len: 0.45}, barrel: {w: 0.85, len: 0.85}, trailer: {w: 2.1, len: 3.2}, rb: {w: 1.9, len: 4.9},
            spike: {w: 3.0, len: 0.7}, can: {w: 0.7, len: 0.7}};
 function addObs(kind, z, x, extra){
   var o = {kind: kind, z: z, x: x, w: OBS[kind].w, len: OBS[kind].len, hit: false, block: kind === "barrel" || kind === "trailer" || kind === "rb"};
@@ -546,24 +612,49 @@ function addRoadblock(z, gap, scripted){
   addObs("barrel", z + 0.5, -S.wallX + 0.7); addObs("barrel", z + 0.5, S.wallX - 0.7);
   S.rbList.push({z: z, gap: gap, scripted: !!scripted});
 }
+function mapCoin(c){ var L = c[1];                                       // cash in a closed lane slides over to the open side
+  if (laneClosedAt(L, c[0])) for (var d = 1; d < S.lanes; d++){ if (L - d >= 0 && !laneClosedAt(L - d, c[0])){ L = L - d; break; } if (L + d < S.lanes && !laneClosedAt(L + d, c[0])){ L = L + d; break; } }
+  return {z: c[0], L: L, x: laneX(L), got: false}; }
+function addZoneObs(Z){
+  Z.closed.forEach(function(L){ addObs("trailer", Z.z0, laneX(L)); for (var bz = Z.z0 + 28; bz < Z.z1 - 8; bz += 34) addObs("barrel", bz, laneX(L) + (hash(bz + L) - 0.5) * 1.2); });
+  var lo = Math.min.apply(null, Z.closed), hi = Math.max.apply(null, Z.closed);
+  var bx = lo === 0 ? laneX(hi) + LANE / 2 : laneX(lo) - LANE / 2;            // cones on the line between closed and open lanes
+  for (var cz = Z.z0 - 30; cz < Z.z1; cz += 6) addObs("cone", cz, bx + (cz < Z.z0 ? (lo === 0 ? -1 : 1) * (Z.z0 - cz) / 30 * LANE * 0.9 : 0));
+}
+function endlessFeatures(from, to){              // tunnels, roadworks and repair kits for a stretch of Midnight Run
+  for (var c = Math.floor(from / 3000); c * 3000 < to; c++){
+    if (c * 3000 < from) continue;
+    var r = mulberry32((S.seedLow * 7919 + c * 104729) | 0), base = c * 3000;
+    if (c > 0 && r() < 0.35){ var t0 = base + 600 + Math.floor(r() * 1200); S.tunnels.push({z0: t0, z1: t0 + 240 + Math.floor(r() * 150)}); }
+    if (c > 0 && r() < 0.4){ var z0 = base + 300 + Math.floor(r() * 2200), side = r() < 0.5 ? 0 : 3;
+      if (!S.tunnels.some(function(T){ return z0 + 220 > T.z0 - 80 && z0 < T.z1 + 80; })){ var Z = {z0: z0, z1: z0 + 170 + Math.floor(r() * 80), closed: [side]}; S.zones.push(Z); addZoneObs(Z); } }
+    for (var w = 0; w < 2; w++){ var wz = base + 400 + Math.floor(r() * 2400); if (wz > 200) addObs("wrench", wz, laneX(Math.floor(r() * 4))); }
+  }
+}
+function extendEndless(){
+  if (!S.cfg.endless || S.z < S.genLen - 2500) return;
+  var from = S.genLen; S.genLen += 4000;
+  var c = buildEndless(S.seed, S.genLen);
+  endlessFeatures(from, S.genLen);
+  var add = makeTraffic({traffic: c.traffic.slice(S.genT)}, S.cfg, S.t);
+  S.genT = c.traffic.length;
+  S.T = S.T.filter(function(t){ return t.z > S.z - 300; }).concat(add);
+  S.T.sort(function(a, b){ return a.z - b.z; });
+  S.coins = S.coins.concat(c.coins.slice(S.genC).map(mapCoin)); S.genC = c.coins.length;
+}
+function routeLen(){ return S.cfg.endless ? Infinity : S.cfg.length; }
 function setupRun(seed, cfg, carId, stats, opts){
-  S.cfg = cfg; S.lanes = cfg.lanes; S.wallX = cfg.lanes * LANE / 2 + SHOULDER;
-  var fe = buildFeatures(seed, cfg);
+  S.cfg = cfg; S.lanes = cfg.lanes; S.wallX = cfg.lanes * LANE / 2 + SHOULDER; S.seed = seed; S.seedLow = seed & 0xFFFF;
+  var fe = buildFeatures(seed, cfg), course;
   S.zones = fe.zones; S.tunnels = fe.tunnels; S.obs = []; S.rbList = [];
-  var course = buildCourse(seed, cfg);
+  if (cfg.endless){ S.genLen = 6000; course = buildEndless(seed, S.genLen); S.genT = course.traffic.length; S.genC = course.coins.length; endlessFeatures(0, S.genLen); }
+  else course = buildCourse(seed, cfg);
   S.T = makeTraffic(course, cfg);
-  S.coins = course.coins.map(function(c){ var L = c[1];                  // cash in a closed lane slides over to the open side
-    if (laneClosedAt(L, c[0])) for (var d = 1; d < S.lanes; d++){ if (L - d >= 0 && !laneClosedAt(L - d, c[0])){ L = L - d; break; } if (L + d < S.lanes && !laneClosedAt(L + d, c[0])){ L = L + d; break; } }
-    return {z: c[0], L: L, x: laneX(L), got: false}; });
-  S.zones.forEach(function(Z){
-    Z.closed.forEach(function(L){ addObs("trailer", Z.z0, laneX(L)); for (var bz = Z.z0 + 28; bz < Z.z1 - 8; bz += 34) addObs("barrel", bz, laneX(L) + (hash(bz + L) - 0.5) * 1.2); });
-    var lo = Math.min.apply(null, Z.closed), hi = Math.max.apply(null, Z.closed);
-    var bx = lo === 0 ? laneX(hi) + LANE / 2 : laneX(lo) - LANE / 2;          // cones on the line between closed and open lanes
-    for (var cz = Z.z0 - 30; cz < Z.z1; cz += 6) addObs("cone", cz, bx + (cz < Z.z0 ? (lo === 0 ? -1 : 1) * (Z.z0 - cz) / 30 * LANE * 0.9 : 0));
-  });
+  S.coins = course.coins.map(mapCoin);
+  S.zones.forEach(function(Z){ if (!cfg.endless) addZoneObs(Z); });
   fe.rbs.forEach(function(rb){ addRoadblock(rb.z, rb.gap, true); });
   fe.cans.forEach(function(c){ addObs("can", c.z, laneX(c.L)); });
-  S.ci = 0; S.car = carId; S.vis = CARVIS[carId] || CARVIS.beater; S.stats = stats; frameCam();
+  S.ci = 0; S.car = carId; S.vis = carVis(carId); S.stats = stats; frameCam();
   S.t = 0; S.x = laneX(Math.floor((cfg.lanes - 1) / 2)) + (cfg.lanes % 2 ? 0 : LANE / 2); S.vx = 0; S.z = 0; S.v = 12;
   S.maxHp = stats.armor; S.hp = stats.armor; S.cargo = 100; S.nitroOK = !!opts.nitro; S.nitro = opts.nitro ? 0.5 : 0; S.stash = !!opts.stash;
   S.drain = (carId === "ricer" ? 0.11 : 0.22) * (stats.drain || 1); S.bags = 0; S.near = 0; S.combo = 0; S.inv = 0; S.shake = 0; S.flash = 0;
@@ -781,14 +872,14 @@ function stepPolice(h){
   // roadblocks and spike strips when you're at full heat
   if (cfg.roadblocks && lvl >= 3 && !inTun && S.mode === "running"){
     if (S.z > S.rbNextZ){ var rz = S.z + 230;
-      var clash = S.rbList.some(function(r){ return Math.abs(r.z - rz) < 150; }) || tunnelAt(rz) || rz > cfg.length - 150 || laneClosedAt(0, rz) || laneClosedAt(S.lanes - 1, rz);
+      var clash = S.rbList.some(function(r){ return Math.abs(r.z - rz) < 150; }) || tunnelAt(rz) || rz > routeLen() - 150 || laneClosedAt(0, rz) || laneClosedAt(S.lanes - 1, rz);
       var gapL = Math.floor(Math.random() * S.lanes);
       S.obs.forEach(function(o){ if (o.kind === "spike" && !o.hit && o.z > rz - 220 && o.z < rz && o.L === gapL) gapL = (gapL + 1) % S.lanes; });
       if (!clash) addRoadblock(rz, gapL, false);
       S.rbNextZ = S.z + 600 + Math.random() * 300; }
     if (S.z > S.spNextZ){ var sz = S.z + 170 + Math.random() * 40, sl = Math.floor(Math.random() * S.lanes);
       S.rbList.forEach(function(r){ if (r.z > sz - 40 && r.z < sz + 220 && r.gap === sl) sl = (sl + 1 + Math.floor(Math.random() * (S.lanes - 1))) % S.lanes; });
-      if (!tunnelAt(sz) && sz < cfg.length - 100) addObs("spike", sz, laneX(sl), {L: sl});
+      if (!tunnelAt(sz) && sz < routeLen() - 100) addObs("spike", sz, laneX(sl), {L: sl});
       S.spNextZ = S.z + 450 + Math.random() * 350; }
   }
 }
@@ -803,6 +894,7 @@ function scannerWarn(){
 }
 function hitObstacle(o){
   var armored = S.car === "bulletproof";
+  if (o.kind === "wrench"){ o.hit = true; S.hp = Math.min(S.maxHp, S.hp + S.maxHp * 0.3); var pw = P(o.x, 0.6, o.z - S.z); if (pw) floatText(pw.x, pw.y, "+ Repair", "#9FE3FF"); return; }
   if (o.kind === "can"){ o.hit = true; S.fuel = Math.min(100, S.fuel + 50); var p = P(o.x, 0.6, o.z - S.z); if (p) floatText(p.x, p.y, "+ Fuel", "#FFB46B"); return; }
   if (o.kind === "spike"){ o.hit = true; if (S.inv <= 0) hit(8, 0, "front"); S.tires = 4; toast("Tires blown!", true); return; }
   if (o.kind === "cone"){ o.hit = true; o.fly = 1; S.v *= 0.98; damage(1, 1); return; }
@@ -876,7 +968,8 @@ function step(h){
     if (!S.flagged && front > S.cpZ && S.z < S.cpZ + CP_LEN && S.v > CP_LIMIT && S.car !== "hack"){
       S.flagged = true; var lose = S.stash ? 12 : 25; S.cargo = Math.max(0, S.cargo - lose); toast("Flagged at inspection: −" + lose + "% load", true); S.shake = 0.4; addHeat(20); }
   }
-  if (S.z >= cfg.length) end("delivered");
+  if (cfg.endless) extendEndless();
+  else if (S.z >= cfg.length) end("delivered");
 }
 function nearMiss(t){
   S.near++; S.combo++; if (S.nitroOK) S.nitro = Math.min(1, S.nitro + 0.1 + Math.min(0.08, S.combo * 0.01));
@@ -891,7 +984,7 @@ function bagFx(b){
 function end(outcome, quiet){
   if (S.mode !== "running") return;
   S.mode = "ending"; S.outcome = outcome; S.endT = 0; clearInput();
-  S.finalT = S.t; S.finalZ = Math.min(S.z, S.cfg.length);
+  S.finalT = S.t; S.finalZ = Math.min(S.z, routeLen());
   if (outcome === "wrecked" && !quiet) S.shake = 1;
   if (quiet) S.reason = "quit";
   if (outcome === "busted") S.v = Math.min(S.v, 18);
@@ -1245,6 +1338,13 @@ function drawObstacle(o, z, now){
     fillPath("rgba(210,220,235," + (0.8 * (1 - fz)).toFixed(2) + ")");
     return;
   }
+  if (o.kind === "wrench"){
+    var wb = REDUCED ? 0 : Math.sin(now / 300 + o.z) * 0.06, wq = P(o.x, 0.45 + wb, z); if (!wq) return; var ws = wq.s;
+    glow(G.cyan, wq.x, wq.y, 1.5 * ws, 1.5 * ws, 0.6);
+    ctx.fillStyle = "#1F4FA8"; ctx.fillRect(wq.x - 0.32 * ws, wq.y - 0.24 * ws, 0.64 * ws, 0.48 * ws);
+    ctx.fillStyle = "#EAF2FF"; ctx.fillRect(wq.x - 0.06 * ws, wq.y - 0.17 * ws, 0.12 * ws, 0.34 * ws); ctx.fillRect(wq.x - 0.17 * ws, wq.y - 0.06 * ws, 0.34 * ws, 0.12 * ws);
+    return;
+  }
   if (o.kind === "can"){
     var bob = REDUCED ? 0 : Math.sin(now / 300 + o.z) * 0.06, q = P(o.x, 0.35 + bob, z); if (!q) return; var r = q.s;
     glow(G.amber, q.x, q.y, 1.4 * r, 1.4 * r, 0.6);
@@ -1383,7 +1483,7 @@ function drawWind(now){
   ctx.strokeStyle = "rgba(220,235,255," + a.toFixed(2) + ")"; ctx.lineWidth = 1; ctx.stroke();
 }
 
-function plate(){ var nm = (info && info.plate) || "DGEN"; return nm; }
+function plate(){ return (info && info.modes && info.modes.cos && info.modes.cos.plate) || "DGEN"; }
 function hiddenByPortal(worldZ){                 // things past a tunnel entrance you're approaching are behind the hillside
   for (var i = 0; i < S.tunnels.length; i++){ var T = S.tunnels[i]; if (S.z < T.z1 + 5 && worldZ > T.z0 - 12) return true; }
   return false;
@@ -1404,9 +1504,9 @@ function draw(now, dt){
   var items = [], i, tun = S.tunnels.length > 0;
   for (i = Math.floor((d - 10) / 50); i * 50 - d < FAR; i++){ var lz = i * 50 - d + 20; if (lz > nearZ + 0.5 && !(tun && hiddenByPortal(lz + d))) items.push({z: lz, k: "lamp", side: i % 2 === 0 ? -1 : 1}); }
   if (S.cfg){
-    for (i = 0; ; i++){ var gz = 300 + i * 500; if (gz > S.cfg.length - 200) break; var rz = gz - d;
+    for (i = Math.max(0, Math.floor((d - 320) / 500)); ; i++){ var gz = 300 + i * 500; if (gz > routeLen() - 200 || gz - d > FAR) break; var rz = gz - d;
       if (rz > nearZ && rz < FAR && !(tun && hiddenByPortal(gz)) && !S.zones.some(function(Z){ return gz > Z.z0 - 60 && gz < Z.z1; })) items.push({z: rz, k: "gantry", i: i}); }
-    var fzz = S.cfg.length - d; if (fzz > nearZ && fzz < FAR) items.push({z: fzz, k: "finish"});
+    var fzz = S.cfg.length - d; if (!S.cfg.endless && fzz > nearZ && fzz < FAR) items.push({z: fzz, k: "finish"});
     if (S.cpZ > 0){ var cz = S.cpZ - d; if (cz > nearZ && cz < FAR) items.push({z: cz, k: "check"}); }
     (S.rbList || []).forEach(function(r){ if (!r.scripted) return; var bz2 = r.z - 45 - d; if (bz2 > nearZ && bz2 < FAR && !(tun && hiddenByPortal(r.z - 45))) items.push({z: bz2, k: "border"}); });
   }
@@ -1472,6 +1572,8 @@ function setText(id, v){ if (hudCache[id] !== v){ hudCache[id] = v; $(id).textCo
 function setW(id, f){ var v = Math.round(Math.max(0, Math.min(1, f)) * 1000) / 10 + "%"; if (hudCache[id] !== v){ hudCache[id] = v; $(id).style.width = v; } }
 function liveTake(){
   if (!info || !S.cfg) return 0;
+  if (S.cfg.endless){ var eb = Math.min(Math.floor(S.z / 100) * S.cfg.per100 + S.bags * info.bag_value + S.near * info.near_value, info.modes.endless.run_cap) * (info.hype > 1 ? info.hype : 1);
+    return Math.max(0, Math.min(eb, info.daily_cap - info.today)); }
   var base = Math.round(S.cfg.pay * S.stats.cargo * Math.floor(S.cargo) / 100) + S.bags * info.bag_value + S.near * info.near_value;
   base = Math.min(base, info.run_cap) * (info.hype > 1 ? info.hype : 1);
   return Math.max(0, Math.min(base, info.daily_cap - info.today));
@@ -1479,8 +1581,10 @@ function liveTake(){
 function hud(){
   setText("hSpd", String(Math.round(S.v * 2.237)));
   setW("hHp", S.hp / S.maxHp); $("gHp").classList.toggle("low", S.hp < S.maxHp * 0.35);
-  setW("hLd", S.cargo / 100); setW("hNx", S.nitro); setW("hProg", Math.min(1, S.z / S.cfg.length));
-  setText("hTime", clock(S.t) + " · par " + clockShort(S.cfg.par));
+  setW("hLd", S.cargo / 100); setW("hNx", S.nitro);
+  if (S.cfg.endless){ var tgt = Math.max(1000, info && info.modes ? info.modes.endless.week_best : 0);
+    setW("hProg", Math.min(1, S.z / tgt)); setText("hTime", (S.z / 1000).toFixed(2) + " km" + (tgt > 1000 ? " · best " + (tgt / 1000).toFixed(1) : "")); }
+  else { setW("hProg", Math.min(1, S.z / S.cfg.length)); setText("hTime", clock(S.t) + " · par " + clockShort(S.cfg.par)); }
   setText("hTake", "+" + n(liveTake()));
   if (S.fuel !== null){ setW("hFu", S.fuel / 100); $("gFu").classList.toggle("low", S.fuel < 25); }
   if (S.cfg.heat > 0){ var lv = heatLevel(), hs = [0, 1, 2].map(function(k){ return '<i' + (k < lv ? ' class="on"' : '') + '>★</i>'; }).join("");
@@ -1545,13 +1649,15 @@ function startAttract(again){
 function carStats(id){ if (!info) return null; for (var i = 0; i < info.cars.length; i++) if (info.cars[i].id === id) return info.cars[i]; return null; }
 var tab = "routes";
 function setTab(t){
-  tab = t; [["routes","tRoutes","pRoutes"],["garage","tGarage","pGarage"],["board","tBoard","pBoard"]].forEach(function(r){
+  tab = t; [["routes","tRoutes","pRoutes"],["modes","tModes","pModes"],["garage","tGarage","pGarage"],["board","tBoard","pBoard"]].forEach(function(r){
     $(r[1]).setAttribute("aria-selected", String(r[0] === t)); $(r[2]).hidden = r[0] !== t; });
   if (t === "garage") renderGarage();
+  if (t === "modes") renderModes();
 }
 $("tRoutes").addEventListener("click", function(){ setTab("routes"); });
 $("tGarage").addEventListener("click", function(){ setTab("garage"); });
 $("tBoard").addEventListener("click", function(){ setTab("board"); });
+$("tModes").addEventListener("click", function(){ setTab("modes"); });
 function starStr(goals){ return goals.map(function(g){ return g ? "★" : '<span class="off">★</span>'; }).join(""); }
 function renderRoutes(){
   var h = '<div class="stat"><span>Stars <b>' + n(info.stars) + ' of ' + n(info.max_stars) + '</b></span><span>Each new star pays a one-time bonus</span></div>';
@@ -1583,6 +1689,15 @@ function renderGarage(){
       else btn = '<button class="btn sm" type="button" data-up="' + u.id + '" data-cost="' + u.cost + '"' + (info.balance != null && info.balance < u.cost ? ' disabled' : '') + '>Level ' + (u.level + 1) + ' · ' + n(u.cost) + '</button>';
       return '<div class="up"><div class="ut"><b>' + esc(u.name) + '</b>' + pips + '<br><small>' + esc(u.desc) + '</small></div>' + btn + '</div>'; }).join("") + '</div>';
   }
+  var M = info.modes;
+  if (me && M && M.cos){
+    var slot = M.cos.cars[info.car] || {}, shop = info.perks.shop;
+    h += '<h3>Paint shop · ' + esc(me.name) + '</h3><div class="sw"><button type="button" aria-label="Factory paint" data-paint="none" class="' + (!slot.paint ? 'on' : '') + '" style="background:linear-gradient(135deg,#888 50%,#444 50%)"></button>' +
+      M.cos.paints.map(function(pt){ var locked = !pt.owned; return '<button type="button" title="' + esc(pt.name) + (locked ? (pt.price ? ' · ' + n(pt.price) : ' · weekly champions only') : '') + '" aria-label="' + esc(pt.name) + '" data-paint="' + pt.id + '" class="' + (slot.paint === pt.id ? 'on' : '') + (locked ? ' lock' : '') + '" style="background:' + pt.hex + '"' + (locked && (!pt.price || !shop) ? ' disabled' : '') + '></button>'; }).join("") + '</div>' +
+      '<div class="chips"><button type="button" data-glow="none" class="' + (!slot.glow ? 'on' : '') + '">No underglow</button>' +
+      M.cos.glows.map(function(gl){ return '<button type="button" data-glow="' + gl.id + '" class="' + (slot.glow === gl.id ? 'on' : '') + '"' + (!gl.owned && !shop ? ' disabled' : '') + '>' + esc(gl.name) + (gl.owned ? '' : ' · ' + n(gl.price)) + '</button>'; }).join("") + '</div>' +
+      '<div class="plate"><input id="plateIn" maxlength="7" value="' + esc(M.cos.plate || '') + '" placeholder="DGEN" aria-label="Custom plate"><button class="btn sm" type="button" id="plateBtn"' + (shop ? '' : ' disabled') + '>Plate · ' + n(M.cos.plate_price) + '</button></div>';
+  }
   h += '<h3>Cars</h3><div class="cars">';
   info.cars.forEach(function(c){
     var act;
@@ -1605,6 +1720,20 @@ function renderGarage(){
     var c = carStats(b.getAttribute("data-buy")); if (!c) return;
     if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); b.textContent = "Tap again to pay " + n(c.price); return; }
     garageAct("buy", c.id, b); }); });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-paint]"), function(b){ b.addEventListener("click", function(){
+    var id = b.getAttribute("data-paint"), pt = null; info.modes.cos.paints.forEach(function(x){ if (x.id === id) pt = x; });
+    if (id === "none" || (pt && pt.owned)) return cosAct("cos_apply", {car: info.car, paint: id === "none" ? null : id}, b);
+    if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); $("gNote").textContent = pt.name + " costs " + n(pt.price) + ". Tap it again to buy."; return; }
+    cosAct("cos_buy", {kind: "paint", id: id, car: info.car}, b); }); });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-glow]"), function(b){ b.addEventListener("click", function(){
+    var id = b.getAttribute("data-glow"), gl = null; info.modes.cos.glows.forEach(function(x){ if (x.id === id) gl = x; });
+    if (id === "none" || (gl && gl.owned)) return cosAct("cos_apply", {car: info.car, glow: id === "none" ? null : id}, b);
+    if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); b.textContent = "Tap to pay " + n(gl.price); return; }
+    cosAct("cos_buy", {kind: "glow", id: id, car: info.car}, b); }); });
+  var pb = $("plateBtn"); if (pb) pb.addEventListener("click", function(){
+    var v = $("plateIn").value.toUpperCase().trim();
+    if (pb.getAttribute("data-confirm") !== "1"){ pb.setAttribute("data-confirm", "1"); pb.textContent = "Pay " + n(info.modes.cos.plate_price); return; }
+    cosAct("plate", {text: v}, pb); });
   Array.prototype.forEach.call(document.querySelectorAll("[data-up]"), function(b){ b.addEventListener("click", function(){
     if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); b.textContent = "Tap to pay " + n(b.getAttribute("data-cost")); return; }
     garageAct("upgrade", info.car, b, {part: b.getAttribute("data-up")}); }); });
@@ -1620,10 +1749,18 @@ function garageAct(action, id, btn, extra){
     if (action === "upgrade") $("gNote").textContent = "Installed." + ((d.achievements || []).length ? " 🏆 " + d.achievements.join(", ") : "");
   }).catch(function(e){ btn.disabled = false; if (e.message !== "login") $("gNote").textContent = "Couldn't reach the server."; });
 }
+function cosAct(action, body, btn){
+  btn.disabled = true;
+  api("/api/games/nightrun/" + action, body).then(function(d){
+    if (!d || d.ok === false){ btn.disabled = false; $("gNote").textContent = (d && d.error) || "That didn't work."; return; }
+    info.modes = d.modes; if (d.balance != null){ info.balance = d.balance; $("bal").textContent = "Balance " + n(d.balance); }
+    renderGarage(); startAttract(); $("gNote").textContent = action === "plate" ? "New plates are on." : "Looking good.";
+  }).catch(function(e){ btn.disabled = false; if (e.message !== "login") $("gNote").textContent = "Couldn't reach the server."; });
+}
 function preview(canvas, id){
   var r = canvas.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1), cw = Math.max(120, r.width), ch = Math.max(70, r.height);
   canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
-  var V = CARVIS[id]; if (!V) return;
+  var V = carVis(id); if (!CARVIS[id]) return;
   var cs = carStats(id);
   if (cs && cs.status === "secret"){ var g0 = canvas.getContext("2d"); g0.setTransform(dpr, 0, 0, dpr, 0, 0); g0.fillStyle = "rgba(217,184,108,.55)";
     g0.font = "600 " + Math.round(ch * 0.55) + "px 'IBM Plex Serif',Georgia,serif"; g0.textAlign = "center"; g0.textBaseline = "middle"; g0.fillText("?", cw / 2, ch / 2); return; }
@@ -1640,6 +1777,45 @@ function preview(canvas, id){
     ctx.restore();
   } catch (e){ console.error(e); }
   ctx = save.ctx; W = save.W; H = save.H; F = save.F; HZ = save.HZ; camX = save.camX; camH = save.camH; camBack = save.camBack; nearZ = save.nearZ; FAR = save.FAR; OA = save.OA;
+}
+function km(m){ return (m / 1000).toFixed(m >= 10000 ? 1 : 2) + " km"; }
+function boardList(rows, fmt){ return rows && rows.length ? '<ol class="board">' + rows.map(function(r){ return '<li><span class="n' + (r.you ? ' you' : '') + '">' + esc(r.name) + '</span><span>' + fmt(r) + '</span></li>'; }).join("") + '</ol>' : '<p class="small" style="margin:4px 0 8px">Nobody yet. Be the first.</p>'; }
+function renderModes(){
+  if (!info || !info.modes) return;
+  var M = info.modes, h = '', e = M.endless, dly = M.daily, st = M.stakes, cr = M.crew;
+  h += '<div class="mode"><h3>🌙 Midnight Run</h3><p>Endless highway. It gets busier and hotter every kilometer. Go as far as you can.</p>' +
+    '<div class="row2"><span>Your best <b>' + (e.best ? km(e.best) : '—') + '</b></span><span>This week <b>' + (e.week_best ? km(e.week_best) : '—') + '</b>' + (e.rank ? ' (#' + e.rank + ')' : '') + '</span>' +
+    '<span>Pays ' + n(e.per100) + ' per 100 m + cash, up to ' + n(e.run_cap) + '</span></div>' +
+    '<div class="row2"><span>Top 3 each week get <b>' + e.prizes.map(n).join(' / ') + '</b>, and first place gets Champion Gold paint</span></div>' +
+    boardList(e.top, function(r){ return km(r.dist); }) +
+    (e.last && e.last.length ? '<p class="small" style="margin:0 0 8px">Last week: ' + e.last.map(function(x, i){ return ['🥇','🥈','🥉'][i] + ' ' + esc(x.name) + ' ' + km(x.dist); }).join(' · ') + '</p>' : '') +
+    (e.unlocked ? '<button class="btn" type="button" data-mode="endless">Start a Midnight Run</button>' : '<button class="btn ghost" type="button" disabled>🔒 Deliver ' + esc(e.unlock_name) + ' to unlock</button>') + '</div>';
+  var dOpen = info.levels[0].goals[0];
+  h += '<div class="mode"><h3>📅 Daily Run · ' + esc(dly.name) + '</h3><p>Same route, same traffic, same cash for everyone today. Fastest delivery wins.</p>' +
+    '<div class="row2"><span>Your best today <b>' + (dly.best != null ? clock(dly.best) : '—') + '</b>' + (dly.rank ? ' (#' + dly.rank + ')' : '') + '</span>' +
+    '<span>First delivery today: <b>' + (dly.bonus_claimed ? 'claimed ✓' : '+' + n(dly.bonus)) + '</b></span><span>Top 3 at midnight: <b>' + dly.prizes.map(n).join(' / ') + '</b></span></div>' +
+    boardList(dly.top, function(r){ return clock(r.secs); }) +
+    (dOpen ? '<button class="btn" type="button" data-mode="daily">Drive today’s route</button>' : '<button class="btn ghost" type="button" disabled>🔒 Deliver Downtown Loop first</button>') + '</div>';
+  var stLv = info.levels[selLevel - 1], canSt = stLv && stLv.goals[0];
+  h += '<div class="mode"><h3>💼 High Stakes</h3><p>Load your real dealer stash into the trunk. Deliver it and the buyer pays ' + Math.round((st.premium - 1) * 100) + '% over street price for whatever’s left of the load. Wreck and it’s gone. Get busted and it’s gone, plus +30 dealer heat.</p>';
+  if (st.items.length){
+    h += '<div class="items">' + st.items.map(function(it){ return '<span>' + it.emoji + ' ' + esc(it.name) + ' ' + n(it.grams) + 'g · ' + n(it.value) + '</span>'; }).join("") + '</div>' +
+      '<div class="row2"><span>Street value <b>' + n(st.value) + '</b></span><span>Delivered in full <b>' + n(Math.min(st.cap, Math.floor(st.value * st.premium))) + '</b></span><span>Route: <b>' + esc(stLv ? stLv.name : '—') + '</b> (pick it under Routes)</span></div>';
+    if (st.jail) h += '<button class="btn ghost" type="button" disabled>🚔 You’re locked up</button>';
+    else if (st.cooldown > 0) h += '<button class="btn ghost" type="button" disabled>The buyer’s ready in ' + Math.ceil(st.cooldown / 60) + ' min</button>';
+    else if (!canSt) h += '<button class="btn ghost" type="button" disabled>Pick a route you’ve delivered</button>';
+    else h += '<button class="btn" type="button" data-mode="stakes">Run the stash on ' + esc(stLv.name) + '</button>';
+  } else h += '<p class="small" style="margin:0">Your stash is empty. Buy product with <code>/buysupply</code> in Discord, then come back.</p>';
+  h += '</div>';
+  if (cr){
+    var pct = Math.min(1, cr.points / cr.goal);
+    h += '<div class="mode"><h3>🤝 Crew contract · [' + esc(cr.tag) + '] ' + esc(cr.name) + '</h3><p>Every delivery adds points (route number × % of the load; Midnight Run adds 1 per km). Hit the goal this week and everyone who drove gets ' + n(cr.reward) + '.</p>' +
+      '<div class="meter"><i style="width:' + (pct * 100).toFixed(1) + '%"></i></div>' +
+      '<div class="row2"><span><b>' + cr.points.toFixed(1) + '</b> of ' + n(cr.goal) + ' points' + (cr.done ? ' · ✅ done' : '') + '</span><span>You: <b>' + Number(cr.mine).toFixed(1) + '</b></span></div>' +
+      boardList(cr.top, function(r){ return Number(r.pts).toFixed(1); }) + '</div>';
+  } else h += '<div class="mode"><h3>🤝 Crew contracts</h3><p>Join a crew in Discord (<code>_crew</code>) and your deliveries count toward a weekly crew payout.</p></div>';
+  $("pModes").innerHTML = h + '<p class="small" id="moNote"></p>';
+  Array.prototype.forEach.call(document.querySelectorAll("[data-mode]"), function(b){ b.addEventListener("click", function(){ startRun(b.getAttribute("data-mode")); }); });
 }
 function renderBoard(){
   var b = info.board, h;
@@ -1660,7 +1836,7 @@ function applyInfo(d){
   info = d; selCar = d.car;
   if (d.balance != null) $("bal").textContent = "Balance " + n(d.balance);
   if (!info.levels[selLevel - 1] || !info.levels[selLevel - 1].open){ selLevel = 1; for (var i = info.levels.length - 1; i >= 0; i--) if (info.levels[i].open && !info.levels[i].goals[0]){ selLevel = info.levels[i].id; break; } }
-  renderRoutes(); renderBoard(); if (tab === "garage") renderGarage(); footer();
+  renderRoutes(); renderBoard(); if (tab === "garage") renderGarage(); if (tab === "modes") renderModes(); footer();
 }
 function loadInfo(){
   return api("/api/games/nightrun/info").then(function(d){
@@ -1670,26 +1846,33 @@ function loadInfo(){
     startAttract();
   }).catch(function(e){ if (e.message !== "login") $("mNote").textContent = "Couldn't reach the server."; });
 }
-function startRun(){
+function startRun(mode, force){
+  mode = typeof mode === "string" ? mode : "route";
   var btn = $("driveBtn"); btn.disabled = true; btn.textContent = "Loading the package…";
-  api("/api/games/nightrun/start", {level: selLevel, car: selCar}).then(function(d){
-    if (!d || d.ok === false){ backToMenu(); $("mNote").textContent = (d && d.error) || "Couldn't start the run."; return; }
-    ATTRACT = null; S.run = d; d.cfg.theme = d.level; $("resBtns").hidden = true;
-    setTheme(d.level); setupRun(d.seed, d.cfg, d.car, d.stats, {nitro: d.nitro, stash: d.stash, scanner: d.scanner});
+  api("/api/games/nightrun/start", {mode: mode, level: selLevel, car: selCar, force: !!force}).then(function(d){
+    if (d && d.confirm){
+      backToMenu(); $("mNote").textContent = d.error;
+      var b2 = $("driveBtn"); b2.disabled = false; b2.textContent = "Start anyway (lose the load)"; b2.onclick = function(){ b2.onclick = null; startRun(mode, true); };
+      return; }
+    if (!d || d.ok === false){ backToMenu(); $("mNote").textContent = (d && d.error) || "Couldn't start the run."; var mn = $("moNote"); if (mn) mn.textContent = (d && d.error) || ""; return; }
+    ATTRACT = null; S.run = d; d.cfg.theme = d.level || 11; $("resBtns").hidden = true;
+    show("gLd", !d.cfg.endless); $("hTakeL").textContent = d.cfg.endless ? "so far" : "if you deliver";
+    var hs = $("hStake"); hs.hidden = !d.stakes_value; if (d.stakes_value) hs.textContent = "💼 " + n(d.stakes_value) + " in the trunk";
+    setTheme(d.cfg.theme); setupRun(d.seed, d.cfg, d.car, d.stats, {nitro: d.nitro, stash: d.stash, scanner: d.scanner});
     show("gFu", !!d.cfg.fuel); show("gHt", d.cfg.heat > 0); show("gBs", false);
     show("menu", false); show("results", false); show("hud", true); show("gNx", d.nitro); $("pN").disabled = !d.nitro;
     $("hCp").hidden = !d.cfg.checkpoint; if (d.cfg.checkpoint) $("hCp").style.left = (S.cpZ / d.cfg.length * 100).toFixed(1) + "%";
     show("pad", COARSE); hudCache = {}; hud();
     S.mode = "countdown"; show("countdown", true); var c = 3; $("cnt").textContent = c;
     var iv = setInterval(function(){ c--; if (c > 0) $("cnt").textContent = c; else { clearInterval(iv); show("countdown", false); S.mode = "running"; last = performance.now(); if (document.hidden) pause();
-      var intro = d.cfg.heat_start ? "They're already on you. Find a tunnel." : d.cfg.heli ? "The helicopter won't leave. Just get there."
+      var intro = d.cfg.endless ? "Midnight Run. Keep going." : d.mode === "daily" ? "Daily Run: same road for everyone. Go fast." : d.mode === "stakes" ? "Your stash is in the trunk. Don't lose it." : d.cfg.heat_start ? "They're already on you. Find a tunnel." : d.cfg.heli ? "The helicopter won't leave. Just get there."
         : d.cfg.fuel ? "Long way round. Watch your fuel." : d.cfg.fog ? "Fog ahead. Roadblocks at the border." : d.cfg.closures ? "Roadworks ahead. Lanes close without warning."
         : d.cfg.rain ? "Wet roads: less grip, longer braking" : d.cfg.wind ? "Watch for crosswinds" : "";
       if (intro) toast(intro); } }, 700);
   }).catch(function(e){ backToMenu(); if (e.message !== "login") $("mNote").textContent = "Couldn't reach the server."; });
 }
-function backToMenu(){ show("results", false); show("hud", false); show("pad", false); show("menu", true); S.mode = "menu"; renderRoutes(); footer(); startAttract(); }
-$("driveBtn").addEventListener("click", startRun);
+function backToMenu(){ $("driveBtn").onclick = null; show("results", false); show("hud", false); show("pad", false); show("menu", true); S.mode = "menu"; renderRoutes(); footer(); startAttract(); }
+$("driveBtn").addEventListener("click", function(){ if (!$("driveBtn").onclick) startRun("route"); });
 
 var pending = null;
 function finish(){
@@ -1706,34 +1889,43 @@ function finish(){
 function submit(){
   api("/api/games/nightrun/finish", pending).then(function(r){
     if (!r || r.ok === false){ resultError((r && r.error) || "Couldn't record that run."); return; }
-    var lv = info.levels[S.run.level - 1], h = '';
-    var lede = r.outcome === "delivered" ? 'You got ' + r.cargo + '% of the load there in ' + clock(r.seconds) + '.'
+    var lv = info.levels[(S.run.level || 1) - 1], h = '', endless = r.mode === "endless";
+    var lede = endless ? 'You made it ' + km(r.distance) + '.' + ({cop: '', boxed: ' The cops boxed you in.', busted: ' They ran you off the road.', quit: ' You ditched the car.'}[S.reason] || '')
+             : r.outcome === "delivered" ? 'You got ' + r.cargo + '% of the load there in ' + clock(r.seconds) + '.'
              : ({cop: 'You touched a cop car.', boxed: 'The cops boxed you in.', busted: 'They ran you off the road.', gas: 'You ran out of gas.', quit: 'You ditched the car.'}[S.reason]
                 || (r.outcome === "busted" ? 'The cops got you.' : 'The car gave out.')) + ' The package is gone, and you dropped half the cash.';
     h += '<p class="lede">' + lede + '</p>';
-    h += '<div class="stars3">' + ['Deliver', info.cargo_star + '% load', 'Under ' + clockShort(lv.par)].map(function(g, i){
+    if (!endless && r.mode !== "daily") h += '<div class="stars3">' + ['Deliver', info.cargo_star + '% load', 'Under ' + clockShort(lv.par)].map(function(g, i){
       var have = r.levels[S.run.level - 1].goals[i], nw = r.new_goals[i];
       return '<div class="' + (have ? 'y' : '') + (nw ? ' n' : '') + '"><b>★</b>' + esc(g) + (nw ? '<br><span style="color:var(--gold-ink)">New</span>' : '') + '</div>'; }).join("") + '</div>';
+    if (endless) h += '<div class="stars3"><div class="y"><b>' + km(r.distance) + '</b>this run</div><div class="' + (r.new_best ? 'y n' : '') + '"><b>' + km(r.week_best || 0) + '</b>week best</div><div><b>' + (r.modes.endless.rank ? '#' + r.modes.endless.rank : '—') + '</b>this week</div></div>';
+    if (r.mode === "daily") h += '<div class="stars3"><div class="' + (r.outcome === "delivered" ? 'y' : '') + '"><b>' + (r.outcome === "delivered" ? clock(r.seconds) : '—') + '</b>this run</div><div class="' + (r.new_best ? 'y n' : '') + '"><b>' + (r.daily_best != null ? clock(r.daily_best) : '—') + '</b>today’s best</div><div><b>' + (r.daily_rank ? '#' + r.daily_rank : '—') + '</b>today</div></div>';
+    if (r.stakes){ var so = r.stakes.outcome;
+      h += '<p class="lede" style="color:' + (so === "delivered" ? 'var(--ok)' : 'var(--loss)') + '">💼 ' + (so === "delivered" ? 'The buyer paid ' + n(r.stakes_pay) + ' for your stash.' : so === "busted" ? 'The cops took your stash (' + n(r.stakes.grams) + 'g). Dealer heat +30.' : 'Your stash (' + n(r.stakes.grams) + 'g) is gone.') + '</p>'; }
     h += '<p class="paid">+' + n(r.payout) + '</p><ul class="facts">';
+    if (endless) h += '<li><span class="k">Distance, ' + km(r.distance) + '</span><span>' + n(r.dist_part) + '</span></li>';
     if (r.outcome === "delivered") h += '<li><span class="k">Delivery, ' + r.cargo + '% of the load</span><span>' + n(r.deliver_part) + '</span></li>';
-    h += '<li><span class="k">Cash bags, ' + n(r.bags) + (r.outcome === "delivered" ? '' : ' (half)') + '</span><span>' + n(r.bag_part) + '</span></li>';
+    h += '<li><span class="k">Cash bags, ' + n(r.bags) + (r.outcome === "delivered" || endless ? '' : ' (half)') + '</span><span>' + n(r.bag_part) + '</span></li>';
     h += '<li><span class="k">Near misses, ' + n(r.near) + '</span><span>' + n(r.near_part) + '</span></li>';
-    if (r.capped) h += '<li><span class="k">Per-run limit</span><span>' + n(info.run_cap) + '</span></li>';
+    if (r.capped) h += '<li><span class="k">Per-run limit</span><span>' + n(endless ? info.modes.endless.run_cap : info.run_cap) + '</span></li>';
+    if (r.bonus_pay) h += '<li><span class="k">Daily Run bonus</span><span>' + n(r.bonus_pay) + '</span></li>';
+    if (r.stakes_pay) h += '<li><span class="k">Stash sold</span><span>' + n(r.stakes_pay) + '</span></li>';
+    if (r.contract_pts) h += '<li><span class="k">Crew contract</span><span>+' + Number(r.contract_pts).toFixed(1) + ' pts' + (r.contract_done ? ' · done!' : '') + '</span></li>';
     if (r.hype > 1) h += '<li><span class="k">Hype Train</span><span>×' + r.hype + '</span></li>';
     if (r.star_pay) h += '<li><span class="k">New star bonus</span><span>' + n(r.star_pay) + '</span></li>';
     if (r.xp) h += '<li><span class="k">XP</span><span>+' + n(r.xp) + '</span></li>';
     h += '<li><span class="k">Paid today</span><span>' + n(r.today) + ' of ' + n(r.daily_cap) + '</span></li></ul>';
     if (r.daily_capped) h += '<p class="small">You’ve reached today’s limit, so this run paid what was left. Star bonuses still pay in full.</p>';
     if (!r.counts) h += '<p class="small">Runs under 5 seconds don’t pay.</p>';
-    if (r.new_best) h += '<span class="badge new">New best time</span>';
+    if (r.new_best) h += '<span class="badge new">' + (endless ? 'New weekly best' : 'New best time') + '</span>';
     (r.unlocks || []).forEach(function(u){ h += '<span class="badge new">🔓 ' + esc(u) + '</span>'; });
     (r.achievements || []).forEach(function(a){ h += '<span class="badge">🏆 ' + esc(a) + '</span>'; });
     $("resBody").innerHTML = h;
     $("bal").textContent = "Balance " + n(r.balance);
-    var cur = S.run.level; applyInfo(Object.assign({}, info, r, {balance: r.balance, car: info.car}));
-    var nxt = info.levels[cur]; selLevel = cur;
-    var nb = $("nextBtn"); nb.hidden = !(r.outcome === "delivered" && nxt && nxt.open);
-    if (!nb.hidden){ nb.textContent = "Next route: " + nxt.name; nb.onclick = function(){ selLevel = nxt.id; renderRoutes(); footer(); show("results", false); startRun(); }; }
+    var cur = S.run.level || selLevel; applyInfo(Object.assign({}, info, r, {balance: r.balance, car: info.car}));
+    var nxt = info.levels[cur]; if (S.run.mode === "route" || S.run.mode === "stakes") selLevel = cur;
+    var nb = $("nextBtn"); nb.hidden = !(S.run.mode === "route" && r.outcome === "delivered" && nxt && nxt.open);
+    if (!nb.hidden){ nb.textContent = "Next route: " + nxt.name; nb.onclick = function(){ selLevel = nxt.id; renderRoutes(); footer(); show("results", false); startRun("route"); }; }
     $("resBtns").hidden = false; S.mode = "results"; (nb.hidden ? $("againBtn") : nb).focus();
   }).catch(function(e){ if (e.message !== "login") resultError("Couldn't reach the server. Your run is saved for a few minutes."); });
 }
@@ -1742,7 +1934,7 @@ function resultError(msg){
   $("retryBtn").addEventListener("click", function(){ $("resBody").innerHTML = '<p class="lede">Counting the money…</p>'; submit(); });
   $("resBtns").hidden = false; $("nextBtn").hidden = true; S.mode = "results";
 }
-$("againBtn").addEventListener("click", function(){ selLevel = S.run.level; show("results", false); startRun(); });
+$("againBtn").addEventListener("click", function(){ if (S.run.mode === "route") selLevel = S.run.level; show("results", false); startRun(S.run.mode === "stakes" ? "route" : S.run.mode); });
 $("menuBtn").addEventListener("click", backToMenu);
 
 window.addEventListener("resize", function(){ resize(); if (tab === "garage" && info && !$("menu").hidden) renderGarage(); });
