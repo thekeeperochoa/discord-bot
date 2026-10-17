@@ -88,7 +88,8 @@ _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "city": Path(__file__).resolve().parent / "web" / "city.html",
           "nightrun": Path(__file__).resolve().parent / "web" / "nightrun.html",
           "mines": Path(__file__).resolve().parent / "web" / "mines.html",
-          "reels": Path(__file__).resolve().parent / "web" / "reels.html"}
+          "reels": Path(__file__).resolve().parent / "web" / "reels.html",
+          "flappy": Path(__file__).resolve().parent / "web" / "flappy.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
@@ -96,7 +97,8 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "nightrun": {"info": "GET", "start": "POST", "finish": "POST", "buy": "POST", "select": "POST",
                               "upgrade": "POST", "cos_buy": "POST", "cos_apply": "POST", "plate": "POST"},
                  "mines": {"info": "GET", "start": "POST", "reveal": "POST", "cashout": "POST"},
-                 "reels": {"info": "GET", "spin": "POST"}}
+                 "reels": {"info": "GET", "spin": "POST"},
+                 "flappy": {"info": "GET", "start": "POST", "finish": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 

@@ -3176,6 +3176,9 @@ ACHIEVEMENTS = {
     "mines_first":   {"emoji":"💣", "name":"Sweeper",              "desc":"Cash out a game of Mines",                 "reward":200},
     "mines_10x":     {"emoji":"🧨", "name":"Steady Hands",         "desc":"Cash out at 10× or more in Mines",          "reward":1000},
     "mines_100x":    {"emoji":"💥", "name":"Bomb Squad",           "desc":"Cash out at 100× or more in Mines",         "reward":10000},
+    "flappy_10":     {"emoji":"🐦", "name":"Lift Off",             "desc":"Pass 10 pipes in Flappy Degen",            "reward":200},
+    "flappy_50":     {"emoji":"🚀", "name":"To The Moon",          "desc":"Pass 50 pipes in Flappy Degen",            "reward":2000},
+    "flappy_100":    {"emoji":"🌕", "name":"Escape Velocity",      "desc":"Pass 100 pipes in Flappy Degen",           "reward":10000},
     "reels_fs":      {"emoji":"🎟️", "name":"Free Ride",            "desc":"Trigger free spins in Wolf's Fortune",      "reward":500},
     "reels_25x":     {"emoji":"🐺", "name":"Howl at the Moon",     "desc":"Win 25× your bet on one spin of Wolf's Fortune", "reward":2000},
     "reels_100x":    {"emoji":"🌕", "name":"Wolf of the Strip",    "desc":"Win 100× your bet on one spin of Wolf's Fortune", "reward":10000},
@@ -26779,6 +26782,7 @@ def _web_games_load() -> dict:
     _vp_store(data)
     _mines_store(data)
     _reels_store(data)
+    _flap_store(data)
     return data
 
 
@@ -26809,6 +26813,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _mines_dispatch(uid, action, payload)
     if game == "reels":
         return await _reels_dispatch(uid, action, payload)
+    if game == "flappy":
+        return await _flap_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27292,6 +27298,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"🌙 **Night Run** — run the package across town, unlock and buy cars: <{base}/games/nightrun>\n"
         f"💣 **Mines** — flip tiles, dodge bombs, cash out before it blows: <{base}/games/mines>\n"
         f"🐺 **Wolf's Fortune** — 3D slots, wild wolves and tripled free spins: <{base}/games/reels>\n"
+        f"🐦 **Flappy Degen** — flap through the candles, every pipe pays: <{base}/games/flappy>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -27536,6 +27543,247 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🐦 WEB GAME: FLAPPY DEGEN — tap to flap through neon candlestick pipes.
+# Pays coins like The Getaway (never costs any): every pipe passed, every coin
+# grabbed and every dead-centre "perfect" pass is worth a few coins, capped per
+# run and per day.
+# Anti-cheat follows The Getaway: the server hands out a seed and both sides build
+# the same pipes from it (mulberry32, integer-only decisions; flappy_course() here
+# and genCourse() in bot/web/flappy.html MUST stay identical). The scroll speed is
+# a fixed function of distance, so the server knows the furthest anyone could
+# have flown in the real time since the seed went out. Pipes, coins and perfects
+# are clamped to what a perfect flight could have reached in that time.
+# ─────────────────────────────────────────────────────────────────────────────
+FLAP_FIRST = 520               # world x of the first pipe's left edge
+FLAP_SPACING = 250             # between pipes
+FLAP_PW = 72                   # pipe width
+FLAP_V0, FLAP_DV, FLAP_VMAX = 165.0, 1.0, 230.0   # units/s; +1 per pipe passed, up to the max
+FLAP_PIPE_VALUE = 4            # bot coins per pipe passed
+FLAP_COIN_VALUE = 10           # per coin grabbed
+FLAP_PERFECT_VALUE = 2         # per dead-centre pass
+FLAP_RUN_CAP = 3_000           # max payout per run (before Hype Train)
+FLAP_DAILY_CAP = 10_000        # max paid per member per day (EST)
+FLAP_MIN_SECONDS = 2
+FLAP_RUN_TTL = 30 * 60
+FLAP_XP_CAP = 60
+FLAP_RECORD_MIN = 30           # announce new server records from this score up
+_flap_runs: dict[int, dict] = {}
+_flap_done: dict[str, dict] = {}
+_flap_last_start: dict[int, float] = {}
+
+
+def flappy_course(seed: int, n: int) -> list:
+    """Pipe k: (gap centre y, gap height, coin 0/1, coin y offset, sway amplitude, sway phase).
+    World is 640 tall, ground at 580. MUST stay identical to genCourse() in bot/web/flappy.html."""
+    rng = _mulberry32(seed)
+    out, centre = [], 300
+    for k in range(n):
+        r1, r2, r3, r4, r5 = rng(), rng(), rng(), rng(), rng()
+        gap = max(138, 200 - (k * 3) // 4)
+        amp = 0
+        if k >= 30 and int(r4 * 1000) < min(450, 120 + 4 * k):
+            amp = 18 + int(r5 * 34)
+        maxd = 140 if k < 10 else 190
+        centre = centre + int(r1 * (2 * maxd + 1)) - maxd
+        lo, hi = 70 + gap // 2 + amp, 540 - gap // 2 - amp
+        centre = min(hi, max(lo, centre))
+        coin = 1 if (k > 0 and int(r2 * 100) < 38) else 0
+        coin_dy = int(r3 * 41) - 20
+        phase = int(r5 * 628)
+        out.append((centre, gap, coin, coin_dy, amp, phase))
+    return out
+
+
+def flappy_distance(seconds: float) -> float:
+    """Furthest a perfect flight gets in `seconds` (speed steps up each time a pipe is passed)."""
+    t, d = max(0.0, float(seconds)), 0.0
+    for s in range(100_000):
+        v = min(FLAP_VMAX, FLAP_V0 + FLAP_DV * s)
+        end = FLAP_FIRST + FLAP_PW if s == 0 else FLAP_FIRST + FLAP_PW + s * FLAP_SPACING
+        need = (end - d) / v
+        if t <= need:
+            return d + t * v
+        t -= need
+        d = end
+    return d
+
+
+def flappy_max_pipes(seconds: float) -> int:
+    d = flappy_distance(seconds)
+    if d < FLAP_FIRST + FLAP_PW:
+        return 0
+    return int((d - FLAP_FIRST - FLAP_PW) // FLAP_SPACING) + 1
+
+
+def _flap_store(data: dict) -> dict:
+    g = data.setdefault("flappy", {})
+    for k in ("best", "daily", "runs", "daybest", "stats"):
+        g.setdefault(k, {})
+    return g
+
+
+def _flap_today(g: dict, uid_s: str) -> int:
+    rec = g["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _flap_boards(g: dict, uid_s: str) -> dict:
+    today = now_est().strftime("%Y-%m-%d")
+    allt = sorted(((int(b), u) for u, b in g["best"].items() if int(b) > 0 and _is_member(None, u)), reverse=True)
+    day = sorted(((int(r.get("best", 0)), u) for u, r in g["daybest"].items()
+                  if r.get("date") == today and int(r.get("best", 0)) > 0 and _is_member(None, u)), reverse=True)
+    def rows(lst):
+        return [{"name": _dash_name(u), "score": s, "you": u == uid_s} for s, u in lst[:10]]
+    return {"all": rows(allt), "today": rows(day),
+            "rank": next((i + 1 for i, (_, u) in enumerate(allt) if u == uid_s), None), "of": len(allt)}
+
+
+def _flap_public_stats(g: dict, uid_s: str) -> dict:
+    s = g["stats"].get(uid_s, {})
+    return {"best": int(g["best"].get(uid_s, 0)), "runs": int(g["runs"].get(uid_s, 0)),
+            "pipes": int(s.get("pipes", 0)), "coins": int(s.get("coins", 0)), "earned": int(s.get("earned", 0)),
+            "today": _flap_today(g, uid_s), "daily_cap": FLAP_DAILY_CAP}
+
+
+async def _flap_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    data = _web_games_load()
+    g = _flap_store(data)
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates a record
+        return {"ok": True, "balance": int(rec.get("balance", 0)) if rec else None,
+                "stats": _flap_public_stats(g, uid_s), "boards": _flap_boards(g, uid_s),
+                "run_cap": FLAP_RUN_CAP, "daily_cap": FLAP_DAILY_CAP, "pipe_value": FLAP_PIPE_VALUE,
+                "coin_value": FLAP_COIN_VALUE, "perfect_value": FLAP_PERFECT_VALUE, "hype": int(hype_train_multiplier())}
+
+    if action == "start":
+        if now - _flap_last_start.get(uid, 0) < 0.6:
+            return {"ok": False, "error": "Easy — one flight at a time.", "retry": True}
+        _flap_last_start[uid] = now
+        for rid in [r for r, res in _flap_done.items() if now - res.get("_ts", 0) > 600]:
+            _flap_done.pop(rid, None)
+        run = {"run_id": secrets.token_hex(12), "seed": random.getrandbits(32), "started": now}
+        _flap_runs[uid] = run   # starting a new flight abandons any unfinished one
+        return {"ok": True, "run_id": run["run_id"], "seed": run["seed"]}
+
+    if action == "finish":
+        run_id = str(payload.get("run_id", ""))
+        if run_id in _flap_done and _flap_done[run_id].get("_uid") == uid:
+            return {k: v for k, v in _flap_done[run_id].items() if not k.startswith("_")}
+        run = _flap_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That flight isn't active anymore."}
+        _flap_runs.pop(uid, None)
+        if now - run["started"] > FLAP_RUN_TTL:
+            return {"ok": False, "error": "That flight expired."}
+        try:
+            claimed_s = float(payload.get("duration_ms", 0)) / 1000.0
+            claimed_pipes = int(payload.get("pipes", 0))
+            claimed_coins = int(payload.get("coins", 0))
+            claimed_perfect = int(payload.get("perfects", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Bad flight data."}
+        seconds = max(0.0, min(claimed_s, now - run["started"]))   # never trust the page's clock past real time
+        pipes = max(0, min(claimed_pipes, flappy_max_pipes(seconds)))
+        course = flappy_course(run["seed"], pipes + 1)
+        coins = max(0, min(claimed_coins, sum(p[2] for p in course)))
+        perfects = max(0, min(claimed_perfect, pipes))
+
+        if seconds < FLAP_MIN_SECONDS:
+            pipe_part = coin_part = perfect_part = base = 0
+        else:
+            pipe_part, coin_part, perfect_part = pipes * FLAP_PIPE_VALUE, coins * FLAP_COIN_VALUE, perfects * FLAP_PERFECT_VALUE
+            base = min(pipe_part + coin_part + perfect_part, FLAP_RUN_CAP)
+        hype = int(hype_train_multiplier())
+        today = _flap_today(g, uid_s)
+        left = max(0, FLAP_DAILY_CAP - today)
+        payout = max(0, min(base * hype, left))
+        balance = economy.balance(uid)
+        if payout > 0:
+            balance = economy.add(uid, payout, "web game: flappy degen")
+            try:
+                track_economy_event("earned", payout)
+            except Exception:
+                pass
+        date = now_est().strftime("%Y-%m-%d")
+        g["daily"][uid_s] = {"date": date, "earned": today + payout}
+        g["runs"][uid_s] = int(g["runs"].get(uid_s, 0)) + 1
+        st = g["stats"].setdefault(uid_s, {})
+        st["pipes"] = int(st.get("pipes", 0)) + pipes
+        st["coins"] = int(st.get("coins", 0)) + coins
+        st["earned"] = int(st.get("earned", 0)) + payout
+        prev_best = int(g["best"].get(uid_s, 0))
+        new_best = pipes > prev_best
+        prev_record = max([int(b) for u, b in g["best"].items() if u != uid_s and _is_member(None, u)] or [0])
+        if new_best:
+            g["best"][uid_s] = pipes
+        db = g["daybest"].get(uid_s, {})
+        if db.get("date") != date or pipes > int(db.get("best", 0)):
+            g["daybest"][uid_s] = {"date": date, "best": max(pipes, int(db.get("best", 0)) if db.get("date") == date else pipes)}
+        _save_json_file(WEB_GAMES_FILE, data)
+        try:
+            track_command_use("flappy", uid)
+        except Exception:
+            pass
+
+        notif = None
+        try:
+            cid = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid)) if cid else None
+        except Exception:
+            notif = None
+        xp = min(FLAP_XP_CAP, pipes) if seconds >= FLAP_MIN_SECONDS else 0
+        if xp:
+            try:
+                await grant_xp(uid, xp, channel=notif)
+            except Exception:
+                log.exception("flappy xp failed")
+        unlocked = []
+        for ach_id, ok in (("flappy_10", pipes >= 10), ("flappy_50", pipes >= 50), ("flappy_100", pipes >= 100)):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("flappy achievement failed")
+        if new_best and pipes > prev_record and pipes >= FLAP_RECORD_MIN and notif:
+            try:
+                await notif.send(
+                    f"🐦 **{_dash_name(uid)}** just flapped through **{pipes:,}** pipes in Flappy Degen — "
+                    f"a new server record. `_flappy` if you think you can beat it.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+        result = {"ok": True, "pipes": pipes, "coins": coins, "perfects": perfects, "seconds": round(seconds, 1),
+                  "pipe_part": pipe_part, "coin_part": coin_part, "perfect_part": perfect_part,
+                  "capped": pipe_part + coin_part + perfect_part > FLAP_RUN_CAP, "hype": hype, "payout": payout,
+                  "daily_capped": base * hype > left, "today": today + payout, "daily_cap": FLAP_DAILY_CAP,
+                  "balance": int(balance), "xp": int(xp), "best": max(prev_best, pipes), "new_best": new_best,
+                  "record": new_best and pipes > prev_record, "achievements": unlocked,
+                  "stats": _flap_public_stats(g, uid_s), "boards": _flap_boards(g, uid_s)}
+        _flap_done[run_id] = {**result, "_uid": uid, "_ts": now}
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_flappy(message: discord.Message, rest: str):
+    """_flappy — link to Flappy Degen on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🐦 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🐦 **Flappy Degen** — tap to flap through the candles. Every pipe pays, perfect passes pay more, "
+        f"and the leaderboard is watching: <{base}/games/flappy>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -30005,7 +30253,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "videopoker": _vp_public_stats(data["videopoker"], uid_s),
                 "nightrun": _nr_public_stats(data["nightrun"], uid_s),
                 "mines": _mines_public_stats(data["mines"], uid_s),
-                "reels": _reels_public_stats(data["reels"], uid_s)}
+                "reels": _reels_public_stats(data["reels"], uid_s),
+                "flappy": _flap_public_stats(data["flappy"], uid_s)}
     section("games", _games)
 
     return out
@@ -32300,7 +32549,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -33472,6 +33721,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("reels", "vegas", "wolfslots"):
         await _handle_reels(message, rest)
+        return True
+    if cmd_name in ("flappy", "flap", "flappydegen"):
+        await _handle_flappy(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)

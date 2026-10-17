@@ -373,6 +373,8 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     var gm = mi && mi.games ? n(mi.games) + ' games · best cash-out ' + (mi.best_mult ? Number(mi.best_mult).toFixed(2) + '×' : '—') + (mi.best_win ? ' · biggest win ' + n(mi.best_win) : '') : 'flip tiles, dodge the bombs';
     var rl = g && g.reels;
     var gr = rl && rl.spins ? n(rl.spins) + ' spins · biggest win ' + (rl.best_win ? n(rl.best_win) + ' (' + Math.round(rl.best_mult).toLocaleString('en-US') + '×)' : '—') + (rl.features ? ' · ' + n(rl.features) + ' free-spin round' + (rl.features > 1 ? 's' : '') : '') : 'wild wolves, tripled free spins';
+    var fl = g && g.flappy;
+    var gf = fl && fl.runs ? 'Best ' + n(fl.best) + ' pipe' + (fl.best === 1 ? '' : 's') + ' · ' + n(fl.runs) + ' flight' + (fl.runs > 1 ? 's' : '') + ' · paid today ' + n(fl.today) + ' of ' + n(fl.daily_cap) : 'flap through the candles';
     var w = g && g.nightrun;
     var gw = w ? (w.stars ? '★ ' + n(w.stars) + ' of ' + n(w.max_stars) + ' · ' + n(w.cars) + ' car' + (w.cars > 1 ? 's' : '') : 'No deliveries yet') + (w.endless ? ' · Midnight Run ' + (w.endless / 1000).toFixed(1) + ' km' : '') + ' · paid today ' + n(w.today) + ' of ' + n(w.daily_cap) : 'run the package across town';
     return '<ul class="rows games">' +
@@ -382,6 +384,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
       '<li><span class="r-main">🃏 Video Poker <span class="r-dim">' + gz + '</span></span><span class="r-side"><a href="/games/videopoker">Play</a></span></li>' +
       '<li><span class="r-main">💣 Mines <span class="r-dim">' + gm + '</span></span><span class="r-side"><a href="/games/mines">Play</a></span></li>' +
       '<li><span class="r-main">🐺 Wolf’s Fortune <span class="r-dim">' + gr + '</span></span><span class="r-side"><a href="/games/reels">Play</a></span></li>' +
+      '<li><span class="r-main">🐦 Flappy Degen <span class="r-dim">' + gf + '</span></span><span class="r-side"><a href="/games/flappy">Play</a></span></li>' +
       '</ul>';
   }
 
