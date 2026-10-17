@@ -25,6 +25,7 @@ import hashlib
 import re
 import secrets
 import base64
+import math
 from datetime import datetime, timezone, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -3172,6 +3173,9 @@ ACHIEVEMENTS = {
     "pnd_double":    {"emoji":"💸", "name":"Doubled Up",           "desc":"Make +100% in one Pump & Dump round",      "reward":2000},
     "vp_quads":      {"emoji":"🃏", "name":"Four of a Kind",       "desc":"Hit four of a kind or better in Video Poker", "reward":1000},
     "vp_royal":      {"emoji":"👑", "name":"Royal Flush",          "desc":"Hit a royal flush in Video Poker",          "reward":10000},
+    "mines_first":   {"emoji":"💣", "name":"Sweeper",              "desc":"Cash out a game of Mines",                 "reward":200},
+    "mines_10x":     {"emoji":"🧨", "name":"Steady Hands",         "desc":"Cash out at 10× or more in Mines",          "reward":1000},
+    "mines_100x":    {"emoji":"💥", "name":"Bomb Squad",           "desc":"Cash out at 100× or more in Mines",         "reward":10000},
     "nr_first":      {"emoji":"📦", "name":"Package Delivered",    "desc":"Deliver a route in Night Run",             "reward":300},
     "nr_clean":      {"emoji":"🧼", "name":"Not a Scratch on It",  "desc":"Deliver 100% of the load on Night Run route 3 or later", "reward":2500},
     "nr_allstars":   {"emoji":"🌙", "name":"Five-Star Driver",     "desc":"Earn every star in Night Run",             "reward":7500},
@@ -26769,6 +26773,7 @@ def _web_games_load() -> dict:
     for k in ("garage", "daily", "runs"):
         nr.setdefault(k, {})
     _vp_store(data)
+    _mines_store(data)
     return data
 
 
@@ -26795,6 +26800,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _city_dispatch(uid, action, payload)
     if game == "nightrun":
         return await _nr_dispatch(uid, action, payload)
+    if game == "mines":
+        return await _mines_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27276,6 +27283,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"📈 **Pump & Dump** — trade a penny stock for 60 seconds: <{base}/games/pumpdump>\n"
         f"🃏 **Video Poker** — Jacks or Better, royal flush pays 800×: <{base}/games/videopoker>\n"
         f"🌙 **Night Run** — run the package across town, unlock and buy cars: <{base}/games/nightrun>\n"
+        f"💣 **Mines** — flip tiles, dodge bombs, cash out before it blows: <{base}/games/mines>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -27520,6 +27528,254 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💣 WEB GAME: MINES — real coin bets on a 5×5 grid.
+# Pick a bet and how many bombs (1–24). Every safe tile you flip raises the
+# multiplier; cash out whenever you like, or hit a bomb and lose the bet.
+# Everything is decided on the server: the bet is taken at the start, the bomb
+# positions live here, and the page only says which tile it flipped.
+# Provably fair, like Video Poker: before each game the page is shown
+# sha256(server_seed) (the "seal"). The bombs are the first N tiles of 0..24
+# sorted by sha256(f"{server_seed}:{client_seed}:{tile}"), with client_seed
+# chosen by the page at start. After the game the seed is revealed so anyone can
+# check the bombs were fixed before the first flip and never moved.
+# Multiplier after k safe flips with m bombs = (fair odds) × 0.97, rounded DOWN to
+# the cent: C(25,k) / C(25-m,k) × 0.97. So every way of playing pays back 97%
+# over time — the house keeps 3%.
+# ─────────────────────────────────────────────────────────────────────────────
+MINES_TILES = 25
+MINES_MIN_BET = 10
+MINES_MAX_BET = 25_000
+MINES_MAX_WIN = 2_500_000        # a single game can't pay more than this; it cashes out for you at the cap
+MINES_EDGE_PCT = 3
+MINES_ANNOUNCE_WIN = 250_000     # announce wins this big, or any 100×+ cash-out
+_mines_last: dict[int, float] = {}
+
+
+def mines_mult_cents(mines: int, safe: int) -> int:
+    """Multiplier × 100 after `safe` safe flips with `mines` bombs (house edge included).
+    Mirrored in bot/web/mines.html (display only — the server's number is what pays)."""
+    if safe <= 0:
+        return 100
+    return (math.comb(MINES_TILES, safe) * (100 - MINES_EDGE_PCT)) // math.comb(MINES_TILES - mines, safe)
+
+
+def mines_layout(server_seed: str, client_seed: str, mines: int) -> list:
+    """Bomb tiles for a game. Mirrored in bot/web/mines.html for verification."""
+    order = sorted(range(MINES_TILES), key=lambda t: hashlib.sha256(f"{server_seed}:{client_seed}:{t}".encode()).hexdigest())
+    return sorted(order[:mines])
+
+
+def _mines_store(data: dict) -> dict:
+    g = data.setdefault("mines", {})
+    for k in ("stats", "seeds", "active", "last", "recent"):
+        g.setdefault(k, {})
+    return g
+
+
+def _mines_next_seal(g: dict, uid_s: str) -> str:
+    if uid_s not in g["seeds"]:
+        g["seeds"][uid_s] = secrets.token_hex(32)
+    return hashlib.sha256(g["seeds"][uid_s].encode()).hexdigest()
+
+
+def _mines_board(g: dict, uid_s: str) -> dict:
+    rows = [(int(s.get("best_win", 0)), u, s.get("best_mult", 0)) for u, s in g["stats"].items()
+            if int(s.get("best_win", 0)) > 0 and _is_member(None, u)]
+    rows.sort(reverse=True)
+    return {"top": [{"name": _dash_name(u), "win": w, "mult": round(m / 100, 2), "you": u == uid_s} for w, u, m in rows[:10]]}
+
+
+def _mines_public_stats(g: dict, uid_s: str) -> dict:
+    s = g["stats"].get(uid_s, {})
+    return {"games": int(s.get("games", 0)), "wagered": int(s.get("wagered", 0)), "won": int(s.get("won", 0)),
+            "best_win": int(s.get("best_win", 0)), "best_mult": round(int(s.get("best_mult", 0)) / 100, 2),
+            "booms": int(s.get("booms", 0))}
+
+
+def _mines_active_public(act: dict) -> dict:
+    return {"game_id": act["game_id"], "bet": act["bet"], "mines": act["mines"], "revealed": act["revealed"],
+            "mult": mines_mult_cents(act["mines"], len(act["revealed"])), "seal": act["seal"], "client_seed": act["client_seed"]}
+
+
+async def _mines_finish(uid: int, g: dict, act: dict, boom: bool, hit_tile=None) -> dict:
+    """Close a game (bust or cash-out), pay, and do the casino bookkeeping."""
+    uid_s = str(uid)
+    bet, safe = int(act["bet"]), len(act["revealed"])
+    mult = 0 if boom else mines_mult_cents(act["mines"], safe)
+    payout = 0 if boom else min(MINES_MAX_WIN, bet * mult // 100)
+    balance = economy.add(uid, payout, "mines win") if payout else economy.balance(uid)
+    g["active"].pop(uid_s, None)
+    s = g["stats"].setdefault(uid_s, {})
+    s["games"] = int(s.get("games", 0)) + 1
+    s["wagered"] = int(s.get("wagered", 0)) + bet
+    s["won"] = int(s.get("won", 0)) + payout
+    if boom:
+        s["booms"] = int(s.get("booms", 0)) + 1
+    new_best = payout > bet and payout > int(s.get("best_win", 0))
+    prev_record = max([int(x.get("best_win", 0)) for u, x in g["stats"].items() if u != uid_s and _is_member(None, u)] or [0])
+    if new_best:
+        s["best_win"] = payout
+    if not boom and mult > int(s.get("best_mult", 0)):
+        s["best_mult"] = mult
+    recent = g["recent"].setdefault(uid_s, [])
+    recent.insert(0, {"bet": bet, "mines": act["mines"], "safe": safe, "mult": mult, "payout": payout, "ts": int(time.time())})
+    del recent[10:]
+
+    notif = None
+    try:
+        cid = get_notification_channel_id(load_config())
+        notif = client.get_channel(int(cid)) if cid else None
+    except Exception:
+        notif = None
+    try:
+        if payout > bet:
+            economy.record_win(uid, "mines", notif)
+            track_quest_progress(uid, "games_won")
+            track_quest_progress(uid, "coins_earned", payout - bet)
+            add_tournament_score(uid, coins_earned=payout - bet, games_won=1)
+            track_economy_event("earned", payout - bet)
+        elif payout == 0:
+            economy.record_loss(uid, "mines", notif)
+        else:
+            track_quest_progress(uid, "games_played")
+        track_command_use("mines", uid)
+    except Exception:
+        log.exception("mines bookkeeping failed")
+    unlocked = []
+    for ach_id, ok in (("mines_first", not boom and safe > 0), ("mines_10x", not boom and mult >= 1000),
+                       ("mines_100x", not boom and mult >= 10000)):
+        if ok:
+            try:
+                if await _grant_achievement(uid, ach_id, notif):
+                    unlocked.append(ACHIEVEMENTS[ach_id]["name"])
+            except Exception:
+                log.exception("mines achievement failed")
+    if notif and not boom and (payout >= MINES_ANNOUNCE_WIN or mult >= 10000):
+        try:
+            await notif.send(
+                f"💣 **{_dash_name(uid)}** walked through **{act['mines']}** bomb{'s' if act['mines'] > 1 else ''} in Mines, "
+                f"cashed out at **{mult / 100:,.2f}×** and took **{payout:,}** coins"
+                f"{' — a new casino record' if payout > prev_record else ''}. `_mines` if you've got the nerve.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+    seal = _mines_next_seal(g, uid_s)
+    result = {"ok": True, "game_id": act["game_id"], "over": True, "boom": boom, "hit": hit_tile,
+              "bombs": act["bombs"], "revealed": act["revealed"], "mines": act["mines"], "safe": safe,
+              "mult": mult, "bet": bet, "payout": payout, "net": payout - bet, "capped": not boom and bet * mult // 100 > MINES_MAX_WIN,
+              "balance": int(balance), "server_seed": act["server_seed"], "client_seed": act["client_seed"],
+              "seal": act["seal"], "next_seal": seal, "new_best": new_best, "achievements": unlocked,
+              "stats": _mines_public_stats(g, uid_s), "board": _mines_board(g, uid_s), "recent": recent[:10]}
+    g["last"][uid_s] = result
+    return result
+
+
+async def _mines_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    data = _web_games_load()
+    g = _mines_store(data)
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
+        fresh = uid_s not in g["seeds"]
+        seal = _mines_next_seal(g, uid_s)
+        if fresh:
+            _save_json_file(WEB_GAMES_FILE, data)
+        act = g["active"].get(uid_s)
+        return {"ok": True, "balance": int(rec.get("balance", 0)) if rec else 0,
+                "min_bet": MINES_MIN_BET, "max_bet": MINES_MAX_BET, "max_win": MINES_MAX_WIN, "edge": MINES_EDGE_PCT,
+                "seal": seal, "stats": _mines_public_stats(g, uid_s), "board": _mines_board(g, uid_s),
+                "recent": g["recent"].get(uid_s, [])[:10], "active": _mines_active_public(act) if act else None}
+
+    if action == "start":
+        if g["active"].get(uid_s):
+            return {"ok": False, "error": "Finish the game you already have first.", "resume": True}
+        if now - _mines_last.get(uid, 0) < 0.4:
+            return {"ok": False, "error": "Easy — one game at a time."}
+        try:
+            bet = int(payload.get("bet", 0))
+            mines = int(payload.get("mines", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Pick a bet and how many bombs."}
+        if bet < MINES_MIN_BET or bet > MINES_MAX_BET:
+            return {"ok": False, "error": f"Bets are {MINES_MIN_BET:,} to {MINES_MAX_BET:,} coins."}
+        if mines < 1 or mines > MINES_TILES - 1:
+            return {"ok": False, "error": "Pick 1 to 24 bombs."}
+        bal = economy.balance(uid)
+        if bet > bal:
+            return {"ok": False, "error": f"You only have {bal:,} coins.", "balance": int(bal)}
+        _mines_last[uid] = now
+        client_seed = re.sub(r"[^A-Za-z0-9]", "", str(payload.get("client_seed", "")))[:32] or secrets.token_hex(8)
+        seal = _mines_next_seal(g, uid_s)
+        server_seed = g["seeds"].pop(uid_s)
+        balance = economy.add(uid, -bet, "mines bet")
+        act = {"game_id": secrets.token_hex(8), "bet": bet, "mines": mines, "bombs": mines_layout(server_seed, client_seed, mines),
+               "revealed": [], "server_seed": server_seed, "client_seed": client_seed, "seal": seal, "ts": now}
+        g["active"][uid_s] = act
+        _mines_next_seal(g, uid_s)
+        _save_json_file(WEB_GAMES_FILE, data)   # the bet is taken: persist the game so a restart can't eat it
+        return {"ok": True, "balance": int(balance), **_mines_active_public(act)}
+
+    if action in ("reveal", "cashout"):
+        game_id = str(payload.get("game_id", ""))
+        last = g["last"].get(uid_s)
+        if last and last.get("game_id") == game_id:
+            return last                                   # a retried request after the game ended gets the same answer
+        act = g["active"].get(uid_s)
+        if not act or act["game_id"] != game_id:
+            return {"ok": False, "error": "That game is already over."}
+        if action == "cashout":
+            if not act["revealed"]:
+                return {"ok": False, "error": "Flip at least one tile first."}
+            result = await _mines_finish(uid, g, act, boom=False)
+            _save_json_file(WEB_GAMES_FILE, data)
+            return result
+        if now - _mines_last.get(uid, 0) < 0.12:
+            return {"ok": False, "error": "Easy.", "retry": True}
+        _mines_last[uid] = now
+        try:
+            tile = int(payload.get("tile", -1))
+        except (TypeError, ValueError):
+            tile = -1
+        if tile < 0 or tile >= MINES_TILES:
+            return {"ok": False, "error": "Pick a tile."}
+        if tile in act["revealed"]:
+            return {"ok": True, "over": False, "tile": tile, "safe": True, **_mines_active_public(act)}
+        if tile in act["bombs"]:
+            result = await _mines_finish(uid, g, act, boom=True, hit_tile=tile)
+            _save_json_file(WEB_GAMES_FILE, data)
+            return result
+        act["revealed"].append(tile)
+        safe = len(act["revealed"])
+        mult = mines_mult_cents(act["mines"], safe)
+        if safe == MINES_TILES - act["mines"] or act["bet"] * mult // 100 >= MINES_MAX_WIN:
+            result = await _mines_finish(uid, g, act, boom=False)   # board cleared or win capped: cash out for them
+            result["auto"] = True
+            _save_json_file(WEB_GAMES_FILE, data)
+            return result
+        _save_json_file(WEB_GAMES_FILE, data)
+        return {"ok": True, "over": False, "tile": tile, "safe": True, **_mines_active_public(act)}
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_mines(message: discord.Message, rest: str):
+    """_mines — link to Mines on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("💣 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"💣 **Mines** — 25 tiles, you pick how many are bombs. Every safe flip raises the multiplier. "
+        f"Cash out any time, or hit a bomb and lose it all: <{base}/games/mines>\n"
+        f"Bets {MINES_MIN_BET:,}–{MINES_MAX_BET:,} coins. Every game is provably fair.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -29473,7 +29729,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                              "runs": int(p["runs"].get(uid_s, 0)),
                              "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP},
                 "videopoker": _vp_public_stats(data["videopoker"], uid_s),
-                "nightrun": _nr_public_stats(data["nightrun"], uid_s)}
+                "nightrun": _nr_public_stats(data["nightrun"], uid_s),
+                "mines": _mines_public_stats(data["mines"], uid_s)}
     section("games", _games)
 
     return out
@@ -31768,7 +32025,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -32934,6 +33191,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("citymap", "empire", "skyline"):
         await _handle_city(message, rest)
+        return True
+    if cmd_name in ("mines", "minesweeper"):
+        await _handle_mines(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)
