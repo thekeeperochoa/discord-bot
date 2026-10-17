@@ -3172,6 +3172,9 @@ ACHIEVEMENTS = {
     "pnd_double":    {"emoji":"💸", "name":"Doubled Up",           "desc":"Make +100% in one Pump & Dump round",      "reward":2000},
     "vp_quads":      {"emoji":"🃏", "name":"Four of a Kind",       "desc":"Hit four of a kind or better in Video Poker", "reward":1000},
     "vp_royal":      {"emoji":"👑", "name":"Royal Flush",          "desc":"Hit a royal flush in Video Poker",          "reward":10000},
+    "nr_first":      {"emoji":"📦", "name":"Package Delivered",    "desc":"Deliver a route in Night Run",             "reward":300},
+    "nr_clean":      {"emoji":"🧼", "name":"Not a Scratch on It",  "desc":"Deliver 100% of the load on Night Run route 3 or later", "reward":2500},
+    "nr_allstars":   {"emoji":"🌙", "name":"Five-Star Driver",     "desc":"Earn every star in Night Run",             "reward":7500},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -26757,6 +26760,9 @@ def _web_games_load() -> dict:
         g = data.setdefault(game, {})
         for k in ("best", "daily", "runs"):
             g.setdefault(k, {})
+    nr = data.setdefault("nightrun", {})
+    for k in ("garage", "daily", "runs"):
+        nr.setdefault(k, {})
     _vp_store(data)
     return data
 
@@ -26782,6 +26788,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _vp_dispatch(uid, action, payload)
     if game == "city":
         return await _city_dispatch(uid, action, payload)
+    if game == "nightrun":
+        return await _nr_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27262,6 +27270,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"🏃 **The Getaway** — outrun the feds down Wall Street: <{base}/games/getaway>\n"
         f"📈 **Pump & Dump** — trade a penny stock for 60 seconds: <{base}/games/pumpdump>\n"
         f"🃏 **Video Poker** — Jacks or Better, royal flush pays 800×: <{base}/games/videopoker>\n"
+        f"🌙 **Night Run** — run the package across town, unlock and buy cars: <{base}/games/nightrun>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -27506,6 +27515,499 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🌙 WEB GAME: NIGHT RUN — a highway delivery game on the web dashboard.
+# Pick a route, pick a car, get the package across town. Weave through traffic,
+# grab cash bags, skim past cars for near misses, and don't touch the cops.
+# Every crash costs health and spills some of the load; delivering pays by how
+# much of the load you still have. Routes unlock in order and each one unlocks
+# something (the shop, a car, nitro, hidden compartments). Cars are bought with
+# real coins in the shop, so it's also a coin sink.
+#
+# Anti-cheat follows The Getaway: the server hands out a seed and both sides build
+# the same route from it (mulberry32, integer-only decisions). The server knows
+# how many cash bags and cars were on the route, the car you're driving, and the
+# fastest a perfect run could possibly be, so claims are clamped to what a perfect
+# driver could do. Car ownership, unlocks and purchases live only on the server.
+# ─────────────────────────────────────────────────────────────────────────────
+NR_BAG_VALUE = 5               # coins per cash bag
+NR_NEAR_VALUE = 4              # coins per near miss
+NR_RUN_CAP = 5_000             # max repeatable payout per run (before Hype Train)
+NR_DAILY_CAP = 15_000          # max repeatable payout per member per day (EST)
+NR_STAR_BONUS = 300            # one-time bonus per new star, × route number
+NR_NITRO_MULT = 1.35           # top-speed multiplier while boosting
+NR_NOMINAL_V = 33              # m/s: the player speed traffic placement assumes (must match NOMINAL in the page)
+NR_RUN_TTL = 30 * 60
+NR_MIN_SECONDS = 5
+NR_XP_CAP = 80
+NR_CARGO_STAR = 80             # % of the load you must deliver for the second star
+
+# Routes. `gap` = (min, spread) meters between traffic groups; `pair` = chance a
+# group is two cars side by side; `change` = chance a car changes lanes on you.
+NR_LEVELS = [
+    {"id": 1, "name": "Downtown Loop", "length": 1800, "lanes": 4, "gap": (40, 40), "pair": 0.12,
+     "cops": 0.0, "trucks": 0.08, "change": 0.10, "pay": 700, "par": 58,
+     "blurb": "Light traffic, no cops. Learn how the car handles.",
+     "unlock": "The shop opens"},
+    {"id": 2, "name": "The Docks", "length": 2200, "lanes": 4, "gap": (34, 34), "pair": 0.20,
+     "cops": 0.04, "trucks": 0.35, "change": 0.15, "pay": 1_000, "par": 69,
+     "blurb": "Container trucks everywhere. A few cops on patrol.",
+     "unlock": "The Ricer joins your garage"},
+    {"id": 3, "name": "Bridge Run", "length": 2600, "lanes": 3, "gap": (32, 30), "pair": 0.18,
+     "cops": 0.05, "trucks": 0.12, "change": 0.15, "pay": 1_300, "par": 81, "wind": True,
+     "blurb": "Three lanes and crosswinds over the river.",
+     "unlock": "Nitro for every car"},
+    {"id": 4, "name": "Rainy Interstate", "length": 3000, "lanes": 4, "gap": (29, 28), "pair": 0.25,
+     "cops": 0.06, "trucks": 0.15, "change": 0.20, "pay": 1_700, "par": 94, "rain": True,
+     "blurb": "Wet roads, less grip, and you can't see far.",
+     "unlock": "The Box Truck joins your garage"},
+    {"id": 5, "name": "The Checkpoint", "length": 3400, "lanes": 4, "gap": (27, 26), "pair": 0.30,
+     "cops": 0.12, "trucks": 0.15, "change": 0.25, "pay": 2_200, "par": 106, "checkpoint": True,
+     "blurb": "Heavy patrols and an inspection near the end. Slow down through it.",
+     "unlock": "Hidden compartments (crashes spill half as much)"},
+]
+NR_LEVEL_BY_ID = {lv["id"]: lv for lv in NR_LEVELS}
+
+# Cars. top/accel in m/s and m/s², handling = sideways m/s, armor = health,
+# cargo = payout multiplier on delivery. `unlock` = route that gives it for free.
+NR_CARS = {
+    "beater":   {"name": "The Beater", "body": "Old sedan", "price": 0, "unlock": None,
+                 "top": 36, "accel": 7.0, "handling": 9.0, "armor": 100, "cargo": 1.0,
+                 "pros": "Cheap, honest, balanced", "cons": "Slow and fragile"},
+    "hack":     {"name": "The Hack", "body": "Taxi cab", "price": 25_000, "unlock": None,
+                 "top": 37, "accel": 7.5, "handling": 10.0, "armor": 90, "cargo": 0.7,
+                 "pros": "Cops wave cabs through checkpoints", "cons": "Small trunk"},
+    "soccer":   {"name": "Soccer Mom", "body": "Minivan", "price": 60_000, "unlock": None,
+                 "top": 34, "accel": 6.0, "handling": 7.5, "armor": 140, "cargo": 1.5,
+                 "pros": "Big cargo, takes a hit", "cons": "Slow, handles like a couch"},
+    "ricer":    {"name": "The Ricer", "body": "Tuner hatchback", "price": 0, "unlock": 2,
+                 "top": 41, "accel": 10.0, "handling": 12.5, "armor": 60, "cargo": 0.8,
+                 "pros": "Sharpest handling, double nitro tank", "cons": "Paper armor"},
+    "boxtruck": {"name": "Box Truck", "body": "Delivery truck", "price": 0, "unlock": 4,
+                 "top": 31, "accel": 4.5, "handling": 6.0, "armor": 230, "cargo": 2.2,
+                 "pros": "Huge cargo, very tough", "cons": "Slow and wide"},
+    "muscle":   {"name": "The Muscle", "body": "V8 muscle car", "price": 200_000, "unlock": None,
+                 "top": 46, "accel": 9.5, "handling": 8.5, "armor": 115, "cargo": 1.0,
+                 "pros": "Fastest thing on the road", "cons": "Twitchy and expensive"},
+}
+NR_CAR_ORDER = ["beater", "hack", "soccer", "ricer", "boxtruck", "muscle"]
+
+_nr_runs: dict[int, dict] = {}
+_nr_done: dict[str, dict] = {}
+_nr_last: dict[int, float] = {}
+
+
+def nightrun_course(seed: int, level_id: int) -> dict:
+    """Traffic and cash bags for one run. MUST stay identical to buildCourse() in
+    bot/web/nightrun.html — any change here needs the same change there.
+    traffic rows: [meet_m, lane, kind, style, speed_class, lane_change, trigger_m]
+    coin rows: [z_m, lane]"""
+    lv = NR_LEVEL_BY_ID[level_id]
+    lanes, length = lv["lanes"], lv["length"]
+    gmin, gspan = lv["gap"]
+    rng = _mulberry32(seed)
+    traffic = []
+    m = 140
+    while m < length - 60:
+        lane = int(rng() * lanes)
+        group = [lane]
+        if rng() < lv["pair"]:
+            group.append((lane + 1 + int(rng() * (lanes - 1))) % lanes)
+        for L in group:
+            r = rng()
+            kind = "cop" if r < lv["cops"] else ("truck" if r < lv["cops"] + lv["trucks"] else "car")
+            style = int(rng() * 5)
+            sp = int(rng() * 3)
+            ch = 0
+            if rng() < lv["change"]:
+                ch = 1 if L == 0 else (-1 if L == lanes - 1 else (1 if rng() < 0.5 else -1))
+            trig = 30 + int(rng() * 50)
+            traffic.append([m, L, kind, style, sp, ch, trig])
+        m += gmin + int(rng() * gspan)
+    crng = _mulberry32(seed ^ 0xA5A5A5A5)
+    coins = []
+    z = 70
+    while z < length - 40:
+        n = 5 + int(crng() * 6)
+        L = int(crng() * lanes)
+        d = 0
+        if crng() < 0.35:
+            d = 1 if L == 0 else (-1 if L == lanes - 1 else (1 if crng() < 0.5 else -1))
+        for k in range(n):
+            zz = z + k * 9
+            if zz >= length - 20:
+                break
+            coins.append([zz, L + (d if k >= n // 2 else 0)])
+        z += n * 9 + 55 + int(crng() * 70)
+    return {"traffic": traffic, "coins": coins}
+
+
+def _nr_garage(g: dict, uid_s: str, create: bool = False) -> dict:
+    rec = g["garage"].get(uid_s)
+    if rec is None:
+        rec = {"cars": ["beater"], "car": "beater", "stars": {}, "best": {}}
+        if create:
+            g["garage"][uid_s] = rec
+    rec.setdefault("cars", ["beater"])
+    rec.setdefault("car", "beater")
+    rec.setdefault("stars", {})
+    rec.setdefault("best", {})
+    return rec
+
+
+def _nr_cleared(rec: dict, level_id: int) -> bool:
+    return bool(int(rec["stars"].get(str(level_id), 0)) & 1)
+
+
+def _nr_perks(rec: dict) -> dict:
+    return {"shop": _nr_cleared(rec, 1), "nitro": _nr_cleared(rec, 3), "stash": _nr_cleared(rec, 5)}
+
+
+def _nr_star_count(rec: dict) -> int:
+    return sum(bin(int(v) & 7).count("1") for v in rec["stars"].values())
+
+
+def _nr_grant_unlocks(rec: dict) -> list:
+    """Give any route-unlocked cars the member has earned but doesn't have yet."""
+    got = []
+    for cid in NR_CAR_ORDER:
+        lvl = NR_CARS[cid]["unlock"]
+        if lvl and _nr_cleared(rec, lvl) and cid not in rec["cars"]:
+            rec["cars"].append(cid)
+            got.append(cid)
+    return got
+
+
+def _nr_today_earned(g: dict, uid_s: str) -> int:
+    rec = g["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _nr_board(g: dict, uid_s: str) -> dict:
+    rows = []
+    for u, rec in g["garage"].items():
+        stars = _nr_star_count(_nr_garage(g, u))
+        if stars <= 0 or not _is_member(None, u):
+            continue
+        total = sum(float(t) for t in rec.get("best", {}).values())
+        rows.append((-stars, total, u))
+    rows.sort()
+    top = [{"name": _dash_name(u), "stars": -s, "you": u == uid_s} for s, _, u in rows[:10]]
+    rank = next((i + 1 for i, (_, _, u) in enumerate(rows) if u == uid_s), None)
+    return {"top": top, "rank": rank, "of": len(rows)}
+
+
+def _nr_cars_public(rec: dict) -> list:
+    perks = _nr_perks(rec)
+    out = []
+    for cid in NR_CAR_ORDER:
+        c = NR_CARS[cid]
+        owned = cid in rec["cars"]
+        if owned:
+            status = "selected" if rec["car"] == cid else "owned"
+        elif c["unlock"]:
+            status = "locked"
+        else:
+            status = "buy" if perks["shop"] else "shop_locked"
+        out.append({"id": cid, "name": c["name"], "body": c["body"], "price": c["price"],
+                    "unlock": c["unlock"], "unlock_name": NR_LEVEL_BY_ID[c["unlock"]]["name"] if c["unlock"] else None,
+                    "top": c["top"], "accel": c["accel"], "handling": c["handling"], "armor": c["armor"],
+                    "cargo": c["cargo"], "pros": c["pros"], "cons": c["cons"], "status": status})
+    return out
+
+
+def _nr_levels_public(rec: dict) -> list:
+    out = []
+    for lv in NR_LEVELS:
+        mask = int(rec["stars"].get(str(lv["id"]), 0))
+        best = rec["best"].get(str(lv["id"]))
+        out.append({"id": lv["id"], "name": lv["name"], "blurb": lv["blurb"], "length": lv["length"],
+                    "lanes": lv["lanes"], "pay": lv["pay"], "par": lv["par"], "unlock": lv["unlock"],
+                    "star_bonus": NR_STAR_BONUS * lv["id"],
+                    "open": lv["id"] == 1 or _nr_cleared(rec, lv["id"] - 1),
+                    "goals": [bool(mask & 1), bool(mask & 2), bool(mask & 4)],
+                    "best": round(float(best), 1) if best is not None else None})
+    return out
+
+
+def _nr_public(g: dict, uid_s: str, rec: dict) -> dict:
+    return {"car": rec["car"], "cars": _nr_cars_public(rec), "levels": _nr_levels_public(rec),
+            "perks": _nr_perks(rec), "stars": _nr_star_count(rec), "max_stars": 3 * len(NR_LEVELS),
+            "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP, "run_cap": NR_RUN_CAP,
+            "bag_value": NR_BAG_VALUE, "near_value": NR_NEAR_VALUE, "cargo_star": NR_CARGO_STAR,
+            "hype": int(hype_train_multiplier()), "board": _nr_board(g, uid_s)}
+
+
+def _nr_public_stats(g: dict, uid_s: str) -> dict:
+    """For the personal dashboard."""
+    rec = g["garage"].get(uid_s)
+    if not rec:
+        return {"stars": 0, "max_stars": 3 * len(NR_LEVELS), "cars": 1, "runs": 0,
+                "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP}
+    rec = _nr_garage(g, uid_s)
+    return {"stars": _nr_star_count(rec), "max_stars": 3 * len(NR_LEVELS), "cars": len(rec["cars"]),
+            "car": NR_CARS.get(rec["car"], NR_CARS["beater"])["name"], "runs": int(g["runs"].get(uid_s, 0)),
+            "today": _nr_today_earned(g, uid_s), "daily_cap": NR_DAILY_CAP}
+
+
+def nightrun_settle(run: dict, payload: dict, elapsed: float) -> dict:
+    """Turn a finished run's claims into what the server will believe. Pure, so it
+    can be tested. Returns outcome, seconds, distance, cargo, bags, near, goals mask,
+    and `valid` (False if the claims are physically impossible)."""
+    lv = NR_LEVEL_BY_ID[run["level"]]
+    car = NR_CARS[run["car"]]
+    course = nightrun_course(run["seed"], run["level"])
+    try:
+        claimed_s = float(payload.get("duration_ms", 0)) / 1000.0
+        outcome = str(payload.get("outcome", ""))
+        cargo = int(payload.get("cargo", 0))
+        bags = int(payload.get("bags", 0))
+        near = int(payload.get("near", 0))
+        dist = float(payload.get("distance", 0))
+    except (TypeError, ValueError):
+        return {"valid": False}
+    if outcome not in ("delivered", "wrecked", "busted") or claimed_s != claimed_s or dist != dist:
+        return {"valid": False}
+    seconds = max(0.0, min(claimed_s, elapsed))
+    vmax = car["top"] * (NR_NITRO_MULT if run.get("nitro") else 1.0)
+    reach = vmax * seconds                      # the farthest any driver could have gone
+    if outcome == "delivered":
+        if reach < lv["length"] * 0.98:
+            return {"valid": False}
+        dist = float(lv["length"])
+    else:
+        dist = max(0.0, min(dist, reach, float(lv["length"])))
+    cargo = max(0, min(100, cargo)) if outcome == "delivered" else 0
+    bags = max(0, min(bags, sum(1 for z, _ in course["coins"] if z <= dist + 3)))
+    near = max(0, min(near, sum(1 for t in course["traffic"] if t[0] <= dist + 400)))
+    mask = 0
+    if outcome == "delivered":
+        mask |= 1
+        if cargo >= NR_CARGO_STAR:
+            mask |= 2
+        if seconds <= lv["par"]:
+            mask |= 4
+    return {"valid": True, "outcome": outcome, "seconds": seconds, "distance": int(dist),
+            "cargo": cargo, "bags": bags, "near": near, "mask": mask}
+
+
+async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s = str(uid)
+    now = time.time()
+    economy._load()
+    data = _web_games_load()
+    g = data["nightrun"]
+
+    if action == "info":
+        rec = _nr_garage(g, uid_s)
+        if _nr_grant_unlocks(rec) and uid_s in g["garage"]:
+            _save_json_file(WEB_GAMES_FILE, data)
+        erec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
+        return {"ok": True, **_nr_public(g, uid_s, rec),
+                "balance": int(erec.get("balance", 0)) if erec else None}
+
+    if action == "select":
+        cid = str(payload.get("car", ""))
+        rec = _nr_garage(g, uid_s, create=True)
+        if cid not in NR_CARS:
+            return {"ok": False, "error": "That car doesn't exist."}
+        if cid not in rec["cars"]:
+            return {"ok": False, "error": "You don't own that car."}
+        rec["car"] = cid
+        _save_json_file(WEB_GAMES_FILE, data)
+        return {"ok": True, "car": cid, "cars": _nr_cars_public(rec)}
+
+    if action == "buy":
+        cid = str(payload.get("car", ""))
+        if now - _nr_last.get(uid, 0) < 1:
+            return {"ok": False, "error": "Easy — one thing at a time."}
+        _nr_last[uid] = now
+        rec = _nr_garage(g, uid_s)
+        c = NR_CARS.get(cid)
+        if not c:
+            return {"ok": False, "error": "That car doesn't exist."}
+        if cid in rec["cars"]:
+            return {"ok": False, "error": "You already own it."}
+        if c["unlock"]:
+            return {"ok": False, "error": f"That one isn't for sale. Deliver {NR_LEVEL_BY_ID[c['unlock']]['name']} to get it."}
+        if not _nr_perks(rec)["shop"]:
+            return {"ok": False, "error": "Deliver Downtown Loop to open the shop."}
+        bal = economy.balance(uid)
+        if bal < c["price"]:
+            return {"ok": False, "error": f"It's {c['price']:,} coins. You have {bal:,}.", "balance": int(bal)}
+        balance = economy.add(uid, -c["price"], f"night run: bought {c['name']}")
+        try:
+            track_economy_event("spent", c["price"])
+        except Exception:
+            pass
+        rec = _nr_garage(g, uid_s, create=True)
+        rec["cars"].append(cid)
+        rec["car"] = cid
+        _save_json_file(WEB_GAMES_FILE, data)
+        if c["price"] >= 100_000:
+            try:
+                cid_n = get_notification_channel_id(load_config())
+                notif = client.get_channel(int(cid_n)) if cid_n else None
+                if notif:
+                    await notif.send(f"🏎️ **{_dash_name(uid)}** just bought **{c['name']}** for "
+                                     f"**{c['price']:,}** coins. Night Run just got faster. `_nightrun`",
+                                     allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                pass
+        return {"ok": True, "car": cid, "balance": int(balance), "cars": _nr_cars_public(rec)}
+
+    if action == "start":
+        if now - _nr_last.get(uid, 0) < 1.5:
+            return {"ok": False, "error": "Slow down — one run at a time."}
+        try:
+            level_id = int(payload.get("level", 0))
+        except (TypeError, ValueError):
+            level_id = 0
+        lv = NR_LEVEL_BY_ID.get(level_id)
+        if not lv:
+            return {"ok": False, "error": "Pick a route."}
+        rec = _nr_garage(g, uid_s)
+        if level_id > 1 and not _nr_cleared(rec, level_id - 1):
+            return {"ok": False, "error": f"Deliver {NR_LEVEL_BY_ID[level_id - 1]['name']} first."}
+        cid = str(payload.get("car", rec["car"]))
+        if cid not in rec["cars"]:
+            return {"ok": False, "error": "You don't own that car."}
+        _nr_last[uid] = now
+        for rid in [r for r, res in _nr_done.items() if now - res.get("_ts", 0) > 600]:
+            _nr_done.pop(rid, None)
+        perks = _nr_perks(rec)
+        run = {"run_id": secrets.token_hex(12), "seed": random.getrandbits(32), "started": now,
+               "level": level_id, "car": cid, "nitro": perks["nitro"], "stash": perks["stash"]}
+        _nr_runs[uid] = run   # starting a new run abandons any unfinished one
+        c = NR_CARS[cid]
+        cfg = {k: lv[k] for k in ("length", "lanes", "pair", "cops", "trucks", "change", "par", "pay")}
+        cfg.update(gap=list(lv["gap"]), name=lv["name"], wind=bool(lv.get("wind")), rain=bool(lv.get("rain")),
+                   checkpoint=bool(lv.get("checkpoint")), nominal=NR_NOMINAL_V, nitro_mult=NR_NITRO_MULT)
+        return {"ok": True, "run_id": run["run_id"], "seed": run["seed"], "level": level_id, "car": cid,
+                "nitro": perks["nitro"], "stash": perks["stash"], "cfg": cfg,
+                "stats": {k: c[k] for k in ("top", "accel", "handling", "armor", "cargo")}}
+
+    if action == "finish":
+        run_id = str(payload.get("run_id", ""))
+        if run_id in _nr_done and _nr_done[run_id].get("_uid") == uid:
+            return {k: v for k, v in _nr_done[run_id].items() if not k.startswith("_")}
+        run = _nr_runs.get(uid)
+        if not run or run["run_id"] != run_id:
+            return {"ok": False, "error": "That run isn't active anymore. Start a new one."}
+        _nr_runs.pop(uid, None)
+        if now - run["started"] > NR_RUN_TTL:
+            return {"ok": False, "error": "That run expired. Start a new one."}
+        st = nightrun_settle(run, payload, now - run["started"])
+        if not st.get("valid"):
+            return {"ok": False, "error": "That run didn't add up, so it wasn't counted."}
+        lv = NR_LEVEL_BY_ID[run["level"]]
+        car = NR_CARS[run["car"]]
+        counts = st["seconds"] >= NR_MIN_SECONDS
+        deliver_part = int(round(lv["pay"] * car["cargo"] * st["cargo"] / 100)) if st["outcome"] == "delivered" else 0
+        bag_part = st["bags"] * NR_BAG_VALUE
+        if st["outcome"] != "delivered":
+            bag_part //= 2                      # you dropped half the cash bailing out
+        near_part = st["near"] * NR_NEAR_VALUE
+        base = min(deliver_part + bag_part + near_part, NR_RUN_CAP) if counts else 0
+        hype = int(hype_train_multiplier())
+        today = _nr_today_earned(g, uid_s)
+        left = max(0, NR_DAILY_CAP - today)
+        repeat_pay = max(0, min(base * hype, left))
+
+        rec = _nr_garage(g, uid_s, create=True)
+        key = str(run["level"])
+        old_mask = int(rec["stars"].get(key, 0))
+        new_bits = st["mask"] & ~old_mask
+        new_stars = bin(new_bits).count("1")
+        star_pay = new_stars * NR_STAR_BONUS * lv["id"]       # one-time, outside the daily cap
+        rec["stars"][key] = old_mask | st["mask"]
+        prev_best = rec["best"].get(key)
+        new_best = st["outcome"] == "delivered" and (prev_best is None or st["seconds"] < float(prev_best))
+        if new_best:
+            rec["best"][key] = round(st["seconds"], 2)
+        unlocked_cars = _nr_grant_unlocks(rec)
+        payout = repeat_pay + star_pay
+        balance = economy.balance(uid)
+        if payout > 0:
+            balance = economy.add(uid, payout, "web game: night run")
+            try:
+                track_economy_event("earned", payout)
+            except Exception:
+                pass
+        g["daily"][uid_s] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + repeat_pay}
+        g["runs"][uid_s] = int(g["runs"].get(uid_s, 0)) + 1
+        _save_json_file(WEB_GAMES_FILE, data)
+        try:
+            track_command_use("nightrun", uid)
+        except Exception:
+            pass
+
+        unlocks = []
+        if new_bits & 1:                         # first delivery of this route
+            unlocks.append(lv["unlock"])
+        notif = None
+        try:
+            cid_n = get_notification_channel_id(load_config())
+            notif = client.get_channel(int(cid_n)) if cid_n else None
+        except Exception:
+            notif = None
+        xp = min(NR_XP_CAP, st["distance"] // 40) if counts else 0
+        if xp:
+            try:
+                await grant_xp(uid, xp, channel=notif)
+            except Exception:
+                log.exception("night run xp failed")
+        total_stars = _nr_star_count(rec)
+        achievements = []
+        for ach_id, ok in (("nr_first", st["outcome"] == "delivered"),
+                           ("nr_clean", st["outcome"] == "delivered" and st["cargo"] >= 100 and run["level"] >= 3),
+                           ("nr_allstars", total_stars >= 3 * len(NR_LEVELS))):
+            if ok:
+                try:
+                    if await _grant_achievement(uid, ach_id, notif):
+                        achievements.append(ACHIEVEMENTS[ach_id]["name"])
+                except Exception:
+                    log.exception("night run achievement failed")
+        if new_stars and total_stars >= 3 * len(NR_LEVELS) and notif:
+            try:
+                await notif.send(f"🌙 **{_dash_name(uid)}** just earned every star in **Night Run**. "
+                                 f"All {len(NR_LEVELS)} routes, perfect. `_nightrun`",
+                                 allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                pass
+
+        result = {"ok": True, "outcome": st["outcome"], "seconds": round(st["seconds"], 1),
+                  "distance": st["distance"], "cargo": st["cargo"], "bags": st["bags"], "near": st["near"],
+                  "deliver_part": deliver_part, "bag_part": bag_part, "near_part": near_part,
+                  "capped": deliver_part + bag_part + near_part > NR_RUN_CAP, "counts": counts,
+                  "hype": hype, "repeat_pay": repeat_pay, "star_pay": star_pay, "payout": payout,
+                  "daily_capped": counts and base * hype > left, "today": today + repeat_pay,
+                  "daily_cap": NR_DAILY_CAP, "balance": int(balance), "xp": int(xp),
+                  "goals": [bool(st["mask"] & 1), bool(st["mask"] & 2), bool(st["mask"] & 4)],
+                  "new_goals": [bool(new_bits & 1), bool(new_bits & 2), bool(new_bits & 4)],
+                  "new_best": new_best, "best": rec["best"].get(key),
+                  "unlocks": unlocks, "new_cars": [NR_CARS[c]["name"] for c in unlocked_cars],
+                  "achievements": achievements, **_nr_public(g, uid_s, rec)}
+        _nr_done[run_id] = {**result, "_uid": uid, "_ts": now}
+        return result
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _handle_nightrun(message: discord.Message, rest: str):
+    """_nightrun — link to Night Run on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🌙 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🌙 **Night Run** — get the package across town. Weave through traffic, grab the cash, "
+        f"don't touch the cops: <{base}/games/nightrun>\n"
+        f"5 routes, 6 cars, 15 stars. Pays up to {NR_DAILY_CAP:,} a day, plus a bonus for every new star.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -28306,7 +28808,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "pumpdump": {"best": round(int(pb) / 100, 1) if pb is not None else None,
                              "runs": int(p["runs"].get(uid_s, 0)),
                              "today": _pnd_today_earned(p, uid_s), "daily_cap": PND_DAILY_CAP},
-                "videopoker": _vp_public_stats(data["videopoker"], uid_s)}
+                "videopoker": _vp_public_stats(data["videopoker"], uid_s),
+                "nightrun": _nr_public_stats(data["nightrun"], uid_s)}
     section("games", _games)
 
     return out
@@ -30601,6 +31104,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
+    "nightrun", "nr", "drive", "garage",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -31766,6 +32270,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("citymap", "empire", "skyline"):
         await _handle_city(message, rest)
+        return True
+    if cmd_name in ("nightrun", "nr", "drive", "garage"):
+        await _handle_nightrun(message, rest)
         return True
     if cmd_name in ("arcade", "webgames"):
         await _handle_arcade(message, rest)

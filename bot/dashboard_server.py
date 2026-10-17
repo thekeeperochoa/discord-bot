@@ -85,11 +85,13 @@ _GAME_PROVIDER = None
 _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "pumpdump": Path(__file__).resolve().parent / "web" / "pumpdump.html",
           "videopoker": Path(__file__).resolve().parent / "web" / "videopoker.html",
-          "city": Path(__file__).resolve().parent / "web" / "city.html"}
+          "city": Path(__file__).resolve().parent / "web" / "city.html",
+          "nightrun": Path(__file__).resolve().parent / "web" / "nightrun.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
-                 "city": {"state": "GET", "act": "POST"}}
+                 "city": {"state": "GET", "act": "POST"},
+                 "nightrun": {"info": "GET", "start": "POST", "finish": "POST", "buy": "POST", "select": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
