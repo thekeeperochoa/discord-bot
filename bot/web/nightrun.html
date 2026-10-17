@@ -51,6 +51,12 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
 .g.hp i{background:#7BE0A0}.g.hp.low i{background:#FF6B6B}
 .g.ld i{background:#F3D27A}
 .g.nx i{background:linear-gradient(90deg,#4FA3FF,#9FE3FF)}
+.g.bs i{background:#FF4D55}.g.fu i{background:#FFB46B}.g.fu.low i{background:#FF6B6B}
+.hstars{display:flex;gap:2px;flex:none;font:600 12px/1 "IBM Plex Sans",sans-serif;color:rgba(255,255,255,.22)}
+.hstars i{display:block;width:13px;height:12px;font-style:normal;text-align:center;overflow:hidden}
+.hstars i.on{color:#FF5A5F}.hstars.hot i.on{animation:hb .6s steps(2) infinite}
+@keyframes hb{50%{color:#6FA2FF}}
+@media (prefers-reduced-motion:reduce){.hstars.hot i.on{animation:none}}
 .toast{position:absolute;left:50%;top:84px;transform:translate(-50%,-6px);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;
   font:600 .98rem/1.2 "IBM Plex Serif",Georgia,serif;color:#16261F;background:var(--gold-ink);padding:9px 14px;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.4);
   white-space:nowrap;max-width:92%;overflow:hidden;text-overflow:ellipsis}
@@ -100,6 +106,12 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
 .goals{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--faint)}
 .goals .y{color:var(--ok)}
 .route .un{font-size:12px;color:var(--gold-ink);margin-top:5px}
+.ups{margin:4px 0 12px}
+.up{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(163,184,171,.12)}
+.up:last-child{border-bottom:0}
+.up .ut{flex:1;min-width:0;font-size:13px}.up .ut small{color:var(--faint);font-size:12px}
+.up .pips{color:var(--gold-ink);letter-spacing:2px;margin-left:4px}.up .pips .off{color:rgba(255,255,255,.18)}
+.up .btn{width:auto;min-width:118px;flex:none}
 .cars{display:grid;grid-template-columns:1fr;gap:10px;margin:8px 0}
 @media (min-width:520px){.cars{grid-template-columns:1fr 1fr}}
 .car{border:1px solid rgba(163,184,171,.18);border-radius:7px;padding:10px;background:rgba(255,255,255,.03);display:flex;flex-direction:column}
@@ -159,6 +171,9 @@ canvas#cv{display:block;width:100%;height:100%;touch-action:none}
           <div class="g hp" id="gHp"><label>Car</label><div class="t"><i id="hHp" style="width:100%"></i></div></div>
           <div class="g ld"><label>Load</label><div class="t"><i id="hLd" style="width:100%"></i></div></div>
           <div class="g nx" id="gNx"><label>Nitro</label><div class="t"><i id="hNx" style="width:0"></i></div></div>
+          <div class="g fu" id="gFu" hidden><label>Fuel</label><div class="t"><i id="hFu" style="width:100%"></i></div></div>
+          <div class="g ht" id="gHt" hidden><label>Heat</label><span class="hstars" id="hHt"></span></div>
+          <div class="g bs" id="gBs" hidden><label>Bust</label><div class="t"><i id="hBs" style="width:0"></i></div></div>
         </div>
         <div class="pill take"><small id="hTime">0:00</small><b id="hTake">+0</b><small>if you deliver</small></div>
       </div>
@@ -276,7 +291,11 @@ var CARVIS = {
   soccer:   {w:1.98, len:5.1, h:1.05, rh:1.84, cr:0.32, cf:3.7, rs:0.25, fs:0.9, inset:0.1, col:"#8E98A6", col2:"#69717E", rear:"#7A8390", rack:true},
   ricer:    {w:1.78, len:4.2, h:0.86, rh:1.3, cr:0.55, cf:2.6, rs:0.62, fs:0.7, inset:0.18, col:"#3E7BFF", col2:"#2853B8", rear:"#3466D8", spoiler:true, glow:"purple"},
   boxtruck: {w:2.35, len:6.9, h:1.05, rh:2.35, box:{len:4.7, h:3.3, col:"#ECE8DF", side:"#CFCABE", text:"FRESH PRODUCE"}, col:"#ECE8DF", col2:"#BDB8AC", rear:"#DAD5CA"},
-  muscle:   {w:1.98, len:5.0, h:0.92, rh:1.33, cr:1.4, cf:3.0, rs:0.72, fs:0.65, inset:0.22, col:"#B3121D", col2:"#7C0B13", rear:"#960F18", stripes:true, duck:true}
+  muscle:   {w:1.98, len:5.0, h:0.92, rh:1.33, cr:1.4, cf:3.0, rs:0.72, fs:0.65, inset:0.22, col:"#B3121D", col2:"#7C0B13", rear:"#960F18", stripes:true, duck:true},
+  bulletproof: {w:2.05, len:5.1, h:1.18, rh:1.98, cr:0.35, cf:3.6, rs:0.18, fs:0.8, inset:0.08, col:"#30343A", col2:"#1D2024", rear:"#262A2F", spare:true},
+  ghost:    {w:2.04, len:4.6, h:0.8, rh:1.15, cr:1.75, cf:3.1, rs:0.95, fs:0.7, inset:0.34, col:"#16171C", col2:"#0B0C0F", rear:"#101115", ledbar:true, spoiler:true, glow:"cyan"},
+  courier:  {w:0.8, len:2.1, h:0.95, rh:1.95, bike:true, col:"#E04A1A", col2:"#9A2E0E"},
+  frosty:   {w:2.2, len:6.0, h:1.05, rh:2.3, box:{len:4.4, h:2.9, col:"#F7EAF1", side:"#EED3E1", text:"MR. FROSTY", frosty:true}, col:"#F7EAF1", col2:"#D9B9C9", rear:"#F0DCE6"}
 };
 var TRAFFIC_BODY = [   // car styles 0..4
   {w:1.82, len:4.8, h:0.98, rh:1.45, cr:1.05, cf:3.1, rs:0.55, fs:0.6, inset:0.15},   // sedan
@@ -313,14 +332,29 @@ var THEMES = {
   4: {sky:["#0A0D14","#131823","#1F2632","#353D49"], fog:[42,48,58], ground:"#0B0D11", lamp:"sodium", stars:false, rain:true,
       blocks:{d:0.4, inset:[8,14], h:[5,9], len:[16,26], win:0.15, pal:"ware"}, skyline:[0.3, 0.2, 0.12]},
   5: {sky:["#120408","#260912","#43121F","#6A2A2A"], fog:[74,30,38], ground:"#100A0B", lamp:"sodium", stars:true,
-      blocks:{d:0.5, inset:[6,12], h:[5,11], len:[14,24], win:0.2, pal:"ware"}, fence:true, skyline:[0.35, 0.22, 0.14]}
+      blocks:{d:0.5, inset:[6,12], h:[5,11], len:[14,24], win:0.2, pal:"ware"}, fence:true, skyline:[0.35, 0.22, 0.14]},
+  6: {sky:["#0A0810","#1A1420","#3A2A2A","#5E4430"], fog:[70,52,40], ground:"#0E0C0B", lamp:"sodium", stars:true,
+      blocks:{d:0.55, inset:[6,12], h:[5,12], len:[14,24], win:0.2, pal:"ware"}, cranes:true, skyline:[0.4, 0.26, 0.15]},
+  7: {sky:["#03040F","#0A0F2A","#162348","#2E3F6E"], fog:[24,34,70], ground:"#0A0B12", lamp:"white", stars:true,
+      blocks:{d:0.85, inset:[4,9], h:[12,40], len:[12,22], win:0.45, pal:"city"}, skyline:[0.7, 0.5, 0.3]},
+  8: {sky:["#0B0E0C","#141A16","#1F2A24","#334038"], fog:[52,62,56], ground:"#0D0F0D", lamp:"sodium", stars:false, far:100, fog0:6,
+      blocks:{d:0.25, inset:[10,16], h:[4,7], len:[10,18], win:0.1, pal:"ware"}, search:true, skyline:[0.2, 0.14, 0.08]},
+  9: {sky:["#020A16","#062040","#0E3866","#3A5A86"], fog:[30,50,88], ground:"coast", lamp:"white", stars:true,
+      blocks:{d:0.95, inset:[2.5,5], h:[9,26], len:[18,30], win:0, pal:"rock", side:1}, skyline:[0.25, 0.16, 0.1]},
+  10:{sky:["#0A0212","#1E0830","#3C1250","#6A2468"], fog:[80,36,96], ground:"#0C0910", lamp:"warm", stars:true,
+      blocks:{d:0.9, inset:[4,9], h:[14,48], len:[12,22], win:0.55, pal:"city"}, skyline:[0.8, 0.6, 0.35]}
 };
 var SIGNS = {
   1: [["DOWNTOWN","NEXT 3 EXITS"],["WALL ST","EXIT 7"],["CHINATOWN","EXIT 9"],["MIDTOWN","KEEP LEFT"]],
   2: [["PORT TERMINAL","EXIT 12"],["DOCKS","KEEP RIGHT"],["CONTAINER YARD","1 MI"],["NO TRUCKS","LEFT LANE"]],
   3: [["HARBOR BRIDGE","NO TOLL"],["HIGH WINDS","NEXT 2 MI"],["NO STOPPING","ON BRIDGE"],["ISLAND","EXIT 1"]],
   4: [["I-95 NORTH","NEW HAVEN"],["SLOW","WET ROAD"],["REST AREA","5 MI"],["TRUCKS","USE RIGHT"]],
-  5: [["STATE LINE","3 MI"],["ALL VEHICLES","SUBJECT TO STOP"],["INSPECTION","AHEAD"],["SPEED LIMIT","55"]]
+  5: [["STATE LINE","3 MI"],["ALL VEHICLES","SUBJECT TO STOP"],["INSPECTION","AHEAD"],["SPEED LIMIT","55"]],
+  6: [["ROAD WORK","NEXT 4 MI"],["LANES CLOSED","AHEAD"],["FINES DOUBLED","IN WORK ZONES"],["MERGE","LEFT"]],
+  7: [["TUNNEL","1/2 MI"],["MIDTOWN TUNNEL","NO HAZMAT"],["LIGHTS ON","IN TUNNEL"],["EXIT 21","FINANCIAL DIST"]],
+  8: [["BORDER","2 MI"],["CUSTOMS","ALL LANES"],["LAST EXIT","BEFORE BORDER"],["PREPARE","TO STOP"]],
+  9: [["COAST HWY","SCENIC ROUTE"],["NEXT GAS","40 MI"],["CURVES","AHEAD"],["VISTA POINT","2 MI"]],
+  10:[["CITY CENTER","ALL LANES"],["STRATTON TOWER","EXIT 1"],["NO TURNING","BACK"],["DROP-OFF","AHEAD"]]
 };
 
 // ── Canvas + projection ───────────────────────────────────────────────────────
@@ -441,7 +475,7 @@ function buildVig(){
 }
 function setTheme(id){
   var t = THEMES[id] || THEMES[1]; if (t === TH && sky.width) return;
-  TH = t; FOGC = t.fog; FAR = t.rain ? 125 : 175; FOG0 = t.rain ? 18 : 32; buildSky(); initRain();
+  TH = t; FOGC = t.fog; FAR = t.far || (t.rain ? 125 : 175); FOG0 = t.fog0 != null ? t.fog0 : (t.rain ? 18 : 32); buildSky(); initRain();
 }
 
 // ── Game state ────────────────────────────────────────────────────────────────
@@ -449,17 +483,33 @@ var info = null, selLevel = 1, selCar = "beater";
 var S = {mode: "menu", cfg: null, run: null, car: "beater", stats: null, vis: CARVIS.beater, t: 0, T: [], coins: [], got: null, ci: 0,
          x: 0, vx: 0, z: 0, v: 0, hp: 100, maxHp: 100, cargo: 100, nitro: 0, nitroOK: false, stash: false, drain: 0.22,
          bags: 0, near: 0, combo: 0, inv: 0, shake: 0, flash: 0, flagged: false, warnedCp: false, scrape: false, boosting: false,
-         outcome: null, endT: 0, wallX: 9, lanes: 4, gustWarned: -1, seedLow: 0, brakeLight: false};
+         outcome: null, endT: 0, wallX: 9, lanes: 4, gustWarned: -1, seedLow: 0, brakeLight: false,
+         // phase 2: police, roadworks, tunnels, fuel
+         heat: 0, bust: 0, chasers: [], obs: [], zones: [], tunnels: [], heli: false, spawnT: 0, rbNextZ: 0, spNextZ: 0,
+         tires: 0, fuel: null, lowFuelWarned: false, scanner: false, warned: {}, reason: "", inTun: false, heatLvl: 0};
 var IN = {left: false, right: false, brake: false, boost: false};
 window.__S = S; window.__IN = IN;   // test hooks (the server never trusts the page anyway)
 var ATTRACT = null;
 
 function laneX(L){ return (L - (S.lanes - 1) / 2) * LANE; }
+function laneOf(x){ return Math.max(0, Math.min(S.lanes - 1, Math.round(x / LANE + (S.lanes - 1) / 2))); }
+function laneClosedAt(L, z){
+  for (var i = 0; i < S.zones.length; i++){ var Z = S.zones[i]; if (z > Z.z0 - 45 && z < Z.z1 && Z.closed.indexOf(L) >= 0) return true; }
+  return false;
+}
+function tunnelAt(z){ for (var i = 0; i < S.tunnels.length; i++){ var T = S.tunnels[i]; if (z >= T.z0 && z <= T.z1) return T; } return null; }
 function makeTraffic(course, cfg){
   var T = course.traffic.map(function(r){
     var t = {m: r[0], L: r[1], L0: r[1], kind: r[2], style: r[3], sp: r[4], ch: r[5], trig: r[6]};
     t.v0 = SPEEDS[t.kind][t.sp]; t.v = t.v0; t.vis = trafficVis(t); t.w = t.vis.w; t.len = t.vis.len;
-    t.z = t.m - t.v0 * (t.m / cfg.nominal); t.x = laneX(t.L); t.st = t.ch ? 0 : 3; t.sig = 0; t.bump = 0;
+    t.z = t.m - t.v0 * (t.m / cfg.nominal);
+    if (laneClosedAt(t.L, t.z) || laneClosedAt(t.L, t.z + 60)){              // never start inside a closed lane
+      for (var d = 1; d < S.lanes; d++){ var a = t.L - d, b = t.L + d;
+        if (a >= 0 && !laneClosedAt(a, t.z)){ t.L = a; break; } if (b < S.lanes && !laneClosedAt(b, t.z)){ t.L = b; break; } }
+      t.ch = 0;
+    }
+    if (t.ch && (t.L + t.ch < 0 || t.L + t.ch >= S.lanes)) t.ch = 0;
+    t.x = laneX(t.L); t.st = t.ch ? 0 : 3; t.sig = 0; t.bump = 0;
     t.minGap = 99; t.passed = false; t.hit = false; t.brake = false;
     return t;
   });
@@ -469,17 +519,60 @@ function makeTraffic(course, cfg){
   T.sort(function(a, b){ return a.z - b.z; });
   return T;
 }
+// Roadworks, tunnels, scripted roadblocks and gas cans: page-side only (they never pay anything).
+function buildFeatures(seed, cfg){
+  var r = mulberry32(seed ^ 0x5F3759DF), out = {zones: [], tunnels: [], rbs: [], cans: []}, L = cfg.length, lanes = cfg.lanes, i;
+  if (cfg.closures){ var step = (L - 500) / cfg.closures;
+    for (i = 0; i < cfg.closures; i++){
+      var z0 = Math.round(260 + i * step + r() * step * 0.35), len = 150 + Math.floor(r() * 110), nn = r() < 0.4 ? 2 : 1, left = r() < 0.5, closed = [];
+      for (var k = 0; k < nn; k++) closed.push(left ? k : lanes - 1 - k);
+      out.zones.push({z0: z0, z1: Math.min(z0 + len, L - 120), closed: closed});
+    } }
+  if (cfg.tunnels){ var ts = (L - 500) / cfg.tunnels;
+    for (i = 0; i < cfg.tunnels; i++){ var t0 = Math.round(320 + i * ts + r() * ts * 0.3); out.tunnels.push({z0: t0, z1: Math.min(t0 + 230 + Math.floor(r() * 170), L - 80)}); } }
+  for (i = 0; i < (cfg.rb || 0); i++) out.rbs.push({z: Math.round(L * (i + 1) / (cfg.rb + 1) + (r() - 0.5) * 160), gap: Math.floor(r() * lanes)});
+  if (cfg.fuel){ var fz = 480; while (fz < L - 300){ out.cans.push({z: fz, L: Math.floor(r() * lanes)}); fz += 600 + Math.floor(r() * 380); } }
+  return out;
+}
+var OBS = {cone: {w: 0.45, len: 0.45}, barrel: {w: 0.85, len: 0.85}, trailer: {w: 2.1, len: 3.2}, rb: {w: 1.9, len: 4.9},
+           spike: {w: 3.0, len: 0.7}, can: {w: 0.7, len: 0.7}};
+function addObs(kind, z, x, extra){
+  var o = {kind: kind, z: z, x: x, w: OBS[kind].w, len: OBS[kind].len, hit: false, block: kind === "barrel" || kind === "trailer" || kind === "rb"};
+  if (extra) for (var k in extra) o[k] = extra[k];
+  var i = S.obs.length; while (i > 0 && S.obs[i - 1].z > z) i--; S.obs.splice(i, 0, o); return o;
+}
+function addRoadblock(z, gap, scripted){
+  for (var L = 0; L < S.lanes; L++) if (L !== gap) addObs("rb", z, laneX(L), {rbz: z, gap: gap});
+  addObs("barrel", z + 0.5, -S.wallX + 0.7); addObs("barrel", z + 0.5, S.wallX - 0.7);
+  S.rbList.push({z: z, gap: gap, scripted: !!scripted});
+}
 function setupRun(seed, cfg, carId, stats, opts){
   S.cfg = cfg; S.lanes = cfg.lanes; S.wallX = cfg.lanes * LANE / 2 + SHOULDER;
+  var fe = buildFeatures(seed, cfg);
+  S.zones = fe.zones; S.tunnels = fe.tunnels; S.obs = []; S.rbList = [];
   var course = buildCourse(seed, cfg);
   S.T = makeTraffic(course, cfg);
-  S.coins = course.coins.map(function(c){ return {z: c[0], L: c[1], x: laneX(c[1]), got: false}; });
+  S.coins = course.coins.map(function(c){ var L = c[1];                  // cash in a closed lane slides over to the open side
+    if (laneClosedAt(L, c[0])) for (var d = 1; d < S.lanes; d++){ if (L - d >= 0 && !laneClosedAt(L - d, c[0])){ L = L - d; break; } if (L + d < S.lanes && !laneClosedAt(L + d, c[0])){ L = L + d; break; } }
+    return {z: c[0], L: L, x: laneX(L), got: false}; });
+  S.zones.forEach(function(Z){
+    Z.closed.forEach(function(L){ addObs("trailer", Z.z0, laneX(L)); for (var bz = Z.z0 + 28; bz < Z.z1 - 8; bz += 34) addObs("barrel", bz, laneX(L) + (hash(bz + L) - 0.5) * 1.2); });
+    var lo = Math.min.apply(null, Z.closed), hi = Math.max.apply(null, Z.closed);
+    var bx = lo === 0 ? laneX(hi) + LANE / 2 : laneX(lo) - LANE / 2;          // cones on the line between closed and open lanes
+    for (var cz = Z.z0 - 30; cz < Z.z1; cz += 6) addObs("cone", cz, bx + (cz < Z.z0 ? (lo === 0 ? -1 : 1) * (Z.z0 - cz) / 30 * LANE * 0.9 : 0));
+  });
+  fe.rbs.forEach(function(rb){ addRoadblock(rb.z, rb.gap, true); });
+  fe.cans.forEach(function(c){ addObs("can", c.z, laneX(c.L)); });
   S.ci = 0; S.car = carId; S.vis = CARVIS[carId] || CARVIS.beater; S.stats = stats; frameCam();
   S.t = 0; S.x = laneX(Math.floor((cfg.lanes - 1) / 2)) + (cfg.lanes % 2 ? 0 : LANE / 2); S.vx = 0; S.z = 0; S.v = 12;
   S.maxHp = stats.armor; S.hp = stats.armor; S.cargo = 100; S.nitroOK = !!opts.nitro; S.nitro = opts.nitro ? 0.5 : 0; S.stash = !!opts.stash;
-  S.drain = carId === "ricer" ? 0.11 : 0.22; S.bags = 0; S.near = 0; S.combo = 0; S.inv = 0; S.shake = 0; S.flash = 0;
+  S.drain = (carId === "ricer" ? 0.11 : 0.22) * (stats.drain || 1); S.bags = 0; S.near = 0; S.combo = 0; S.inv = 0; S.shake = 0; S.flash = 0;
   S.flagged = false; S.warnedCp = false; S.outcome = null; S.endT = 0; S.gustWarned = -1; S.seedLow = seed & 0xFFFF; S.boosting = false;
   S.cpZ = cfg.checkpoint ? Math.round(cfg.length * 0.72) : -1;
+  S.heat = Math.max(cfg.heat_start || 0, cfg.heat_floor || 0); S.bust = 0; S.chasers = []; S.spawnT = cfg.heat_start ? 0.5 : 2;
+  S.rbNextZ = 600; S.spNextZ = 450; S.tires = 0; S.fuel = cfg.fuel ? 100 : null; S.lowFuelWarned = false; S.scanner = !!opts.scanner;
+  S.warned = {}; S.reason = ""; S.inTun = false; S.heli = false; S.heatLvl = heatLevel();
+  S.ox = cfg.heat_start ? 1 : 0;   // used once: chasers already on you at the start of Tunnel Chase
   parts.length = 0;
 }
 
@@ -511,10 +604,10 @@ $("resumeBtn").addEventListener("click", resume);
 $("quitBtn").addEventListener("click", function(){ show("paused", false); S.mode = "running"; end("wrecked", true); });
 
 // ── Simulation ────────────────────────────────────────────────────────────────
-var NITRO = 1.35, CP_LIMIT = 22.35, CP_LEN = 45;
+var NITRO = 1.35, CP_LIMIT = 22.35, CP_LEN = 45, HEAT_SPEED = 36;
 var toastT = null;
 function toast(msg, bad){ var el = $("toast"); el.textContent = msg; el.classList.toggle("bad", !!bad); el.classList.add("on");
-  clearTimeout(toastT); toastT = setTimeout(function(){ el.classList.remove("on"); }, 1700); }
+  clearTimeout(toastT); toastT = setTimeout(function(){ el.classList.remove("on"); }, 1900); }
 function windAt(t){                         // crosswind gusts on the bridge: a few seconds every ~7s
   var k = Math.floor(t / 7), ph = t - k * 7;
   if (hash(k * 13 + S.seedLow) > 0.72 || k < 1) return {f: 0, k: k, ph: ph, dir: 0};
@@ -522,21 +615,39 @@ function windAt(t){                         // crosswind gusts on the bridge: a 
   return {f: f * dir, k: k, ph: ph, dir: dir};
 }
 function laneFree(t, L){
+  if (L < 0 || L >= S.lanes || laneClosedAt(L, t.z) || laneClosedAt(L, t.z + 40)) return false;
   var lo = t.z - 10, hi = t.z + t.len + 10;
   for (var i = 0; i < S.T.length; i++){ var o = S.T[i]; if (o === t) continue;
     if ((o.L === L || (o.st === 2 && o.L + o.ch === L)) && o.z < hi && o.z + o.len > lo) return false; }
+  for (i = 0; i < S.obs.length; i++){ var b = S.obs[i]; if (b.z > hi + 20) break; if (b.block && !b.hit && b.z + b.len > lo && Math.abs(b.x - laneX(L)) < 1.6) return false; }
   return true;
 }
+function blockerAhead(t){                   // distance to a roadblock / roadworks obstacle in this car's lane
+  var lo = t.z + t.len, best = 999;
+  for (var i = 0; i < S.obs.length; i++){ var b = S.obs[i]; if (b.z > lo + 90) break;
+    if (!b.block || b.hit || b.z + b.len < lo - 1) continue;
+    if (Math.abs(b.x - t.x) < (b.w + t.w) / 2 + 0.2){ best = b.z - lo; break; } }
+  return best;
+}
 function stepTraffic(h, refZ){
-  var T = S.T, i, j, t;
+  var T = S.T, i, j, t, hasObs = S.obs.length > 0;
   for (i = 1; i < T.length; i++){ t = T[i]; j = i - 1; while (j >= 0 && T[j].z > t.z){ T[j + 1] = T[j]; j--; } T[j + 1] = t; }
   for (i = 0; i < T.length; i++){
     t = T[i]; var want = t.v0 + t.bump; t.bump = Math.max(0, t.bump - 2.5 * h);
     for (j = i + 1; j < T.length; j++){
-      var o = T[j], gap = o.z - (t.z + t.len); if (gap > 32) break;
-      if (Math.abs(o.x - t.x) < (o.w + t.w) / 2 + 0.25){ if (gap < 14) want = Math.max(4, Math.min(want, o.v - (gap < 5 ? 2.5 : 0))); break; }
+      var o = T[j], gap = o.z - (t.z + t.len); if (gap > 40) break;
+      if (Math.abs(o.x - t.x) < (o.w + t.w) / 2 + 0.25){ if (gap < 30) want = Math.min(want, Math.max(0, o.v + (gap - 7) * 0.55)); break; }
+    }
+    if (hasObs && t.z > refZ - 60 && t.z < refZ + 400){                    // merge away from roadblocks and closed lanes
+      var bd = blockerAhead(t);
+      if (bd < 85){
+        if (t.st !== 1 && t.st !== 2){ var dirs = t.L <= 0 ? [1] : (t.L >= S.lanes - 1 ? [-1] : (laneX(t.L) < 0 ? [1, -1] : [-1, 1]));
+          for (var q = 0; q < dirs.length; q++) if (laneFree(t, t.L + dirs[q])){ t.ch = dirs[q]; t.st = 1; t.sig = 0.6; break; } }
+        if (bd < 16 && t.st !== 2) want = Math.min(want, Math.max(0, (bd - 4) * 0.8));
+      }
     }
     t.v += Math.max(-9 * h, Math.min(3.5 * h, want - t.v));
+    if (t.v < 0) t.v = 0;
     t.brake = want < t.v - 0.4 || t.v < t.v0 - 1.5;
     t.z += t.v * h;
     if (t.st === 0){ var rel = t.z - refZ; if (rel < t.trig && rel > 3){ if (laneFree(t, t.L + t.ch)){ t.st = 1; t.sig = 0.9; } } else if (rel <= 3) t.st = 3; }
@@ -548,40 +659,183 @@ function stepTraffic(h, refZ){
 function damage(d, spill){
   S.hp = Math.max(0, S.hp - d);
   if (spill) S.cargo = Math.max(0, S.cargo - spill * (S.stash ? 0.5 : 1));
-  if (S.hp <= 0) end("wrecked");
+  if (S.hp <= 0){ S.reason = S.heat >= 66 && S.chasers.length ? "busted" : ""; end(S.reason === "busted" ? "busted" : "wrecked"); }
 }
 function hit(d, spill, where){
   S.inv = 0.6; S.combo = 0; S.shake = Math.max(S.shake, Math.min(1, d / 22)); S.flash = 0.35;
+  addHeat(4);
   damage(d, spill);
-  var p = P(S.x + (where === "side" ? 0 : 0), 0.7, where === "back" ? 0 : S.vis.len);
+  var p = P(S.x, 0.7, where === "back" ? 0 : S.vis.len);
   if (p && !REDUCED) burst(p.x, p.y, 16, "#FFC266", 240);
   if (S.mode === "running" && spill) toast("−" + Math.round(spill * (S.stash ? 0.5 : 1)) + "% load", true);
 }
 function collide(t, lat){
   t.hit = true;
-  if (t.kind === "cop"){ toast("You hit a cop.", true); end("busted"); return; }
+  if (t.kind === "cop"){
+    if (!(S.cfg.heat > 0)){ S.reason = "cop"; toast("You hit a cop.", true); end("busted"); return; }
+    if (S.heat < 100) toast("You hit a cop. Every unit in the city is coming.", true);
+    S.heat = 100;
+    var ix = S.T.indexOf(t); if (ix >= 0) S.T.splice(ix, 1);                // that patrol car joins the chase
+    S.chasers.push(makeChaser(t.z, t.x, t.v, true));
+  }
   var len = S.vis.len, w = S.vis.w, dzp = S.z + len - t.z, dzb = t.z + t.len - S.z, dx = -lat, hurt = S.inv <= 0;
   if (Math.min(dzp, dzb) < dx){
     if (dzp < dzb){ var rel = Math.max(0, S.v - t.v); S.z = t.z - len - 0.02; S.v = Math.min(S.v, t.v * 0.92); t.bump = Math.min(5, 1 + rel * 0.25);
-      if (hurt) hit(10 + rel * 1.4, 10, "front"); }
-    else { t.z = S.z - t.len - 0.02; t.v = Math.min(t.v, S.v * 0.85); if (hurt) hit(7, 5, "back"); }
+      if (hurt && rel > 2.5) hit(10 + rel * 1.4, 10, "front"); }
+    else { var rel2 = Math.max(0, t.v - S.v); t.z = S.z - t.len - 0.02; t.v = Math.min(t.v, S.v * 0.85); if (hurt && rel2 > 2.5) hit(7, 5, "back"); }
   } else {
-    var sg = S.x >= t.x ? 1 : -1; S.x += sg * (dx + 0.02); S.vx = sg * 5; S.v *= 0.96;
-    if (hurt) hit(7, 5, "side");
+    var sg = S.x >= t.x ? 1 : -1, lv = Math.abs(S.vx); S.x += sg * (dx + 0.02); S.vx = sg * 5; S.v *= 0.96;
+    if (hurt && (lv > 2 || S.v > 6)) hit(7, 5, "side");
   }
+}
+
+// ── Police ────────────────────────────────────────────────────────────────────
+function heatLevel(){ return S.heat >= 100 ? 3 : (S.heat >= 66 ? 2 : (S.heat >= 33 ? 1 : 0)); }
+function addHeat(v){ if (S.cfg && S.cfg.heat > 0 && S.mode === "running") S.heat = Math.min(100, S.heat + v * S.cfg.heat * (S.stats.heat || 1)); }
+function copTop(){ return [0, 37, 42, 47][Math.max(1, heatLevel())] + (S.cfg.heli ? 2 : 0); }
+function makeChaser(z, x, v, fromPatrol){
+  return {z: z, x: x, v: v, vx: 0, w: COP.w, len: COP.len, vis: COP, leaving: false, stun: 0, ramCd: 0, patrol: !!fromPatrol, hitT: 0};
+}
+function clearAhead(x, z, w, dist){          // true if no traffic overlaps this path in the next `dist` meters
+  for (var i = 0; i < S.T.length; i++){ var t = S.T[i]; if (t.z > z + dist) break; if (t.z + t.len < z) continue;
+    if (Math.abs(t.x - x) < (t.w + w) / 2 + 0.3) return false; }
+  for (i = 0; i < S.obs.length; i++){ var b = S.obs[i]; if (b.z > z + dist) break; if (!b.block || b.hit || b.z + b.len < z) continue;
+    if (Math.abs(b.x - x) < (b.w + w) / 2 + 0.3) return false; }
+  return true;
+}
+function stepPolice(h){
+  var cfg = S.cfg; if (!(cfg.heat > 0)) return;
+  var lvl0 = heatLevel(), inTun = !!tunnelAt(S.z + S.vis.len / 2);
+  S.inTun = inTun;
+  // heat: speeding builds it; it cools off when nobody's close (much faster in a tunnel)
+  if (S.v > HEAT_SPEED) addHeat((S.v - HEAT_SPEED) * 0.28 * h);
+  var near = false;
+  for (var i = 0; i < S.chasers.length; i++){ var c0 = S.chasers[i]; if (!c0.leaving && c0.z > S.z - 110) near = true; }
+  S.heli = !!cfg.heli || S.heat >= 90;
+  if (inTun) S.heat -= 9 * h;
+  else if (!near){ var dec = S.v <= HEAT_SPEED ? 3.5 : 1.5; if (S.heli) dec *= 0.5; S.heat -= dec * h; }
+  S.heat = Math.max(cfg.heat_floor || 0, Math.min(100, S.heat));
+  var lvl = heatLevel();
+  if (lvl > lvl0 && lvl >= 1 && S.mode === "running") toast(["", "★ The police noticed you", "★★ Units in pursuit", "★★★ Every cop in the city"][lvl], lvl >= 2);
+  S.heatLvl = lvl;
+  // how many chasers this heat calls for
+  var want = Math.min(cfg.chase || 0, lvl), active = S.chasers.filter(function(c){ return !c.leaving; });
+  if (S.ox){ S.ox = 0; for (var k = 0; k < Math.min(2, want); k++) S.chasers.push(makeChaser(S.z - 70 - k * 18, laneX(k % S.lanes), 20)); active = S.chasers.slice(); }
+  S.spawnT -= h;
+  if (active.length < want && S.spawnT <= 0 && !inTun){
+    S.spawnT = 3.5; S.chasers.push(makeChaser(S.z - 85, laneX(Math.floor(Math.random() * S.lanes)), Math.max(S.v + 6, 30)));
+  } else if (active.length > want){
+    active.sort(function(a, b){ return a.z - b.z; }); active[0].leaving = true;
+  }
+  if (inTun) S.chasers.forEach(function(c){ if (c.z < S.z - 50) c.leaving = true; });   // lost you in the tunnel
+  var top = copTop(), pw = S.vis.w, plen = S.vis.len, bustNear = false;
+  for (i = S.chasers.length - 1; i >= 0; i--){
+    var c = S.chasers[i], dz = c.z - S.z;
+    if (dz < -260 || (c.leaving && dz < -110)){ S.chasers.splice(i, 1); if (!c.leaving){ S.spawnT = Math.max(S.spawnT, 8); if (S.mode === "running") toast("You lost one."); } continue; }
+    c.stun = Math.max(0, c.stun - h); c.ramCd = Math.max(0, c.ramCd - h);
+    var wantV, tx;
+    if (c.leaving){ wantV = Math.max(10, S.v - 12); tx = c.x; }
+    else if (dz < -12){ wantV = top; tx = S.x; }
+    else if (dz < plen * 0.6){ wantV = Math.min(top, S.v + 3); tx = S.x + (c.x >= S.x ? 1 : -1) * ((c.w + pw) / 2 - 0.4); }
+    else { wantV = Math.max(8, S.v - 6); tx = S.x; }                          // got ahead: brake-check you
+    if (c.stun > 0) wantV = Math.min(wantV, c.v);
+    // swerve around traffic instead of plowing into it
+    if (!clearAhead(c.x, c.z + c.len, c.w, 26)){
+      var bestL = -1, bestD = 1e9;
+      for (var L = 0; L < S.lanes; L++){ var lx = laneX(L); if (!clearAhead(lx, c.z + c.len, c.w, 26)) continue;
+        var dd = Math.abs(lx - c.x); if (dd < bestD){ bestD = dd; bestL = L; } }
+      if (bestL >= 0) tx = laneX(bestL); else wantV = Math.min(wantV, 14);
+    }
+    c.v += Math.max(-12 * h, Math.min(9 * h, wantV - c.v));
+    var tvx = c.stun > 0 ? 0 : Math.max(-10, Math.min(10, (tx - c.x) * 2.2));
+    c.vx += (tvx - c.vx) * Math.min(1, 8 * h); c.x += c.vx * h;
+    var mx = S.wallX - c.w / 2 - 0.1; if (c.x > mx) c.x = mx; if (c.x < -mx) c.x = -mx;
+    c.z += c.v * h;
+    // chaser vs traffic
+    for (var j = 0; j < S.T.length; j++){ var t = S.T[j]; if (t.z > c.z + c.len + 1) break; if (t.z + t.len < c.z - 1) continue;
+      var lat = Math.abs(t.x - c.x) - (t.w + c.w) / 2; if (lat >= 0) continue;
+      if (c.z < t.z){ c.z = t.z - c.len - 0.05; c.v = Math.min(c.v, t.v * 0.7); c.stun = 0.8; t.bump = 3; }
+      else { c.x += (c.x >= t.x ? 1 : -1) * (-lat + 0.05); c.v *= 0.9; c.stun = 0.4; } }
+    // chaser vs you
+    var oz = c.z < S.z + plen && c.z + c.len > S.z, plat = Math.abs(c.x - S.x) - (c.w + pw) / 2;
+    if (oz && plat < 0 && S.mode === "running"){
+      var armored = S.car === "bulletproof", dzp = S.z + plen - c.z, dzb = c.z + c.len - S.z;
+      if (Math.min(dzp, dzb) < -plat){
+        if (dzp < dzb){ var rel = Math.max(0, S.v - c.v); S.z = c.z - plen - 0.03; S.v = Math.min(S.v, c.v * 0.92); c.stun = armored ? 1.2 : 0.3;
+          if (S.inv <= 0 && rel > 2.5) hit((10 + rel * 1.2) * (armored ? 0.5 : 1), 8, "front"); }
+        else { var crel = Math.max(0, c.v - S.v); c.z = S.z - c.len - 0.03; c.v = Math.min(c.v, S.v * 0.9);
+          if (c.ramCd <= 0 && crel > 2.5){ c.ramCd = 0.9; if (S.inv <= 0) hit(armored ? 3 : 6, 4, "back"); } }
+      } else {
+        var sg = S.x >= c.x ? 1 : -1, push = -plat + 0.03;
+        if (armored){ c.x -= sg * push; c.vx = -sg * 7; c.stun = 1.0; }
+        else { S.x += sg * push * 0.7; c.x -= sg * push * 0.3; S.vx = sg * 6; }
+        if (c.ramCd <= 0 && (Math.abs(c.vx) > 2.5 || S.v > 8)){ c.ramCd = 0.9; if (S.inv <= 0) hit(armored ? 2 : 6, armored ? 0 : 4, "side"); }
+      }
+    }
+    if (!c.leaving && c.stun <= 0 && Math.abs(c.z + c.len / 2 - (S.z + plen / 2)) < 6.5 && plat < 0.8) bustNear = true;
+  }
+  // bust meter: a cop on you while you're slow
+  if (bustNear && S.v < 12) S.bust += h * (S.v < 5 ? 0.75 : 0.4) * (S.car === "bulletproof" ? 0.5 : 1);
+  else S.bust = Math.max(0, S.bust - h * 0.45);
+  if (S.bust >= 1 && S.mode === "running"){ S.reason = "boxed"; end("busted"); return; }
+  // roadblocks and spike strips when you're at full heat
+  if (cfg.roadblocks && lvl >= 3 && !inTun && S.mode === "running"){
+    if (S.z > S.rbNextZ){ var rz = S.z + 230;
+      var clash = S.rbList.some(function(r){ return Math.abs(r.z - rz) < 150; }) || tunnelAt(rz) || rz > cfg.length - 150 || laneClosedAt(0, rz) || laneClosedAt(S.lanes - 1, rz);
+      var gapL = Math.floor(Math.random() * S.lanes);
+      S.obs.forEach(function(o){ if (o.kind === "spike" && !o.hit && o.z > rz - 220 && o.z < rz && o.L === gapL) gapL = (gapL + 1) % S.lanes; });
+      if (!clash) addRoadblock(rz, gapL, false);
+      S.rbNextZ = S.z + 600 + Math.random() * 300; }
+    if (S.z > S.spNextZ){ var sz = S.z + 170 + Math.random() * 40, sl = Math.floor(Math.random() * S.lanes);
+      S.rbList.forEach(function(r){ if (r.z > sz - 40 && r.z < sz + 220 && r.gap === sl) sl = (sl + 1 + Math.floor(Math.random() * (S.lanes - 1))) % S.lanes; });
+      if (!tunnelAt(sz) && sz < cfg.length - 100) addObs("spike", sz, laneX(sl), {L: sl});
+      S.spNextZ = S.z + 450 + Math.random() * 350; }
+  }
+}
+function scannerWarn(){
+  if (!S.scanner) return;
+  for (var i = 0; i < S.obs.length; i++){ var o = S.obs[i], ahead = o.z - S.z; if (ahead > 300) break; if (ahead < 0 || o.hit) continue;
+    var key = o.kind + ":" + Math.round(o.rbz || o.z);
+    if ((o.kind === "rb" || o.kind === "spike") && !S.warned[key]){ S.warned[key] = 1;
+      if (o.kind === "rb"){ var g = o.gap, side = S.lanes === 3 ? ["left", "middle", "right"][g] : ["far left", "left", "right", "far right"][g];
+        toast("📡 Roadblock ahead · gap on the " + side, true); }
+      else toast("📡 Spike strip ahead · " + (o.L < S.lanes / 2 ? "left side" : "right side"), true); } }
+}
+function hitObstacle(o){
+  var armored = S.car === "bulletproof";
+  if (o.kind === "can"){ o.hit = true; S.fuel = Math.min(100, S.fuel + 50); var p = P(o.x, 0.6, o.z - S.z); if (p) floatText(p.x, p.y, "+ Fuel", "#FFB46B"); return; }
+  if (o.kind === "spike"){ o.hit = true; if (S.inv <= 0) hit(8, 0, "front"); S.tires = 4; toast("Tires blown!", true); return; }
+  if (o.kind === "cone"){ o.hit = true; o.fly = 1; S.v *= 0.98; damage(1, 1); return; }
+  if (o.kind === "barrel"){ o.hit = true; o.fly = 1; S.v *= 0.9; if (S.inv <= 0) hit(4, 3, "front"); return; }
+  // heavy: work trailer or roadblock car
+  var rel = S.v;
+  if (o.kind === "rb"){ addHeat(10); S.bust = Math.min(0.95, S.bust + 0.35); }
+  if (armored && o.kind === "rb"){ o.hit = true; o.fly = 1; S.v *= 0.75; if (S.inv <= 0) hit(10, 4, "front"); toast("Rammed through!"); return; }
+  var len = S.vis.len, dzp = S.z + len - o.z, dx = (S.vis.w + o.w) / 2 - Math.abs(S.x - o.x);
+  if (dzp < dx + 0.3){ S.z = o.z - len - 0.05; S.v = Math.min(S.v, 3); if (S.inv <= 0) hit(12 + rel * 1.0, 10, "front"); }
+  else { var sg = S.x >= o.x ? 1 : -1; S.x += sg * (dx + 0.03); S.vx = sg * 5; S.v *= 0.85; if (S.inv <= 0) hit(8, 5, "side"); }
 }
 function step(h){
   var c = S.stats, cfg = S.cfg, rain = !!cfg.rain, vis = S.vis;
-  S.t += h; if (S.inv > 0) S.inv -= h;
-  var boosting = IN.boost && S.nitroOK && S.nitro > 0.002 && !IN.brake;
-  var top = c.top * (boosting ? NITRO : 1);
-  if (IN.brake) S.v = Math.max(8, S.v - (rain ? 11 : 16) * h);
+  S.t += h; if (S.inv > 0) S.inv -= h; if (S.tires > 0) S.tires = Math.max(0, S.tires - h);
+  var dry = S.fuel !== null && S.fuel <= 0;
+  var boosting = IN.boost && S.nitroOK && S.nitro > 0.002 && !IN.brake && !dry;
+  var top = c.top * (boosting ? NITRO : 1) * (S.tires > 0 ? 0.72 : 1);
+  if (IN.brake) S.v = Math.max(dry ? 0 : 8, S.v - (rain ? 11 : 16) * h);
+  else if (dry) S.v = Math.max(0, S.v - 3.5 * h);
   else if (S.v < top) S.v = Math.min(top, S.v + c.accel * (boosting ? 1.8 : 1) * (1 - 0.45 * S.v / top) * h);
   else S.v = Math.max(top, S.v - 7 * h);
   if (boosting) S.nitro = Math.max(0, S.nitro - S.drain * h); else if (S.nitroOK) S.nitro = Math.min(1, S.nitro + 0.015 * h);
   S.boosting = boosting;
-  var steer = (IN.right ? 1 : 0) - (IN.left ? 1 : 0), tvx = steer * c.handling * (rain ? 0.9 : 1), grip = rain ? 3.6 : 10;
-  S.vx += (tvx - S.vx) * Math.min(1, grip * h);
+  if (S.fuel !== null && !dry){
+    S.fuel = Math.max(0, S.fuel - S.v * h * 0.024 * (c.fuel || 1) * (boosting ? 1.7 : 1));
+    if (!S.lowFuelWarned && S.fuel < 25){ S.lowFuelWarned = true; toast("Low fuel — grab a gas can", true); }
+    if (S.fuel <= 0) toast("Out of gas!", true);
+  }
+  if (dry && S.v < 1.5 && S.mode === "running"){ S.reason = "gas"; end("wrecked"); return; }
+  var steer = (IN.right ? 1 : 0) - (IN.left ? 1 : 0), hand = c.handling * (rain ? 0.9 : 1) * (S.tires > 0 ? 0.55 : 1);
+  var grip = (rain ? 3.6 : 10) * (c.grip || 1);
+  S.vx += (steer * hand - S.vx) * Math.min(1, grip * h);
   if (cfg.wind){ var wd = windAt(S.t); S.vx += wd.f * h;
     if (wd.dir && wd.k !== S.gustWarned && wd.ph > 2.1){ S.gustWarned = wd.k; toast(wd.dir > 0 ? "Crosswind →" : "← Crosswind"); } }
   S.x += S.vx * h;
@@ -600,6 +854,15 @@ function step(h){
     if (oz && lat < 0){ collide(t, lat); if (S.mode !== "running") return; }
     else if (oz && lat < t.minGap) t.minGap = lat;
   }
+  // obstacles: cones, barrels, roadworks, roadblocks, spikes, gas cans
+  for (var oi = 0; oi < S.obs.length; oi++){
+    var o = S.obs[oi]; if (o.z > S.z + len + 1) break; if (o.hit || o.z + o.len < S.z - 1) continue;
+    if (S.z + len > o.z && S.z < o.z + o.len && Math.abs(S.x - o.x) < (w + o.w) / 2){ hitObstacle(o); if (S.mode !== "running") return; }
+  }
+  if (S.obs.length > 60 && S.obs[0].z < S.z - 40) S.obs = S.obs.filter(function(q){ return q.z > S.z - 40; });
+  stepPolice(h);
+  if (S.mode !== "running") return;
+  scannerWarn();
   // cash bags
   var front = S.z + len;
   for (var k = S.ci; k < S.coins.length && S.coins[k].z <= front + 0.6; k++){
@@ -611,7 +874,7 @@ function step(h){
   if (S.cpZ > 0){
     if (!S.warnedCp && S.z > S.cpZ - 260){ S.warnedCp = true; toast(S.car === "hack" ? "Inspection ahead — cabs get waved through" : "Inspection ahead — slow to 50 mph"); }
     if (!S.flagged && front > S.cpZ && S.z < S.cpZ + CP_LEN && S.v > CP_LIMIT && S.car !== "hack"){
-      S.flagged = true; var lose = S.stash ? 12 : 25; S.cargo = Math.max(0, S.cargo - lose); toast("Flagged at inspection: −" + lose + "% load", true); S.shake = 0.4; }
+      S.flagged = true; var lose = S.stash ? 12 : 25; S.cargo = Math.max(0, S.cargo - lose); toast("Flagged at inspection: −" + lose + "% load", true); S.shake = 0.4; addHeat(20); }
   }
   if (S.z >= cfg.length) end("delivered");
 }
@@ -630,6 +893,7 @@ function end(outcome, quiet){
   S.mode = "ending"; S.outcome = outcome; S.endT = 0; clearInput();
   S.finalT = S.t; S.finalZ = Math.min(S.z, S.cfg.length);
   if (outcome === "wrecked" && !quiet) S.shake = 1;
+  if (quiet) S.reason = "quit";
   if (outcome === "busted") S.v = Math.min(S.v, 18);
   finish();
 }
@@ -649,6 +913,15 @@ function drawSkyAndGround(now){
       var side = hash(idx * 5 + 1) < 0.5 ? -1 : 1, x = side * (S.wallX + 4 + hash(idx * 7 + 2) * 70), s = sc(rz), L = (0.8 + hash(idx * 11) * 1.6) * s;
       ctx.moveTo(sx(x, s) - L, sy(0, s)); ctx.lineTo(sx(x, s) + L, sy(0, s));
     }
+    ctx.strokeStyle = "rgba(170,200,255,.22)"; ctx.lineWidth = 1; ctx.stroke();
+  } else if (TH.ground === "coast"){
+    ctx.fillStyle = "#0C0E10"; ctx.fillRect(0, HZ, W, H - HZ);
+    var sea = ctx.createLinearGradient(0, HZ, 0, H); sea.addColorStop(0, mixc([30, 52, 96], 0.6)); sea.addColorStop(0.35, "#0A1830"); sea.addColorStop(1, "#050C1A");
+    ctx.beginPath(); groundPath(-900, -(S.wallX + 1.5), nearZ, FAR); fillPath(sea);
+    ctx.beginPath(); var b2 = Math.floor((S.z - 10) / 6);
+    for (var j = 0; j < 80; j++){ var id2 = b2 + j, rz2 = id2 * 6 - S.z + 5 * hash(id2 * 97 + 3); if (rz2 < nearZ + 1 || rz2 > FAR) continue;
+      var x2 = -(S.wallX + 4 + hash(id2 * 7 + 2) * 90), s2 = sc(rz2), L2 = (0.8 + hash(id2 * 11) * 1.6) * s2;
+      ctx.moveTo(sx(x2, s2) - L2, sy(0, s2)); ctx.lineTo(sx(x2, s2) + L2, sy(0, s2)); }
     ctx.strokeStyle = "rgba(170,200,255,.22)"; ctx.lineWidth = 1; ctx.stroke();
   } else { ctx.fillStyle = TH.ground; ctx.fillRect(0, HZ, W, H - HZ); }
 }
@@ -671,7 +944,7 @@ function drawRoad(now){
   // lamp pools + wet reflections
   var spr = G[TH.lamp] || G.warm;
   for (var l = Math.floor((d + FAR) / 50); l >= Math.floor((d - 10) / 50) && Q > 0; l--){
-    var lz = l * 50 - d + 20; if (lz < nearZ + 0.5) continue;
+    var lz = l * 50 - d + 20; if (lz < nearZ + 0.5 || (S.tunnels.length && hiddenByPortal(lz + d))) continue;
     var side = l % 2 === 0 ? -1 : 1, gp = P(side * (wx - 2.4), 0, lz); if (!gp) continue;
     var a = 1 - fogAt(lz) * 0.75, rx = 4.2 * gp.s;
     glow(spr, gp.x, gp.y, rx, Math.min(rx, rx * camH / (lz + camBack)) * 1.1, 0.38 * a);
@@ -706,6 +979,7 @@ function drawBeams(){
 
 // one vehicle, seen from behind
 function drawCar(x, z, V, o){
+  if (V.bike) return drawBike(x, z, V, o);
   var w = V.w / 2, len = V.len, clr = 0.24, z0 = z, z1 = z + len;
   if (z1 < nearZ + 0.2) return;
   var zc = clampZ(z0), fz = fogAt(Math.max(0, z0)), rearVis = z0 >= nearZ;
@@ -723,6 +997,12 @@ function drawCar(x, z, V, o){
       [0.9, len - 1.2].forEach(function(o2){ var wp = P(sxp, 0.48, z0 + o2); if (wp){ ctx.fillStyle = "#0B0C0F"; ctx.beginPath(); ctx.ellipse(wp.x, wp.y, 0.16 * wp.s, 0.48 * wp.s, 0, 0, 6.283); ctx.fill(); } });
     }
     if (bx.h < camH) quad(P(x - w, bx.h, zc), P(x + w, bx.h, zc), P(x + w, bx.h, zb1), P(x - w, bx.h, zb1), mix(bx.col, Math.min(1, fz + 0.1)));
+    if (bx.frosty){ var cz0 = z0 + bx.len * 0.55, cb = P(x, bx.h, cz0), ct = P(x, bx.h + 1.15, cz0), sb = P(x, bx.h + 1.35, cz0);
+      if (cb && ct && sb){ var cw = 0.45 * cb.s; ctx.fillStyle = mix("#D9A35A", fz); ctx.beginPath(); ctx.moveTo(cb.x, cb.y); ctx.lineTo(ct.x - cw, ct.y); ctx.lineTo(ct.x + cw, ct.y); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = mix("#FF9CC6", fz); ctx.beginPath(); ctx.arc(sb.x, sb.y, 0.5 * sb.s, 0, 6.283); ctx.fill();
+        ctx.fillStyle = mix("#FFF4F8", fz); ctx.beginPath(); ctx.arc(sb.x - 0.15 * sb.s, sb.y - 0.18 * sb.s, 0.14 * sb.s, 0, 6.283); ctx.fill();
+        if (Q > 0) glow(G.purple, sb.x, sb.y, 1.4 * sb.s, 1.4 * sb.s, 0.35); }
+      if (rearVis) zRect(x - w, bx.h * 0.18, x + w, bx.h * 0.18 + 0.22, z0 - 0.005, mix("#7FD6E8", fz)); }
     if (rearVis){
       zRect(x - w, clr + 0.1, x + w, bx.h, z0, mix(bx.col, fz));
       ctx.beginPath(); var s0 = sc(z0);                                          // door seams / bars
@@ -730,7 +1010,7 @@ function drawCar(x, z, V, o){
         ctx.rect(sx(x - 0.02, s0), sy(bx.h - 0.1, s0), 0.04 * s0 + 0.5, (bx.h - 0.4) * s0); }
       else for (var hy = 0.7; hy < bx.h - 0.2; hy += 0.32) ctx.rect(sx(x - w + 0.1, s0), sy(hy, s0), (2 * w - 0.2) * s0, Math.max(0.6, 0.025 * s0));
       fillPath(mix(bx.corr ? "#2A2C30" : "#9A968C", fz, 0.75));
-      if (bx.text && 0.24 * s0 > 6){ ctx.fillStyle = "rgba(46,107,62," + (1 - fz).toFixed(2) + ")"; ctx.font = "600 " + (0.24 * s0).toFixed(1) + "px 'IBM Plex Sans',sans-serif";
+      if (bx.text && 0.24 * s0 > 6){ ctx.fillStyle = bx.frosty ? "rgba(214,62,128," + (1 - fz).toFixed(2) + ")" : "rgba(46,107,62," + (1 - fz).toFixed(2) + ")"; ctx.font = "600 " + (0.24 * s0).toFixed(1) + "px 'IBM Plex Sans',sans-serif";
         ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(bx.text, sx(x, s0), sy(bx.h * 0.62, s0)); }
       zRect(x - w + 0.05, 0.12, x + w - 0.05, 0.3, z0, "#1A1B1F");               // underride bar
       lights(x, w, z0, 0.42, 0.62, o, fz, 0.22);
@@ -764,8 +1044,9 @@ function drawCar(x, z, V, o){
       quad(P(x - 0.05, V.rh, rt0), P(x + 0.2, V.rh, rt0), P(x + 0.0, V.h, cr), P(x - 0.3, V.h, cr), "rgba(255,255,255,.07)");
       if (V.cr > 1.5 && !V.bed) quad(P(x - w, V.h, z0 + 0.02), P(x + w, V.h, z0 + 0.02), P(x + w, V.h, cr), P(x - w, V.h, cr), deckC); // trunk lid
     }
-    if (V.rack && V.rh < camH){ ctx.beginPath(); [-0.55, 0.55].forEach(function(o2){ var a = P(x + o2, V.rh + 0.1, Math.max(rt0 + 0.3, nearZ + 0.1)), b = P(x + o2, V.rh + 0.1, rt1 - 0.3); if (a && b){ ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); } });
-      ctx.strokeStyle = mix("#2A2C31", fz); ctx.lineWidth = Math.max(1, 0.06 * sc(Math.max(rt0, 0))); ctx.stroke(); }
+    if (V.rack && V.rh < camH){ var ra = Math.max(rt0 + 0.25, nearZ + 0.1), rb = rt1 - 0.25, rc = mix("#2A2C31", fz);
+      [-0.55, 0.49].forEach(function(o2){ quad(P(x + o2, V.rh + 0.07, ra), P(x + o2 + 0.06, V.rh + 0.07, ra), P(x + o2 + 0.06, V.rh + 0.07, rb), P(x + o2, V.rh + 0.07, rb), rc); });
+      [ra + 0.3, rb - 0.3].forEach(function(q2){ quad(P(x - 0.55, V.rh + 0.08, q2), P(x + 0.55, V.rh + 0.08, q2), P(x + 0.55, V.rh + 0.08, q2 + 0.08), P(x - 0.55, V.rh + 0.08, q2 + 0.08), rc); }); }
     if (V.taxi && rt0 + 0.6 > nearZ){ var tz = rt0 + 0.7; zRect(x - 0.36, V.rh, x + 0.36, V.rh + 0.3, tz, "#FFF3C4");
       var tp2 = P(x, V.rh + 0.15, tz); if (tp2){ glow(G.warm, tp2.x, tp2.y, 0.9 * tp2.s, 0.5 * tp2.s, 0.6);
         if (0.2 * tp2.s > 5){ ctx.fillStyle = "#3A2A08"; ctx.font = "600 " + (0.2 * tp2.s).toFixed(1) + "px 'IBM Plex Sans',sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("TAXI", tp2.x, tp2.y); } } }
@@ -781,7 +1062,9 @@ function drawCar(x, z, V, o){
   if (V.spoiler){ var sz = z0 + 0.25; zRect(x - w - 0.04, V.h + 0.28, x + w + 0.04, V.h + 0.36, sz, mix("#14161B", fz));
     zRect(x - w + 0.15, V.h, x - w + 0.24, V.h + 0.3, sz, mix("#14161B", fz)); zRect(x + w - 0.24, V.h, x + w - 0.15, V.h + 0.3, sz, mix("#14161B", fz)); }
   if (V.duck) zRect(x - w + 0.1, V.h, x + w - 0.1, V.h + 0.06, z0 + 0.05, mix(V.col2, fz));
-  lights(x, w, z0, V.h - 0.34, V.h - 0.14, o, fz, 0);
+  lights(x, w, z0, V.h - 0.34, V.h - 0.14, V.ledbar ? Object.assign({ledbar: true}, o) : o, fz, 0);
+  if (V.spare && z0 > nearZ + 0.3){ var sp = P(x, (clr + V.h) / 2 + 0.05, z0 - 0.14); if (sp){ ctx.fillStyle = "#0B0C0F"; ctx.beginPath(); ctx.arc(sp.x, sp.y, 0.36 * sp.s, 0, 6.283); ctx.fill();
+    ctx.fillStyle = mix("#3A3D44", fz); ctx.beginPath(); ctx.arc(sp.x, sp.y, 0.16 * sp.s, 0, 6.283); ctx.fill(); } }
   zRect(x - 0.24, 0.42, x + 0.24, 0.56, z0, "#E9E5DA");                                      // plate
   if (o.player && 0.1 * sc(z0) > 4){ var ps = sc(z0); ctx.fillStyle = "#1C2A55"; ctx.font = "600 " + (0.1 * ps).toFixed(1) + "px 'IBM Plex Sans',sans-serif";
     ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(o.plate || "", sx(x, ps), sy(0.49, ps)); }
@@ -796,6 +1079,9 @@ function drawCar(x, z, V, o){
 }
 function lights(x, w, z0, y1, y2, o, fz, bot){
   var on = o.brake, a = 1 - fz * 0.6, s = sc(z0);
+  if (o.ledbar){ zRect(x - w + 0.12, y2 - 0.08, x + w - 0.12, y2, z0, on ? "#FF3B3B" : "#C21622");
+    for (var lb = -1; lb <= 1; lb++){ var lp = P(x + lb * (w - 0.5), y2 - 0.04, z0); if (lp) glow(G.red, lp.x, lp.y, (on ? 1.3 : 0.9) * lp.s, 0.35 * lp.s, (on ? 0.9 : 0.6) * a); }
+    return; }
   var blink = Math.floor(o.now / 350) % 2 === 0;
   [-1, 1].forEach(function(sd){
     var lx = x + sd * (w - 0.22), sig = o.sig === sd && blink;
@@ -855,6 +1141,8 @@ function drawGantry(z, kind, k, now){
     var on = Math.floor(now / 560) % 2 === 0;
     [-1, 1].forEach(function(sd){ var lp = P(sd * (wx - 0.6), 7.85, z); if (lp){ var r = sd < 0 ? on : !on; ctx.fillStyle = r ? "#FF4D55" : "#4A8BFF";
       ctx.beginPath(); ctx.arc(lp.x, lp.y, 0.16 * lp.s, 0, 6.283); ctx.fill(); glow(r ? G.red : G.blue, lp.x, lp.y, 3 * lp.s, 3 * lp.s, 0.8); } });
+  } else if (kind === "border"){
+    signBox(-4.6, 4.6, 4.9, 7.0, z, "BORDER CONTROL", "ALL VEHICLES STOP", "#8A1E22", "#FFF3E8", fz);
   } else {
     var sg = SIGNS[S.cfg && S.cfg.theme || selLevel] || SIGNS[1], a = sg[k % sg.length], b = sg[(k + 1) % sg.length];
     signBox(-wx + 0.6, -0.3, 5.0, 7.0, z, a[0], a[1], "#1F6B3A", "#F4F6F2", fz);
@@ -900,18 +1188,155 @@ function scenery(d, now){
   var items = [], seg, z, side;
   if (TH.blocks){ var B = TH.blocks;
     for (seg = Math.floor((d - 12) / 26); seg * 26 - d < FAR; seg++){
-      for (side = -1; side <= 1; side += 2){ var kk = seg * 2 + (side > 0 ? 1 : 0); if (hash(kk + 7) > B.d) continue;
+      for (side = -1; side <= 1; side += 2){ var kk = seg * 2 + (side > 0 ? 1 : 0); if (hash(kk + 7) > B.d || (B.side && B.side !== side)) continue;
+        var wz0 = seg * 26 + hash(kk + 19) * 4; if (S.tunnels.some(function(T){ return wz0 + 30 > T.z0 - 15 && wz0 < T.z1 + 15; })) continue;
         var len = B.len[0] + hash(kk + 11) * (B.len[1] - B.len[0]), h = B.h[0] + hash(kk + 13) * (B.h[1] - B.h[0]);
         if (B.pal === "box"){ len = hash(kk + 11) < 0.5 ? 6.1 : 12.2; h = 2.6 * (1 + Math.floor(hash(kk + 13) * 4)); }
-        var pal = B.pal === "box" ? CONTAINER[Math.floor(hash(kk + 17) * CONTAINER.length)][0] : (B.pal === "city" ? ["#1C2238","#221F38","#182430","#2A2230","#1E2A2A"][Math.floor(hash(kk + 17) * 5)] : ["#24262C","#2A2724","#1F2328"][Math.floor(hash(kk + 17) * 3)]);
+        var pal = B.pal === "rock" ? ["#2A2622","#231F1C","#2E2925","#1F1C1A"][Math.floor(hash(kk + 17) * 4)] : B.pal === "box" ? CONTAINER[Math.floor(hash(kk + 17) * CONTAINER.length)][0] : (B.pal === "city" ? ["#1C2238","#221F38","#182430","#2A2230","#1E2A2A"][Math.floor(hash(kk + 17) * 5)] : ["#24262C","#2A2724","#1F2328"][Math.floor(hash(kk + 17) * 3)]);
         items.push({z: seg * 26 - d + hash(kk + 19) * 4, f: drawBlock, a: [side, seg * 26 - d + hash(kk + 19) * 4, len, h, B.inset[0] + hash(kk + 23) * (B.inset[1] - B.inset[0]), pal, B.win, kk]});
       } } }
   if (TH.cranes) for (seg = Math.floor((d - 40) / 260); seg * 260 - d + 120 < FAR + 40; seg++){ z = seg * 260 - d + 120; if (z > nearZ + 1) items.push({z: z, f: drawCrane, a: [seg % 2 ? 1 : -1, z]}); }
   if (TH.towers) for (seg = Math.floor((d - 40) / 420); seg * 420 - d + 200 < FAR + 60; seg++){ z = seg * 420 - d + 200; if (z > nearZ + 1) items.push({z: z, f: drawTower, a: [z, now]}); }
   if (S.cpZ > 0){ var cz = S.cpZ - d; if (cz > nearZ && cz < FAR) [-1, 1].forEach(function(sd){ items.push({z: cz + 6, f: function(zz){ drawCar(sd * (S.wallX + 2.8), zz, COP, {now: now}); }, a: [cz + 6]}); }); }
+  if (TH.search) for (seg = Math.floor((d - 30) / 170); seg * 170 - d + 60 < FAR + 20; seg++){ z = seg * 170 - d + 60; if (z > nearZ + 1) items.push({z: z, f: drawSearchTower, a: [seg % 2 ? 1 : -1, z, seg, now]}); }
+  S.tunnels.forEach(function(T){ var z1 = T.z1 - d, z0 = T.z0 - d; if (z1 < nearZ || z0 > FAR) return;
+    items.push({z: Math.min(z1, FAR - 1), f: drawTunnel, a: [T, now]}); if (z0 > nearZ) items.push({z: z0, f: drawPortal, a: [T]}); });
   items.sort(function(a, b){ return b.z - a.z; });
-  items.forEach(function(it){ OA = it.z > FAR - 40 ? Math.max(0, (FAR - it.z) / 40) : 1; if (OA <= 0) return; ctx.globalAlpha = OA; it.f.apply(null, it.a); });
+  items.forEach(function(it){ OA = it.f === drawTunnel ? 1 : (it.z > FAR - 40 ? Math.max(0, (FAR - it.z) / 40) : 1); if (OA <= 0) return; ctx.globalAlpha = OA; it.f.apply(null, it.a); });
   OA = 1; ctx.globalAlpha = 1;
+}
+
+// ── Phase 2 drawing: obstacles, tunnels, helicopter, searchlights, motorcycle ──
+function drawObstacle(o, z, now){
+  var p = P(o.x, 0, z); if (!p) return; var s = p.s, fz = fogAt(Math.max(0, z));
+  if (o.kind === "cone"){
+    var t = P(o.x, 0.72, z); if (!t) return; ctx.fillStyle = mix("#1A1A1A", fz); ctx.fillRect(p.x - 0.26 * s, p.y - 0.05 * s, 0.52 * s, 0.05 * s + 1);
+    ctx.fillStyle = mix("#FF7A1A", fz); ctx.beginPath(); ctx.moveTo(p.x - 0.2 * s, p.y - 0.04 * s); ctx.lineTo(p.x + 0.2 * s, p.y - 0.04 * s); ctx.lineTo(t.x, t.y); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = mix("#F4F1E8", fz); ctx.fillRect(p.x - 0.11 * s, p.y - 0.42 * s, 0.22 * s, 0.1 * s + 0.5);
+    return;
+  }
+  if (o.kind === "barrel"){
+    zRect(o.x - 0.4, 0, o.x + 0.4, 1.0, z, mix("#F07A22", fz));
+    zRect(o.x - 0.4, 0.28, o.x + 0.4, 0.4, z, mix("#F4F1E8", fz)); zRect(o.x - 0.4, 0.62, o.x + 0.4, 0.74, z, mix("#F4F1E8", fz));
+    var lt = P(o.x, 1.08, z); if (lt && Math.floor(now / 700 + o.z) % 2 === 0){ ctx.fillStyle = "#FFC266"; ctx.beginPath(); ctx.arc(lt.x, lt.y, 0.07 * s, 0, 6.283); ctx.fill(); glow(G.amber, lt.x, lt.y, 0.9 * s, 0.9 * s, 0.7 * (1 - fz)); }
+    return;
+  }
+  if (o.kind === "trailer"){
+    ctx.beginPath(); groundPath(o.x - 1.1, o.x + 1.1, clampZ(z - 0.2), z + 3.2); fillPath("rgba(0,0,0,.4)");
+    zRect(o.x - 1.05, 0.35, o.x + 1.05, 1.0, z, mix("#3A3C40", fz)); zRect(o.x - 0.1, 1.0, o.x + 0.1, 1.3, z, mix("#2A2C30", fz));
+    zRect(o.x - 1.0, 1.3, o.x + 1.0, 2.75, z, mix("#0E0F12", fz));
+    var on = Math.floor(now / 450) % 2 === 0, dir = o.x < 0 ? 1 : -1, c = P(o.x, 2.02, z); if (!c) return;
+    if (on){ ctx.fillStyle = "#FFB02E"; var aw = 0.75 * s, ah = 0.42 * s;
+      ctx.beginPath(); ctx.moveTo(c.x + dir * aw, c.y); ctx.lineTo(c.x + dir * (aw - ah), c.y - ah); ctx.lineTo(c.x + dir * (aw - ah), c.y - ah * 0.4);
+      ctx.lineTo(c.x - dir * aw, c.y - ah * 0.4); ctx.lineTo(c.x - dir * aw, c.y + ah * 0.4); ctx.lineTo(c.x + dir * (aw - ah), c.y + ah * 0.4);
+      ctx.lineTo(c.x + dir * (aw - ah), c.y + ah); ctx.closePath(); ctx.fill(); glow(G.amber, c.x, c.y, 2.2 * s, 1.4 * s, 0.85 * (1 - fz * 0.5)); }
+    stripes2(o.x - 1.05, 0.35, o.x + 1.05, 0.65, z, fz);
+    return;
+  }
+  if (o.kind === "rb"){
+    drawCar(o.x, z, COP, {now: now});
+    if (z > nearZ + 0.5){ var by = 0.55; zRect(o.x - 1.1, by, o.x + 1.1, by + 0.3, z - 0.6, mix("#F4F1E8", fz)); stripes2(o.x - 1.1, by, o.x + 1.1, by + 0.3, z - 0.6, fz); }
+    return;
+  }
+  if (o.kind === "spike"){
+    if (z < nearZ + 0.1) return;
+    ctx.beginPath(); groundPath(o.x - 1.5, o.x + 1.5, clampZ(z), z + 0.7, 0.02); fillPath(mix("#141518", fz));
+    ctx.beginPath(); for (var k = -1.4; k < 1.45; k += 0.2) groundPath(o.x + k, o.x + k + 0.07, clampZ(z + 0.1), z + 0.6, 0.03);
+    fillPath("rgba(210,220,235," + (0.8 * (1 - fz)).toFixed(2) + ")");
+    return;
+  }
+  if (o.kind === "can"){
+    var bob = REDUCED ? 0 : Math.sin(now / 300 + o.z) * 0.06, q = P(o.x, 0.35 + bob, z); if (!q) return; var r = q.s;
+    glow(G.amber, q.x, q.y, 1.4 * r, 1.4 * r, 0.6);
+    ctx.fillStyle = "#C2271E"; ctx.fillRect(q.x - 0.26 * r, q.y - 0.32 * r, 0.52 * r, 0.62 * r);
+    ctx.fillStyle = "#8A1A14"; ctx.fillRect(q.x - 0.26 * r, q.y - 0.32 * r, 0.52 * r, 0.08 * r);
+    ctx.fillStyle = "#D9D3C4"; ctx.fillRect(q.x + 0.08 * r, q.y - 0.44 * r, 0.12 * r, 0.12 * r);
+    if (0.3 * r > 6){ ctx.fillStyle = "#FFE0C2"; ctx.font = "600 " + (0.26 * r).toFixed(1) + "px 'IBM Plex Sans',sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("GAS", q.x, q.y + 0.02 * r); }
+  }
+}
+function stripes2(x1, y1, x2, y2, z, fz){
+  if (z + camBack < 0.6) return; var s = sc(z), X1 = sx(x1, s), X2 = sx(x2, s), T = sy(y2, s), B = sy(y1, s), w = (X2 - X1) / 6;
+  ctx.save(); ctx.beginPath(); ctx.rect(X1, T, X2 - X1, B - T); ctx.clip(); ctx.fillStyle = mix("#E1572A", fz);
+  for (var k = -1; k < 7; k += 2){ ctx.beginPath(); ctx.moveTo(X1 + k * w, B); ctx.lineTo(X1 + (k + 1) * w, B); ctx.lineTo(X1 + (k + 1) * w + (B - T), T); ctx.lineTo(X1 + k * w + (B - T), T); ctx.fill(); }
+  ctx.restore();
+}
+var TUN_H = 6.4;
+function drawTunnel(T, now){
+  var wx = S.wallX + 0.4, z0 = Math.max(T.z0 - S.z, nearZ + 0.05), z1 = Math.min(T.z1 - S.z, FAR); if (z1 <= z0) return;
+  var mid = fogAt(Math.max(0, (z0 + z1) / 2));
+  [-1, 1].forEach(function(sd){ ctx.beginPath(); facePath(sd * wx, z0, z1, 0, TUN_H); fillPath(mixc([66, 64, 70], mid));
+    ctx.beginPath(); facePath(sd * wx, z0, z1, 0.9, 1.6); fillPath(mixc([168, 150, 110], Math.min(1, mid + 0.1))); });
+  ctx.beginPath(); groundPath(-wx, wx, z0, z1, TUN_H); fillPath(mixc([24, 24, 30], mid));
+  ctx.beginPath(); for (var q = Math.ceil((S.z + z0) / 12) * 12; q - S.z < Math.min(z1, 90); q += 12){ var rz = q - S.z;
+    facePath(-wx, rz, rz + 0.15, 0, TUN_H); facePath(wx, rz, rz + 0.15, 0, TUN_H); }
+  fillPath("rgba(0,0,0,.25)");
+  for (q = Math.ceil((S.z + z0) / 8) * 8; q - S.z < Math.min(z1, 120); q += 8){ var lz = q - S.z;
+    [-1, 1].forEach(function(sd){ var p = P(sd * (wx - 1.3), TUN_H - 0.05, lz); if (!p) return;
+      ctx.fillStyle = "#FFD08A"; ctx.fillRect(p.x - 0.5 * p.s, p.y - 0.04 * p.s, p.s, 0.1 * p.s + 0.5);
+      if (Q > 0 && lz < 70) glow(G.sodium, p.x, p.y + 0.4 * p.s, 1.6 * p.s, 1.0 * p.s, 0.5); }); }
+}
+function drawPortal(T){
+  var z = T.z0 - S.z; if (z < nearZ + 0.1 || z > FAR) return;
+  var wx = S.wallX + 0.4, fz = fogAt(z), col = mix("#2E2D33", fz);
+  zRect(-wx - 70, 0, -wx, 30, z, col); zRect(wx, 0, wx + 70, 30, z, col); zRect(-wx, TUN_H, wx, 30, z, col);
+  zRect(-wx - 0.5, TUN_H, wx + 0.5, TUN_H + 0.6, z - 0.05, mix("#55545C", fz));
+  zRect(-wx - 0.5, 0, -wx, TUN_H, z - 0.05, mix("#55545C", fz)); zRect(wx, 0, wx + 0.5, TUN_H, z - 0.05, mix("#55545C", fz));
+  signBox(-2.6, 2.6, TUN_H + 1.0, TUN_H + 2.5, z - 0.06, "TUNNEL", "LIGHTS ON", "#14161C", "#F3D27A", fz);
+}
+function drawSearchTower(side, z, k, now){
+  var x = side * (S.wallX + 5), fz = fogAt(Math.max(0, z)), b = P(x, 0, z), t = P(x, 13, z); if (!b || !t) return;
+  ctx.strokeStyle = mixc([60, 64, 60], fz); ctx.lineWidth = Math.max(1, 0.25 * b.s); ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(t.x, t.y); ctx.stroke();
+  zRect(x - 1.2, 12.6, x + 1.2, 13.6, z, mixc([40, 44, 42], fz));
+  if (Q === 0) return;
+  var ph = now / 1700 + k * 1.9, tx = x - side * (9 + 7 * Math.sin(ph)), tz = z + 16 * Math.cos(ph * 0.8), g = P(tx, 0, tz); if (!g) return;
+  var r = 3.2 * g.s, op = ctx.globalCompositeOperation; ctx.globalCompositeOperation = "lighter";
+  var gr = ctx.createLinearGradient(t.x, t.y, g.x, g.y); gr.addColorStop(0, "rgba(230,240,255,.32)"); gr.addColorStop(1, "rgba(230,240,255,.04)");
+  ctx.globalAlpha = OA * (1 - fz * 0.6); ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(t.x - 2, t.y); ctx.lineTo(g.x - r, g.y); ctx.lineTo(g.x + r, g.y); ctx.lineTo(t.x + 2, t.y); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha = OA; ctx.globalCompositeOperation = op;
+  glow(G.white, g.x, g.y, r * 1.2, r * 0.5, 0.45 * (1 - fz * 0.6));
+}
+function drawHeli(now){
+  if (!S.heli || S.inTun || !S.cfg) return;
+  var t = now / 1000, hx = W * (0.5 + Math.sin(t * 0.35) * 0.2), hy = H * 0.09 + Math.sin(t * 0.9) * 6, sc0 = Math.min(W, H) / 520;
+  var spot = P(S.x + Math.sin(t * 0.8) * 1.2, 0, S.vis.len * 0.5 + Math.cos(t * 0.6) * 2);
+  if (spot && !REDUCED){
+    var r = 3.6 * spot.s, op = ctx.globalCompositeOperation; ctx.globalCompositeOperation = "lighter";
+    var gr = ctx.createLinearGradient(hx, hy, spot.x, spot.y); gr.addColorStop(0, "rgba(235,242,255,.26)"); gr.addColorStop(1, "rgba(235,242,255,.07)");
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(hx - 3, hy + 6); ctx.lineTo(spot.x - r, spot.y); ctx.lineTo(spot.x + r, spot.y); ctx.lineTo(hx + 3, hy + 6); ctx.closePath(); ctx.fill();
+    ctx.globalCompositeOperation = op;
+    glow(G.white, spot.x, spot.y, r * 1.3, r * 0.55, 0.55);
+  }
+  ctx.save(); ctx.translate(hx, hy); ctx.scale(sc0, sc0); ctx.fillStyle = "#0B0C12";
+  ctx.beginPath(); ctx.ellipse(0, 0, 26, 11, 0, 0, 6.283); ctx.fill();
+  ctx.fillRect(18, -3, 44, 5); ctx.fillRect(58, -12, 4, 14);
+  ctx.fillRect(-14, 10, 30, 2); ctx.fillRect(-10, 8, 2, 4); ctx.fillRect(10, 8, 2, 4);
+  ctx.fillStyle = "rgba(160,180,210,.25)"; var bl = REDUCED ? 60 : 60 * Math.abs(Math.cos(now / 40)); ctx.fillRect(-bl, -14, bl * 2, 2);
+  var on = Math.floor(now / 500) % 2 === 0; ctx.fillStyle = on ? "#FF4D55" : "#5CFF9D"; ctx.beginPath(); ctx.arc(on ? -20 : 60, on ? 2 : -10, 2, 0, 6.283); ctx.fill();
+  ctx.restore();
+  glow(on ? G.red : G.green, hx + (on ? -20 : 60) * sc0, hy + (on ? 2 : -10) * sc0, 10, 10, 0.8);
+}
+function drawBike(x, z, V, o){
+  var g = P(x, 0, z + 0.4); if (!g) return; var s = g.s, fz = fogAt(Math.max(0, z));
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.beginPath(); ctx.ellipse(g.x, g.y, 0.5 * s, 0.14 * s, 0, 0, 6.283); ctx.fill();
+  var lean = o.player ? Math.max(-0.35, Math.min(0.35, S.vx * 0.03)) : 0;
+  ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(lean);
+  ctx.fillStyle = "#0B0C0F"; ctx.beginPath(); ctx.ellipse(0, -0.33 * s, 0.08 * s, 0.33 * s, 0, 0, 6.283); ctx.fill();          // rear tyre
+  ctx.fillStyle = mix("#1C1E24", fz); ctx.fillRect(-0.16 * s, -0.86 * s, 0.32 * s, 0.24 * s);                                    // tail
+  ctx.fillStyle = mix("#E04A1A", fz); ctx.fillRect(-0.2 * s, -0.98 * s, 0.4 * s, 0.13 * s);                                       // seat cowl
+  ctx.fillStyle = o.brake ? "#FF3B3B" : "#B3161E"; ctx.fillRect(-0.1 * s, -0.8 * s, 0.2 * s, 0.07 * s);                           // tail light
+  ctx.fillStyle = "#E9E5DA"; ctx.fillRect(-0.09 * s, -0.66 * s, 0.18 * s, 0.1 * s);                                               // plate
+  ctx.fillStyle = "#3A3C42"; ctx.fillRect(0.18 * s, -0.5 * s, 0.08 * s, 0.16 * s); ctx.fillRect(-0.26 * s, -0.5 * s, 0.08 * s, 0.16 * s);   // exhausts
+  ctx.fillStyle = "#1E2533"; ctx.fillRect(-0.24 * s, -1.0 * s, 0.13 * s, 0.42 * s); ctx.fillRect(0.11 * s, -1.0 * s, 0.13 * s, 0.42 * s);    // legs
+  ctx.fillStyle = "#16171B"; ctx.beginPath(); ctx.moveTo(-0.28 * s, -1.62 * s); ctx.lineTo(0.28 * s, -1.62 * s); ctx.lineTo(0.24 * s, -0.96 * s); ctx.lineTo(-0.24 * s, -0.96 * s); ctx.closePath(); ctx.fill();   // jacket
+  ctx.fillStyle = "#6B4A2B"; ctx.fillRect(-0.19 * s, -1.5 * s, 0.38 * s, 0.4 * s);                                                // the package, on his back
+  ctx.fillStyle = "#4E3420"; ctx.fillRect(-0.19 * s, -1.33 * s, 0.38 * s, 0.04 * s);
+  ctx.fillStyle = "#16171B"; ctx.fillRect(-0.36 * s, -1.6 * s, 0.1 * s, 0.34 * s); ctx.fillRect(0.26 * s, -1.6 * s, 0.1 * s, 0.34 * s);    // arms
+  ctx.fillStyle = mix("#E04A1A", fz); ctx.beginPath(); ctx.arc(0, -1.8 * s, 0.17 * s, 0, 6.283); ctx.fill();                    // helmet
+  ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.beginPath(); ctx.arc(-0.05 * s, -1.86 * s, 0.07 * s, 0, 6.283); ctx.fill();
+  ctx.restore();
+  var tl = P(x, 0.8, z); if (tl) glow(G.red, tl.x, tl.y, (o.brake ? 1.2 : 0.7) * tl.s, (o.brake ? 0.6 : 0.35) * tl.s, 0.8 * (1 - fz * 0.6));
+  if (o.boost){ [-0.22, 0.22].forEach(function(ex){ var ep = P(x + ex, 0.42, z); if (ep){ var fl = 0.8 + Math.random() * 0.5;
+    glow(G.cyan, ep.x, ep.y, 0.45 * ep.s * fl, 0.28 * ep.s * fl, 0.95); glow(G.blue, ep.x, ep.y, 0.8 * ep.s * fl, 0.4 * ep.s, 0.8); } }); }
 }
 
 // ── Effects ───────────────────────────────────────────────────────────────────
@@ -959,6 +1384,10 @@ function drawWind(now){
 }
 
 function plate(){ var nm = (info && info.plate) || "DGEN"; return nm; }
+function hiddenByPortal(worldZ){                 // things past a tunnel entrance you're approaching are behind the hillside
+  for (var i = 0; i < S.tunnels.length; i++){ var T = S.tunnels[i]; if (S.z < T.z1 + 5 && worldZ > T.z0 - 12) return true; }
+  return false;
+}
 function draw(now, dt){
   var d = S.z;
   var spdF = Math.min(1, S.v / 55);
@@ -972,15 +1401,19 @@ function draw(now, dt){
   drawRoad(now);
   drawWalls();
   drawBeams();
-  var items = [], i;
-  for (i = Math.floor((d - 10) / 50); i * 50 - d < FAR; i++){ var lz = i * 50 - d + 20; if (lz > nearZ + 0.5) items.push({z: lz, k: "lamp", side: i % 2 === 0 ? -1 : 1}); }
+  var items = [], i, tun = S.tunnels.length > 0;
+  for (i = Math.floor((d - 10) / 50); i * 50 - d < FAR; i++){ var lz = i * 50 - d + 20; if (lz > nearZ + 0.5 && !(tun && hiddenByPortal(lz + d))) items.push({z: lz, k: "lamp", side: i % 2 === 0 ? -1 : 1}); }
   if (S.cfg){
-    for (i = 0; ; i++){ var gz = 300 + i * 500; if (gz > S.cfg.length - 200) break; var rz = gz - d; if (rz > nearZ && rz < FAR) items.push({z: rz, k: "gantry", i: i}); }
+    for (i = 0; ; i++){ var gz = 300 + i * 500; if (gz > S.cfg.length - 200) break; var rz = gz - d;
+      if (rz > nearZ && rz < FAR && !(tun && hiddenByPortal(gz)) && !S.zones.some(function(Z){ return gz > Z.z0 - 60 && gz < Z.z1; })) items.push({z: rz, k: "gantry", i: i}); }
     var fzz = S.cfg.length - d; if (fzz > nearZ && fzz < FAR) items.push({z: fzz, k: "finish"});
     if (S.cpZ > 0){ var cz = S.cpZ - d; if (cz > nearZ && cz < FAR) items.push({z: cz, k: "check"}); }
+    (S.rbList || []).forEach(function(r){ if (!r.scripted) return; var bz2 = r.z - 45 - d; if (bz2 > nearZ && bz2 < FAR && !(tun && hiddenByPortal(r.z - 45))) items.push({z: bz2, k: "border"}); });
   }
   for (i = S.ci; i < S.coins.length; i++){ var b = S.coins[i], bz = b.z - d; if (bz > FAR) break; if (!b.got && bz > -1.5) items.push({z: bz, k: "bag", b: b, i: i}); }
   for (i = 0; i < S.T.length; i++){ var t = S.T[i], tz = t.z - d; if (tz > FAR) break; if (tz + t.len > nearZ) items.push({z: tz, k: "car", t: t}); }
+  for (i = 0; i < S.obs.length; i++){ var o = S.obs[i], oz = o.z - d; if (oz > FAR) break; if (!o.hit && oz + o.len > nearZ && oz > -2.5) items.push({z: oz, k: "obs", o: o}); }
+  for (i = 0; i < S.chasers.length; i++){ var c = S.chasers[i], cz2 = c.z - d; if (cz2 < FAR && cz2 + c.len > nearZ) items.push({z: cz2, k: "cop", c: c}); }
   items.push({z: 0.001, k: "me"});
   items.sort(function(a, b){ return b.z - a.z; });
   for (var j = 0; j < items.length; j++){
@@ -990,8 +1423,11 @@ function draw(now, dt){
     else if (it.k === "gantry") drawGantry(it.z, "sign", it.i, now);
     else if (it.k === "finish") drawGantry(it.z, "finish", 0, now);
     else if (it.k === "check") drawGantry(it.z, "check", 0, now);
+    else if (it.k === "border") drawGantry(it.z, "border", 0, now);
     else if (it.k === "bag") drawBag(it.b.x, it.z, now, it.i);
+    else if (it.k === "obs") drawObstacle(it.o, it.z, now);
     else if (it.k === "car"){ var tt = it.t; drawCar(tt.x, it.z, tt.vis, {now: now, brake: tt.brake, sig: tt.st === 1 || tt.st === 2 ? tt.ch : 0}); }
+    else if (it.k === "cop"){ if (it.z < -0.5){ OA *= Math.max(0, 1 + (it.z + 0.5) / 3); if (OA <= 0.02) continue; ctx.globalAlpha = OA; } drawCar(it.c.x, it.z, COP, {now: now, chase: true, brake: it.c.stun > 0}); }
     else if (it.k === "me"){ OA = 1; ctx.globalAlpha = (S.inv > 0 && S.mode === "running" && Math.floor(now / 90) % 2) ? 0.6 : 1;
       drawCar(S.x, 0, S.vis, {now: now, brake: IN.brake || (S.mode === "ending" && S.outcome !== "wrecked"), player: true, boost: S.boosting, glow: S.vis.glow, plate: plate()}); ctx.globalAlpha = 1; }
   }
@@ -1001,10 +1437,21 @@ function draw(now, dt){
   drawStreaks(dt, S.v, S.boosting);
   if (S.cfg && S.cfg.wind) drawWind(now);
   drawRain(dt);
+  if (S.mode !== "menu") drawHeli(now);
   if (S.boosting && !REDUCED){ var bg = ctx.createRadialGradient(W / 2, H * 0.6, Math.min(W, H) * 0.3, W / 2, H * 0.6, Math.max(W, H) * 0.75);
     bg.addColorStop(0, "rgba(80,160,255,0)"); bg.addColorStop(1, "rgba(80,160,255,.16)"); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); }
-  if (S.outcome === "busted" && S.mode !== "menu"){ var on = Math.floor(now / 600) % 2; var g2 = ctx.createLinearGradient(0, H, 0, H * 0.6);
-    g2.addColorStop(0, on ? "rgba(229,72,77,.35)" : "rgba(59,130,246,.32)"); g2.addColorStop(1, "rgba(0,0,0,0)"); ctx.fillStyle = g2; ctx.fillRect(0, H * 0.6, W, H * 0.4); }
+  // sirens behind you: flashing glow at the bottom + markers for cars you can't see yet
+  var chase = 0, on = Math.floor(now / 600) % 2;
+  for (i = 0; i < S.chasers.length; i++){ var cc = S.chasers[i], dz = cc.z - S.z; if (cc.leaving) continue;
+    if (dz > -90 && dz < 60) chase = Math.max(chase, 1 - Math.max(0, -dz) / 90);
+    if (dz < -2.5 && dz > -140 && S.mode === "running"){
+      var mx2 = Math.max(16, Math.min(W - 16, W / 2 + (cc.x - camX) * W / 14)), a2 = 0.35 + 0.65 * (1 + dz / 140);
+      ctx.globalAlpha = a2; ctx.fillStyle = (Math.floor(now / 300) % 2) ? "#FF4D55" : "#4A8BFF";
+      ctx.beginPath(); ctx.moveTo(mx2 - 12, H - 6); ctx.lineTo(mx2 + 12, H - 6); ctx.lineTo(mx2, H - 20); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1; } }
+  if ((chase > 0 && S.mode !== "menu") || (S.outcome === "busted" && S.mode !== "menu")){
+    var k2 = S.outcome === "busted" ? 1 : chase * 0.75, g2 = ctx.createLinearGradient(0, H, 0, H * 0.62);
+    g2.addColorStop(0, on ? "rgba(229,72,77," + (0.35 * k2).toFixed(3) + ")" : "rgba(59,130,246," + (0.32 * k2).toFixed(3) + ")"); g2.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g2; ctx.fillRect(0, H * 0.62, W, H * 0.38); }
   if (Q > 0) ctx.drawImage(vig, 0, 0, W, H);
   if (S.flash > 0){ ctx.fillStyle = "rgba(255,60,60," + (S.flash * 0.5).toFixed(3) + ")"; ctx.fillRect(-20, -20, W + 40, H + 40); }
   ctx.restore();
@@ -1035,13 +1482,17 @@ function hud(){
   setW("hLd", S.cargo / 100); setW("hNx", S.nitro); setW("hProg", Math.min(1, S.z / S.cfg.length));
   setText("hTime", clock(S.t) + " · par " + clockShort(S.cfg.par));
   setText("hTake", "+" + n(liveTake()));
+  if (S.fuel !== null){ setW("hFu", S.fuel / 100); $("gFu").classList.toggle("low", S.fuel < 25); }
+  if (S.cfg.heat > 0){ var lv = heatLevel(), hs = [0, 1, 2].map(function(k){ return '<i' + (k < lv ? ' class="on"' : '') + '>★</i>'; }).join("");
+    if (hudCache.hHt !== hs){ hudCache.hHt = hs; $("hHt").innerHTML = hs; } $("hHt").classList.toggle("hot", S.chasers.some(function(c){ return !c.leaving; }));
+    var bs = S.bust > 0.02; if (hudCache.gBs !== bs){ hudCache.gBs = bs; $("gBs").hidden = !bs; } if (bs) setW("hBs", S.bust); }
 }
-var qAcc = 0, qN = 0, qWait = 2;
+var qAcc = 0, qN = 0, qWait = 1;
 function govern(raw){
   if (Q === 0 || raw > 0.25 || S.mode === "paused" || document.hidden) return;
   if ((qWait -= raw) > 0) return;
   qAcc += raw; qN++;
-  if (qN >= 60){ var avg = qAcc / qN; qAcc = 0; qN = 0; if (avg > 0.025){ Q--; qWait = 1.5; resize(); } }
+  if (qN >= 30){ var avg = qAcc / qN; qAcc = 0; qN = 0; if (avg > 0.025){ Q--; qWait = 1.5; resize(); } }
 }
 function attractStep(dt){                       // the street behind the menus: your car cruising on its own
   if (!ATTRACT) return;
@@ -1107,7 +1558,7 @@ function renderRoutes(){
   info.levels.forEach(function(lv){
     var goals = ['Deliver', info.cargo_star + '% of the load', 'Under ' + clockShort(lv.par)];
     h += '<button type="button" class="route" data-lv="' + lv.id + '" aria-pressed="' + (lv.id === selLevel) + '"' + (lv.open ? '' : ' disabled') + '>' +
-      '<div class="top"><span class="nm"><small>' + lv.id + '</small>' + esc(lv.name) + '</span><span class="st">' + starStr(lv.goals) + '</span></div>' +
+      '<div class="top"><span class="nm"><small>' + lv.id + '</small>' + esc(lv.name) + (lv.heat ? ' <small title="Police chases">🚨</small>' : '') + '</span><span class="st">' + starStr(lv.goals) + '</span></div>' +
       '<p>' + esc(lv.blurb) + '</p>' +
       '<div class="goals">' + goals.map(function(gl, i){ return '<span class="' + (lv.goals[i] ? 'y' : '') + '">' + (lv.goals[i] ? '✓ ' : '○ ') + esc(gl) + '</span>'; }).join("") + '</div>' +
       '<div class="goals" style="margin-top:4px"><span>' + (lv.length / 1000).toFixed(1) + ' km · ' + lv.lanes + ' lanes</span><span>Delivery pays ' + n(lv.pay) + ' × your trunk</span>' +
@@ -1121,18 +1572,30 @@ function renderRoutes(){
 }
 function bar(label, f){ return '<div><label>' + label + '</label><div class="t"><i style="width:' + Math.round(Math.max(0.06, Math.min(1, f)) * 100) + '%"></i></div></div>'; }
 function renderGarage(){
-  var h = '<div class="stat"><span>Balance <b>' + (info.balance != null ? n(info.balance) : '—') + '</b></span><span>' + (info.perks.shop ? 'The shop is open' : 'Deliver Downtown Loop to open the shop') + '</span></div><div class="cars">';
+  var h = '<div class="stat"><span>Balance <b>' + (info.balance != null ? n(info.balance) : '—') + '</b></span><span>' + (info.perks.shop ? 'The shop is open' : 'Deliver Downtown Loop to open the shop') + '</span></div>';
+  var me = carStats(info.car);
+  if (me){
+    h += '<h3>Upgrades · ' + esc(me.name) + '</h3><div class="ups">' + me.upgrades.map(function(u){
+      var pips = '<span class="pips">' + "●●●".slice(0, u.level) + '<span class="off">' + "●●●".slice(u.level) + '</span></span>', btn;
+      if (u.level >= 3) btn = '<button class="btn sm ghost" type="button" disabled>Maxed</button>';
+      else if (!info.perks.shop) btn = '<button class="btn sm ghost" type="button" disabled>🔒 After route 1</button>';
+      else if (u.locked) btn = '<button class="btn sm ghost" type="button" disabled>🔒 After route 3</button>';
+      else btn = '<button class="btn sm" type="button" data-up="' + u.id + '" data-cost="' + u.cost + '"' + (info.balance != null && info.balance < u.cost ? ' disabled' : '') + '>Level ' + (u.level + 1) + ' · ' + n(u.cost) + '</button>';
+      return '<div class="up"><div class="ut"><b>' + esc(u.name) + '</b>' + pips + '<br><small>' + esc(u.desc) + '</small></div>' + btn + '</div>'; }).join("") + '</div>';
+  }
+  h += '<h3>Cars</h3><div class="cars">';
   info.cars.forEach(function(c){
     var act;
     if (c.status === "selected") act = '<button class="btn sm" type="button" disabled>Driving it</button>';
     else if (c.status === "owned") act = '<button class="btn sm" type="button" data-sel="' + c.id + '">Drive this one</button>';
-    else if (c.status === "locked") act = '<button class="btn sm ghost" type="button" disabled>🔒 Deliver ' + esc(c.unlock_name) + '</button>';
+    else if (c.status === "locked" || c.status === "secret") act = '<button class="btn sm ghost" type="button" disabled>🔒 Deliver ' + esc(c.unlock_name) + '</button>';
     else if (c.status === "shop_locked") act = '<button class="btn sm ghost" type="button" disabled>🔒 ' + n(c.price) + ' · after route 1</button>';
     else act = '<button class="btn sm" type="button" data-buy="' + c.id + '"' + (info.balance != null && info.balance < c.price ? ' disabled' : '') + '>Buy for ' + n(c.price) + '</button>';
     h += '<div class="car' + (c.status === "selected" ? ' sel' : '') + '"><canvas data-car="' + c.id + '" width="10" height="10" aria-hidden="true"></canvas>' +
       '<div class="nm">' + esc(c.name) + '</div><div class="bd">' + esc(c.body) + ' · ' + Math.round(c.top * 2.237) + ' mph top</div>' +
-      '<div class="bars">' + bar("Speed", (c.top - 26) / 22) + bar("Accel", c.accel / 11) + bar("Handling", c.handling / 13) + bar("Armor", c.armor / 240) + bar("Cargo", c.cargo / 2.3) + '</div>' +
-      '<div class="pc"><span class="p">+</span> ' + esc(c.pros) + '</div><div class="pc"><span class="c">−</span> ' + esc(c.cons) + '</div>' +
+      (c.status === "secret" ? '<div class="bars" style="min-height:96px"></div><div class="pc">' + esc(c.pros) + '</div>' :
+      '<div class="bars">' + bar("Speed", (c.top - 26) / 32) + bar("Accel", c.accel / 14) + bar("Handling", c.handling / 18) + bar("Armor", c.armor / 340) + bar("Cargo", c.cargo / 2.3) + bar("Stealth", 1.15 - c.heat * 0.75) + '</div>' +
+      '<div class="pc"><span class="p">+</span> ' + esc(c.pros) + '</div><div class="pc"><span class="c">−</span> ' + esc(c.cons) + '</div>') +
       '<div class="act">' + act + '</div></div>';
   });
   $("pGarage").innerHTML = h + '</div><p class="small" id="gNote"></p>';
@@ -1142,25 +1605,33 @@ function renderGarage(){
     var c = carStats(b.getAttribute("data-buy")); if (!c) return;
     if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); b.textContent = "Tap again to pay " + n(c.price); return; }
     garageAct("buy", c.id, b); }); });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-up]"), function(b){ b.addEventListener("click", function(){
+    if (b.getAttribute("data-confirm") !== "1"){ b.setAttribute("data-confirm", "1"); b.textContent = "Tap to pay " + n(b.getAttribute("data-cost")); return; }
+    garageAct("upgrade", info.car, b, {part: b.getAttribute("data-up")}); }); });
 }
-function garageAct(action, id, btn){
+function garageAct(action, id, btn, extra){
   btn.disabled = true;
-  api("/api/games/nightrun/" + action, {car: id}).then(function(d){
+  var body = {car: id}; if (extra) for (var k in extra) body[k] = extra[k];
+  api("/api/games/nightrun/" + action, body).then(function(d){
     if (!d || d.ok === false){ btn.disabled = false; $("gNote").textContent = (d && d.error) || "That didn't work."; return; }
     info.cars = d.cars; info.car = d.car; selCar = d.car; if (d.balance != null){ info.balance = d.balance; $("bal").textContent = "Balance " + n(d.balance); }
     renderGarage(); footer(); startAttract();
     if (action === "buy") $("gNote").textContent = "It’s yours. " + carStats(d.car).name + " is in your garage.";
+    if (action === "upgrade") $("gNote").textContent = "Installed." + ((d.achievements || []).length ? " 🏆 " + d.achievements.join(", ") : "");
   }).catch(function(e){ btn.disabled = false; if (e.message !== "login") $("gNote").textContent = "Couldn't reach the server."; });
 }
 function preview(canvas, id){
   var r = canvas.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1), cw = Math.max(120, r.width), ch = Math.max(70, r.height);
   canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
   var V = CARVIS[id]; if (!V) return;
+  var cs = carStats(id);
+  if (cs && cs.status === "secret"){ var g0 = canvas.getContext("2d"); g0.setTransform(dpr, 0, 0, dpr, 0, 0); g0.fillStyle = "rgba(217,184,108,.55)";
+    g0.font = "600 " + Math.round(ch * 0.55) + "px 'IBM Plex Serif',Georgia,serif"; g0.textAlign = "center"; g0.textBaseline = "middle"; g0.fillText("?", cw / 2, ch / 2); return; }
   var save = {ctx: ctx, W: W, H: H, F: F, HZ: HZ, camX: camX, camH: camH, camBack: camBack, nearZ: nearZ, FOGC: FOGC, FAR: FAR, OA: OA, TH: TH};
   try {
     ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     W = cw; H = ch; camH = 2.4; camBack = 9; nearZ = -8; FAR = 1000; OA = 1;
-    var top = V.box ? V.box.h : V.rh;
+    var top = V.box ? V.box.h + (V.box.frosty ? 1.9 : 0) : V.rh;
     F = Math.min(cw * 0.62 * camBack / V.w, ch * 0.66 * (camBack + 0.5) / (top + 0.3));
     HZ = ch * 0.86 - camH * F / camBack; camX = -(V.w / 2 + 1.6);
     ctx.save(); ctx.translate(-(V.w / 2 + 1.6) * F / (camBack + 1.5) * 0.85, 0);
@@ -1183,7 +1654,7 @@ function footer(){
   $("fToday").textContent = n(info.today) + " of " + n(info.daily_cap);
   var b = $("driveBtn"); b.disabled = !lv || !lv.open; b.textContent = lv ? "Drive " + lv.name : "Drive";
   $("mNote").textContent = info.today >= info.daily_cap ? "You’ve hit today’s limit. Runs still earn stars, star bonuses and unlocks."
-    : (info.hype > 1 ? "Hype Train is on: runs pay " + info.hype + "×." : "Runs pay up to " + n(info.run_cap) + " each. Hit a cop and you’re busted.");
+    : (info.hype > 1 ? "Hype Train is on: runs pay " + info.hype + "×." : "Runs pay up to " + n(info.run_cap) + " each. Drive hot and the cops come for you.");
 }
 function applyInfo(d){
   info = d; selCar = d.car;
@@ -1204,13 +1675,17 @@ function startRun(){
   api("/api/games/nightrun/start", {level: selLevel, car: selCar}).then(function(d){
     if (!d || d.ok === false){ backToMenu(); $("mNote").textContent = (d && d.error) || "Couldn't start the run."; return; }
     ATTRACT = null; S.run = d; d.cfg.theme = d.level; $("resBtns").hidden = true;
-    setTheme(d.level); setupRun(d.seed, d.cfg, d.car, d.stats, {nitro: d.nitro, stash: d.stash});
+    setTheme(d.level); setupRun(d.seed, d.cfg, d.car, d.stats, {nitro: d.nitro, stash: d.stash, scanner: d.scanner});
+    show("gFu", !!d.cfg.fuel); show("gHt", d.cfg.heat > 0); show("gBs", false);
     show("menu", false); show("results", false); show("hud", true); show("gNx", d.nitro); $("pN").disabled = !d.nitro;
     $("hCp").hidden = !d.cfg.checkpoint; if (d.cfg.checkpoint) $("hCp").style.left = (S.cpZ / d.cfg.length * 100).toFixed(1) + "%";
     show("pad", COARSE); hudCache = {}; hud();
     S.mode = "countdown"; show("countdown", true); var c = 3; $("cnt").textContent = c;
     var iv = setInterval(function(){ c--; if (c > 0) $("cnt").textContent = c; else { clearInterval(iv); show("countdown", false); S.mode = "running"; last = performance.now(); if (document.hidden) pause();
-      if (d.cfg.rain) toast("Wet roads: less grip, longer braking"); else if (d.cfg.wind) toast("Watch for crosswinds"); } }, 700);
+      var intro = d.cfg.heat_start ? "They're already on you. Find a tunnel." : d.cfg.heli ? "The helicopter won't leave. Just get there."
+        : d.cfg.fuel ? "Long way round. Watch your fuel." : d.cfg.fog ? "Fog ahead. Roadblocks at the border." : d.cfg.closures ? "Roadworks ahead. Lanes close without warning."
+        : d.cfg.rain ? "Wet roads: less grip, longer braking" : d.cfg.wind ? "Watch for crosswinds" : "";
+      if (intro) toast(intro); } }, 700);
   }).catch(function(e){ backToMenu(); if (e.message !== "login") $("mNote").textContent = "Couldn't reach the server."; });
 }
 function backToMenu(){ show("results", false); show("hud", false); show("pad", false); show("menu", true); S.mode = "menu"; renderRoutes(); footer(); startAttract(); }
@@ -1233,7 +1708,8 @@ function submit(){
     if (!r || r.ok === false){ resultError((r && r.error) || "Couldn't record that run."); return; }
     var lv = info.levels[S.run.level - 1], h = '';
     var lede = r.outcome === "delivered" ? 'You got ' + r.cargo + '% of the load there in ' + clock(r.seconds) + '.'
-             : (r.outcome === "busted" ? 'You touched a cop car. The package is gone, and you dropped half the cash.' : 'The car gave out. The package is gone, and you dropped half the cash.');
+             : ({cop: 'You touched a cop car.', boxed: 'The cops boxed you in.', busted: 'They ran you off the road.', gas: 'You ran out of gas.', quit: 'You ditched the car.'}[S.reason]
+                || (r.outcome === "busted" ? 'The cops got you.' : 'The car gave out.')) + ' The package is gone, and you dropped half the cash.';
     h += '<p class="lede">' + lede + '</p>';
     h += '<div class="stars3">' + ['Deliver', info.cargo_star + '% load', 'Under ' + clockShort(lv.par)].map(function(g, i){
       var have = r.levels[S.run.level - 1].goals[i], nw = r.new_goals[i];

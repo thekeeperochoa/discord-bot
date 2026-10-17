@@ -3175,6 +3175,8 @@ ACHIEVEMENTS = {
     "nr_first":      {"emoji":"📦", "name":"Package Delivered",    "desc":"Deliver a route in Night Run",             "reward":300},
     "nr_clean":      {"emoji":"🧼", "name":"Not a Scratch on It",  "desc":"Deliver 100% of the load on Night Run route 3 or later", "reward":2500},
     "nr_allstars":   {"emoji":"🌙", "name":"Five-Star Driver",     "desc":"Earn every star in Night Run",             "reward":7500},
+    "nr_bigone":     {"emoji":"🚁", "name":"The Big One",          "desc":"Deliver The Big One in Night Run",         "reward":10000},
+    "nr_fullup":     {"emoji":"🔧", "name":"Fully Loaded",         "desc":"Max every upgrade on one Night Run car",   "reward":5000},
     "completionist": {"emoji":"🏆", "name":"Completionist",        "desc":"Earn 25 achievements",                     "reward":5000},
 }
 
@@ -27522,79 +27524,136 @@ async def _handle_videopoker(message: discord.Message, rest: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # 🌙 WEB GAME: NIGHT RUN — a highway delivery game on the web dashboard.
 # Pick a route, pick a car, get the package across town. Weave through traffic,
-# grab cash bags, skim past cars for near misses, and don't touch the cops.
-# Every crash costs health and spills some of the load; delivering pays by how
-# much of the load you still have. Routes unlock in order and each one unlocks
-# something (the shop, a car, nitro, hidden compartments). Cars are bought with
-# real coins in the shop, so it's also a coin sink.
+# grab cash bags, skim past cars for near misses. Drive hot and the police come:
+# heat builds into chases, roadblocks, spike strips and a helicopter. Every crash
+# costs health and spills some of the load; delivering pays by how much of the
+# load you still have. Ten routes unlock in order and each unlocks something
+# (the shop, cars, nitro, the police scanner…). Cars and upgrades are bought with
+# real coins, so it's also a coin sink.
 #
 # Anti-cheat follows The Getaway: the server hands out a seed and both sides build
-# the same route from it (mulberry32, integer-only decisions). The server knows
-# how many cash bags and cars were on the route, the car you're driving, and the
-# fastest a perfect run could possibly be, so claims are clamped to what a perfect
-# driver could do. Car ownership, unlocks and purchases live only on the server.
+# the same traffic and cash from it (mulberry32, integer-only decisions). The
+# server knows how many cash bags and cars were on the route, the car and the
+# upgrades you're driving with, and so the fastest a perfect run could possibly
+# be. Claims are clamped to what a perfect driver could do. Car ownership,
+# upgrades, unlocks and purchases live only on the server. (Police, roadworks,
+# fuel and tunnels are page-side only: they make the run harder, never pay more.)
 # ─────────────────────────────────────────────────────────────────────────────
 NR_BAG_VALUE = 5               # coins per cash bag
 NR_NEAR_VALUE = 4              # coins per near miss
-NR_RUN_CAP = 5_000             # max repeatable payout per run (before Hype Train)
-NR_DAILY_CAP = 15_000          # max repeatable payout per member per day (EST)
+NR_RUN_CAP = 8_000             # max repeatable payout per run (before Hype Train)
+NR_DAILY_CAP = 20_000          # max repeatable payout per member per day (EST)
 NR_STAR_BONUS = 300            # one-time bonus per new star, × route number
 NR_NITRO_MULT = 1.35           # top-speed multiplier while boosting
 NR_NOMINAL_V = 33              # m/s: the player speed traffic placement assumes (must match NOMINAL in the page)
 NR_RUN_TTL = 30 * 60
 NR_MIN_SECONDS = 5
-NR_XP_CAP = 80
+NR_XP_CAP = 100
 NR_CARGO_STAR = 80             # % of the load you must deliver for the second star
 
 # Routes. `gap` = (min, spread) meters between traffic groups; `pair` = chance a
 # group is two cars side by side; `change` = chance a car changes lanes on you.
+# The rest are page-side mechanics: heat (how fast the police get interested),
+# chase (max chasing cars), roadblocks, heat_start/heat_floor, heli, tunnels,
+# closures (roadworks), scripted roadblocks (rb), fog, fuel, wind, rain, checkpoint.
 NR_LEVELS = [
     {"id": 1, "name": "Downtown Loop", "length": 1800, "lanes": 4, "gap": (40, 40), "pair": 0.12,
-     "cops": 0.0, "trucks": 0.08, "change": 0.10, "pay": 700, "par": 58,
+     "cops": 0.0, "trucks": 0.08, "change": 0.10, "pay": 700, "par": 58, "heat": 0.0,
      "blurb": "Light traffic, no cops. Learn how the car handles.",
      "unlock": "The shop opens"},
     {"id": 2, "name": "The Docks", "length": 2200, "lanes": 4, "gap": (34, 34), "pair": 0.20,
-     "cops": 0.04, "trucks": 0.35, "change": 0.15, "pay": 1_000, "par": 69,
+     "cops": 0.04, "trucks": 0.35, "change": 0.15, "pay": 1_000, "par": 69, "heat": 0.6, "chase": 2,
      "blurb": "Container trucks everywhere. A few cops on patrol.",
      "unlock": "The Ricer joins your garage"},
     {"id": 3, "name": "Bridge Run", "length": 2600, "lanes": 3, "gap": (32, 30), "pair": 0.18,
-     "cops": 0.05, "trucks": 0.12, "change": 0.15, "pay": 1_300, "par": 81, "wind": True,
+     "cops": 0.05, "trucks": 0.12, "change": 0.15, "pay": 1_300, "par": 81, "wind": True, "heat": 0.6, "chase": 2,
      "blurb": "Three lanes and crosswinds over the river.",
      "unlock": "Nitro for every car"},
     {"id": 4, "name": "Rainy Interstate", "length": 3000, "lanes": 4, "gap": (29, 28), "pair": 0.25,
-     "cops": 0.06, "trucks": 0.15, "change": 0.20, "pay": 1_700, "par": 94, "rain": True,
+     "cops": 0.06, "trucks": 0.15, "change": 0.20, "pay": 1_700, "par": 94, "rain": True, "heat": 0.6, "chase": 2,
      "blurb": "Wet roads, less grip, and you can't see far.",
      "unlock": "The Box Truck joins your garage"},
     {"id": 5, "name": "The Checkpoint", "length": 3400, "lanes": 4, "gap": (27, 26), "pair": 0.30,
-     "cops": 0.12, "trucks": 0.15, "change": 0.25, "pay": 2_200, "par": 106, "checkpoint": True,
+     "cops": 0.12, "trucks": 0.15, "change": 0.25, "pay": 2_200, "par": 106, "checkpoint": True, "heat": 0.6, "chase": 2,
      "blurb": "Heavy patrols and an inspection near the end. Slow down through it.",
      "unlock": "Hidden compartments (crashes spill half as much)"},
+    {"id": 6, "name": "Construction Zone", "length": 3600, "lanes": 4, "gap": (30, 28), "pair": 0.22,
+     "cops": 0.07, "trucks": 0.22, "change": 0.20, "pay": 2_700, "par": 116, "heat": 1.0, "chase": 2,
+     "roadblocks": True, "closures": 6,
+     "blurb": "Lanes close and merge without warning. Cones, barrels and a full-blown police department.",
+     "unlock": "Bulletproof joins your garage"},
+    {"id": 7, "name": "Tunnel Chase", "length": 3800, "lanes": 4, "gap": (30, 30), "pair": 0.22,
+     "cops": 0.08, "trucks": 0.15, "change": 0.22, "pay": 3_200, "par": 120, "heat": 1.0, "chase": 3,
+     "roadblocks": True, "heat_start": 100, "tunnels": 4,
+     "blurb": "They're already on you. Use the tunnels to shake them.",
+     "unlock": "The police scanner (warns you about roadblocks and spikes)"},
+    {"id": 8, "name": "Border Night", "length": 4000, "lanes": 4, "gap": (29, 28), "pair": 0.25,
+     "cops": 0.10, "trucks": 0.20, "change": 0.22, "pay": 3_800, "par": 126, "heat": 1.0, "chase": 2,
+     "roadblocks": True, "fog": True, "rb": 2,
+     "blurb": "Thick fog, searchlights and two roadblocks before the line.",
+     "unlock": "The Ghost joins your garage"},
+    {"id": 9, "name": "Coast Highway", "length": 5000, "lanes": 3, "gap": (32, 32), "pair": 0.18,
+     "cops": 0.07, "trucks": 0.15, "change": 0.20, "pay": 4_500, "par": 156, "heat": 1.0, "chase": 2,
+     "roadblocks": True, "fuel": True,
+     "blurb": "The long way round. Watch your fuel and grab gas cans.",
+     "unlock": "The Courier joins your garage"},
+    {"id": 10, "name": "The Big One", "length": 5200, "lanes": 4, "gap": (27, 26), "pair": 0.30,
+     "cops": 0.12, "trucks": 0.18, "change": 0.25, "pay": 6_000, "par": 162, "heat": 1.2, "chase": 3,
+     "roadblocks": True, "heat_floor": 66, "heli": True, "tunnels": 2, "rb": 3,
+     "blurb": "The biggest load in the city, and a helicopter on you the whole way.",
+     "unlock": "A legendary car"},
 ]
 NR_LEVEL_BY_ID = {lv["id"]: lv for lv in NR_LEVELS}
+NR_SCANNER_LEVEL = 7
 
 # Cars. top/accel in m/s and m/s², handling = sideways m/s, armor = health,
-# cargo = payout multiplier on delivery. `unlock` = route that gives it for free.
+# cargo = payout multiplier on delivery, heat = how fast the police notice you,
+# fuel = how thirsty it is, tier = upgrade price multiplier.
+# `unlock` = route that gives it for free; `secret` = hidden until unlocked.
 NR_CARS = {
-    "beater":   {"name": "The Beater", "body": "Old sedan", "price": 0, "unlock": None,
-                 "top": 36, "accel": 7.0, "handling": 9.0, "armor": 100, "cargo": 1.0,
-                 "pros": "Cheap, honest, balanced", "cons": "Slow and fragile"},
-    "hack":     {"name": "The Hack", "body": "Taxi cab", "price": 25_000, "unlock": None,
-                 "top": 37, "accel": 7.5, "handling": 10.0, "armor": 90, "cargo": 0.7,
-                 "pros": "Cops wave cabs through checkpoints", "cons": "Small trunk"},
-    "soccer":   {"name": "Soccer Mom", "body": "Minivan", "price": 60_000, "unlock": None,
-                 "top": 34, "accel": 6.0, "handling": 7.5, "armor": 140, "cargo": 1.5,
-                 "pros": "Big cargo, takes a hit", "cons": "Slow, handles like a couch"},
-    "ricer":    {"name": "The Ricer", "body": "Tuner hatchback", "price": 0, "unlock": 2,
-                 "top": 41, "accel": 10.0, "handling": 12.5, "armor": 60, "cargo": 0.8,
-                 "pros": "Sharpest handling, double nitro tank", "cons": "Paper armor"},
-    "boxtruck": {"name": "Box Truck", "body": "Delivery truck", "price": 0, "unlock": 4,
-                 "top": 31, "accel": 4.5, "handling": 6.0, "armor": 230, "cargo": 2.2,
-                 "pros": "Huge cargo, very tough", "cons": "Slow and wide"},
-    "muscle":   {"name": "The Muscle", "body": "V8 muscle car", "price": 200_000, "unlock": None,
-                 "top": 46, "accel": 9.5, "handling": 8.5, "armor": 115, "cargo": 1.0,
-                 "pros": "Fastest thing on the road", "cons": "Twitchy and expensive"},
+    "beater":      {"name": "The Beater", "body": "Old sedan", "price": 0, "unlock": None, "tier": 1.0,
+                    "top": 36, "accel": 7.0, "handling": 9.0, "armor": 100, "cargo": 1.0, "heat": 1.0, "fuel": 1.0,
+                    "pros": "Cheap, honest, balanced", "cons": "Slow and fragile"},
+    "hack":        {"name": "The Hack", "body": "Taxi cab", "price": 25_000, "unlock": None, "tier": 1.0,
+                    "top": 37, "accel": 7.5, "handling": 10.0, "armor": 90, "cargo": 0.7, "heat": 0.75, "fuel": 0.9,
+                    "pros": "Cops wave cabs through checkpoints and notice you less", "cons": "Small trunk"},
+    "soccer":      {"name": "Soccer Mom", "body": "Minivan", "price": 60_000, "unlock": None, "tier": 1.25,
+                    "top": 34, "accel": 6.0, "handling": 7.5, "armor": 140, "cargo": 1.5, "heat": 0.6, "fuel": 1.1,
+                    "pros": "Big cargo, takes a hit, nobody suspects a minivan", "cons": "Slow, handles like a couch"},
+    "ricer":       {"name": "The Ricer", "body": "Tuner hatchback", "price": 0, "unlock": 2, "tier": 1.25,
+                    "top": 41, "accel": 10.0, "handling": 12.5, "armor": 60, "cargo": 0.8, "heat": 1.2, "fuel": 0.9,
+                    "pros": "Sharpest handling, double nitro tank", "cons": "Paper armor, loud"},
+    "boxtruck":    {"name": "Box Truck", "body": "Delivery truck", "price": 0, "unlock": 4, "tier": 1.25,
+                    "top": 31, "accel": 4.5, "handling": 6.0, "armor": 230, "cargo": 2.2, "heat": 0.8, "fuel": 1.5,
+                    "pros": "Huge cargo, very tough", "cons": "Slow, wide and thirsty"},
+    "muscle":      {"name": "The Muscle", "body": "V8 muscle car", "price": 200_000, "unlock": None, "tier": 1.5,
+                    "top": 46, "accel": 9.5, "handling": 8.5, "armor": 115, "cargo": 1.0, "heat": 1.3, "fuel": 1.3,
+                    "pros": "Outruns most cops", "cons": "Twitchy, thirsty, attracts heat"},
+    "bulletproof": {"name": "Bulletproof", "body": "Armored SUV", "price": 0, "unlock": 6, "tier": 1.5,
+                    "top": 35, "accel": 5.5, "handling": 7.0, "armor": 300, "cargo": 1.3, "heat": 1.0, "fuel": 1.4,
+                    "pros": "Rams through roadblocks, shrugs off cops", "cons": "Slow to get going"},
+    "ghost":       {"name": "The Ghost", "body": "Black supercar", "price": 0, "unlock": 8, "tier": 1.75,
+                    "top": 52, "accel": 12.0, "handling": 11.0, "armor": 55, "cargo": 0.8, "heat": 1.4, "fuel": 1.2,
+                    "pros": "Fastest in the game; no cop can catch it", "cons": "Glass body, heat magnet"},
+    "courier":     {"name": "The Courier", "body": "Motorcycle", "price": 0, "unlock": 9, "tier": 1.5,
+                    "top": 44, "accel": 11.0, "handling": 15.0, "armor": 35, "cargo": 0.5, "heat": 0.9, "fuel": 0.5,
+                    "pros": "Splits lanes between cars, sips fuel", "cons": "One bad hit and you're down; tiny cargo"},
+    "frosty":      {"name": "Mr. Frosty", "body": "Ice cream truck", "price": 0, "unlock": 10, "tier": 1.5, "secret": True,
+                    "top": 30, "accel": 4.5, "handling": 6.5, "armor": 180, "cargo": 1.8, "heat": 0.2, "fuel": 1.2,
+                    "pros": "The cops barely notice you. Who'd suspect the ice cream man?", "cons": "Slowest thing on the road"},
 }
-NR_CAR_ORDER = ["beater", "hack", "soccer", "ricer", "boxtruck", "muscle"]
+NR_CAR_ORDER = ["beater", "hack", "soccer", "ricer", "boxtruck", "muscle", "bulletproof", "ghost", "courier", "frosty"]
+
+# Upgrades: 3 levels each, per car. Cost × the car's tier.
+NR_UPGRADES = {
+    "engine": {"name": "Engine",      "desc": "+3 mph top speed and quicker off the line", "cost": (8_000, 20_000, 50_000)},
+    "tires":  {"name": "Tires",       "desc": "Sharper steering and more grip in the wet", "cost": (6_000, 15_000, 35_000)},
+    "armor":  {"name": "Armor",       "desc": "+12% health",                               "cost": (6_000, 15_000, 35_000)},
+    "nitro":  {"name": "Nitro tank",  "desc": "Nitro lasts 20% longer",                    "cost": (5_000, 12_000, 30_000)},
+    "jammer": {"name": "Radar jammer", "desc": "Heat builds 15% slower",                   "cost": (7_000, 18_000, 45_000)},
+}
+NR_UP_ORDER = ["engine", "tires", "armor", "nitro", "jammer"]
+NR_ENGINE_TOP = 1.5            # m/s of top speed per engine level
 
 _nr_runs: dict[int, dict] = {}
 _nr_done: dict[str, dict] = {}
@@ -27649,13 +27708,14 @@ def nightrun_course(seed: int, level_id: int) -> dict:
 def _nr_garage(g: dict, uid_s: str, create: bool = False) -> dict:
     rec = g["garage"].get(uid_s)
     if rec is None:
-        rec = {"cars": ["beater"], "car": "beater", "stars": {}, "best": {}}
+        rec = {"cars": ["beater"], "car": "beater", "stars": {}, "best": {}, "up": {}}
         if create:
             g["garage"][uid_s] = rec
     rec.setdefault("cars", ["beater"])
     rec.setdefault("car", "beater")
     rec.setdefault("stars", {})
     rec.setdefault("best", {})
+    rec.setdefault("up", {})
     return rec
 
 
@@ -27664,7 +27724,8 @@ def _nr_cleared(rec: dict, level_id: int) -> bool:
 
 
 def _nr_perks(rec: dict) -> dict:
-    return {"shop": _nr_cleared(rec, 1), "nitro": _nr_cleared(rec, 3), "stash": _nr_cleared(rec, 5)}
+    return {"shop": _nr_cleared(rec, 1), "nitro": _nr_cleared(rec, 3), "stash": _nr_cleared(rec, 5),
+            "scanner": _nr_cleared(rec, NR_SCANNER_LEVEL)}
 
 
 def _nr_star_count(rec: dict) -> int:
@@ -27680,6 +27741,26 @@ def _nr_grant_unlocks(rec: dict) -> list:
             rec["cars"].append(cid)
             got.append(cid)
     return got
+
+
+def _nr_ups(rec: dict, cid: str) -> dict:
+    u = rec["up"].get(cid) or {}
+    return {p: max(0, min(3, int(u.get(p, 0)))) for p in NR_UP_ORDER}
+
+
+def nr_effective(cid: str, ups: dict) -> dict:
+    """A car's stats with its upgrades applied. The page drives with exactly these."""
+    c = NR_CARS[cid]
+    e, t, a, n_, j = (ups.get(k, 0) for k in NR_UP_ORDER)
+    return {"top": c["top"] + NR_ENGINE_TOP * e, "accel": round(c["accel"] * (1 + 0.08 * e), 3),
+            "handling": round(c["handling"] + 0.8 * t, 3), "grip": round(1 + 0.12 * t, 3),
+            "armor": int(round(c["armor"] * (1 + 0.12 * a))), "cargo": c["cargo"],
+            "drain": round(1 - 0.2 * n_, 3), "heat": round(c["heat"] * (1 - 0.15 * j), 4), "fuel": c["fuel"]}
+
+
+def _nr_up_cost(cid: str, part: str, level: int) -> int:
+    """Price of taking `part` from level-1 to `level` (1..3)."""
+    return int(round(NR_UPGRADES[part]["cost"][level - 1] * NR_CARS[cid]["tier"] / 500) * 500)
 
 
 def _nr_today_earned(g: dict, uid_s: str) -> int:
@@ -27710,13 +27791,25 @@ def _nr_cars_public(rec: dict) -> list:
         if owned:
             status = "selected" if rec["car"] == cid else "owned"
         elif c["unlock"]:
-            status = "locked"
+            status = "secret" if c.get("secret") else "locked"
         else:
             status = "buy" if perks["shop"] else "shop_locked"
-        out.append({"id": cid, "name": c["name"], "body": c["body"], "price": c["price"],
-                    "unlock": c["unlock"], "unlock_name": NR_LEVEL_BY_ID[c["unlock"]]["name"] if c["unlock"] else None,
-                    "top": c["top"], "accel": c["accel"], "handling": c["handling"], "armor": c["armor"],
-                    "cargo": c["cargo"], "pros": c["pros"], "cons": c["cons"], "status": status})
+        ups = _nr_ups(rec, cid)
+        eff = nr_effective(cid, ups)
+        hidden = status == "secret"
+        upgrades = []
+        for p in NR_UP_ORDER:
+            lvl = ups[p]
+            upgrades.append({"id": p, "name": NR_UPGRADES[p]["name"], "desc": NR_UPGRADES[p]["desc"], "level": lvl,
+                             "cost": _nr_up_cost(cid, p, lvl + 1) if lvl < 3 else None,
+                             "locked": "Deliver Bridge Run to unlock nitro" if p == "nitro" and not perks["nitro"] else None})
+        out.append({"id": cid, "name": "???" if hidden else c["name"], "body": "Secret" if hidden else c["body"],
+                    "price": c["price"], "unlock": c["unlock"],
+                    "unlock_name": NR_LEVEL_BY_ID[c["unlock"]]["name"] if c["unlock"] else None,
+                    "top": eff["top"], "accel": eff["accel"], "handling": eff["handling"], "armor": eff["armor"],
+                    "cargo": eff["cargo"], "heat": eff["heat"],
+                    "pros": "Deliver The Big One to find out." if hidden else c["pros"],
+                    "cons": "" if hidden else c["cons"], "status": status, "upgrades": upgrades})
     return out
 
 
@@ -27727,7 +27820,7 @@ def _nr_levels_public(rec: dict) -> list:
         best = rec["best"].get(str(lv["id"]))
         out.append({"id": lv["id"], "name": lv["name"], "blurb": lv["blurb"], "length": lv["length"],
                     "lanes": lv["lanes"], "pay": lv["pay"], "par": lv["par"], "unlock": lv["unlock"],
-                    "star_bonus": NR_STAR_BONUS * lv["id"],
+                    "star_bonus": NR_STAR_BONUS * lv["id"], "heat": lv.get("heat", 0) > 0,
                     "open": lv["id"] == 1 or _nr_cleared(rec, lv["id"] - 1),
                     "goals": [bool(mask & 1), bool(mask & 2), bool(mask & 4)],
                     "best": round(float(best), 1) if best is not None else None})
@@ -27759,7 +27852,6 @@ def nightrun_settle(run: dict, payload: dict, elapsed: float) -> dict:
     can be tested. Returns outcome, seconds, distance, cargo, bags, near, goals mask,
     and `valid` (False if the claims are physically impossible)."""
     lv = NR_LEVEL_BY_ID[run["level"]]
-    car = NR_CARS[run["car"]]
     course = nightrun_course(run["seed"], run["level"])
     try:
         claimed_s = float(payload.get("duration_ms", 0)) / 1000.0
@@ -27768,12 +27860,12 @@ def nightrun_settle(run: dict, payload: dict, elapsed: float) -> dict:
         bags = int(payload.get("bags", 0))
         near = int(payload.get("near", 0))
         dist = float(payload.get("distance", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"valid": False}
     if outcome not in ("delivered", "wrecked", "busted") or claimed_s != claimed_s or dist != dist:
         return {"valid": False}
     seconds = max(0.0, min(claimed_s, elapsed))
-    vmax = car["top"] * (NR_NITRO_MULT if run.get("nitro") else 1.0)
+    vmax = float(run["vmax"])
     reach = vmax * seconds                      # the farthest any driver could have gone
     if outcome == "delivered":
         if reach < lv["length"] * 0.98:
@@ -27793,6 +27885,16 @@ def nightrun_settle(run: dict, payload: dict, elapsed: float) -> dict:
             mask |= 4
     return {"valid": True, "outcome": outcome, "seconds": seconds, "distance": int(dist),
             "cargo": cargo, "bags": bags, "near": near, "mask": mask}
+
+
+async def _nr_notify(text: str):
+    try:
+        cid_n = get_notification_channel_id(load_config())
+        notif = client.get_channel(int(cid_n)) if cid_n else None
+        if notif:
+            await notif.send(text, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
 
 
 async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
@@ -27849,16 +27951,49 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         rec["car"] = cid
         _save_json_file(WEB_GAMES_FILE, data)
         if c["price"] >= 100_000:
-            try:
-                cid_n = get_notification_channel_id(load_config())
-                notif = client.get_channel(int(cid_n)) if cid_n else None
-                if notif:
-                    await notif.send(f"🏎️ **{_dash_name(uid)}** just bought **{c['name']}** for "
-                                     f"**{c['price']:,}** coins. Night Run just got faster. `_nightrun`",
-                                     allowed_mentions=discord.AllowedMentions.none())
-            except Exception:
-                pass
+            await _nr_notify(f"🏎️ **{_dash_name(uid)}** just bought **{c['name']}** for **{c['price']:,}** coins. "
+                             f"Night Run just got faster. `_nightrun`")
         return {"ok": True, "car": cid, "balance": int(balance), "cars": _nr_cars_public(rec)}
+
+    if action == "upgrade":
+        cid, part = str(payload.get("car", "")), str(payload.get("part", ""))
+        if now - _nr_last.get(uid, 0) < 1:
+            return {"ok": False, "error": "Easy — one thing at a time."}
+        _nr_last[uid] = now
+        rec = _nr_garage(g, uid_s)
+        if cid not in NR_CARS or part not in NR_UPGRADES:
+            return {"ok": False, "error": "That upgrade doesn't exist."}
+        if cid not in rec["cars"]:
+            return {"ok": False, "error": "You don't own that car."}
+        perks = _nr_perks(rec)
+        if not perks["shop"]:
+            return {"ok": False, "error": "Deliver Downtown Loop to open the shop."}
+        if part == "nitro" and not perks["nitro"]:
+            return {"ok": False, "error": "Deliver Bridge Run to unlock nitro first."}
+        lvl = _nr_ups(rec, cid)[part]
+        if lvl >= 3:
+            return {"ok": False, "error": "That's already maxed out."}
+        cost = _nr_up_cost(cid, part, lvl + 1)
+        bal = economy.balance(uid)
+        if bal < cost:
+            return {"ok": False, "error": f"It's {cost:,} coins. You have {bal:,}.", "balance": int(bal)}
+        balance = economy.add(uid, -cost, f"night run: {NR_CARS[cid]['name']} {NR_UPGRADES[part]['name']} {lvl + 1}")
+        try:
+            track_economy_event("spent", cost)
+        except Exception:
+            pass
+        rec = _nr_garage(g, uid_s, create=True)
+        rec["up"].setdefault(cid, {})[part] = lvl + 1
+        _save_json_file(WEB_GAMES_FILE, data)
+        achievements = []
+        if all(v >= 3 for v in _nr_ups(rec, cid).values()):
+            try:
+                if await _grant_achievement(uid, "nr_fullup", None):
+                    achievements.append(ACHIEVEMENTS["nr_fullup"]["name"])
+            except Exception:
+                log.exception("night run achievement failed")
+        return {"ok": True, "car": rec["car"], "balance": int(balance), "cars": _nr_cars_public(rec),
+                "achievements": achievements}
 
     if action == "start":
         if now - _nr_last.get(uid, 0) < 1.5:
@@ -27880,16 +28015,20 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         for rid in [r for r, res in _nr_done.items() if now - res.get("_ts", 0) > 600]:
             _nr_done.pop(rid, None)
         perks = _nr_perks(rec)
+        eff = nr_effective(cid, _nr_ups(rec, cid))
         run = {"run_id": secrets.token_hex(12), "seed": random.getrandbits(32), "started": now,
-               "level": level_id, "car": cid, "nitro": perks["nitro"], "stash": perks["stash"]}
+               "level": level_id, "car": cid, "nitro": perks["nitro"], "stash": perks["stash"],
+               "vmax": eff["top"] * (NR_NITRO_MULT if perks["nitro"] else 1.0)}
         _nr_runs[uid] = run   # starting a new run abandons any unfinished one
-        c = NR_CARS[cid]
         cfg = {k: lv[k] for k in ("length", "lanes", "pair", "cops", "trucks", "change", "par", "pay")}
-        cfg.update(gap=list(lv["gap"]), name=lv["name"], wind=bool(lv.get("wind")), rain=bool(lv.get("rain")),
-                   checkpoint=bool(lv.get("checkpoint")), nominal=NR_NOMINAL_V, nitro_mult=NR_NITRO_MULT)
+        cfg.update(gap=list(lv["gap"]), name=lv["name"], nominal=NR_NOMINAL_V, nitro_mult=NR_NITRO_MULT,
+                   heat=lv.get("heat", 0.0), chase=lv.get("chase", 0), heat_start=lv.get("heat_start", 0),
+                   heat_floor=lv.get("heat_floor", 0), tunnels=lv.get("tunnels", 0), closures=lv.get("closures", 0),
+                   rb=lv.get("rb", 0))
+        for flag in ("wind", "rain", "checkpoint", "roadblocks", "heli", "fog", "fuel"):
+            cfg[flag] = bool(lv.get(flag))
         return {"ok": True, "run_id": run["run_id"], "seed": run["seed"], "level": level_id, "car": cid,
-                "nitro": perks["nitro"], "stash": perks["stash"], "cfg": cfg,
-                "stats": {k: c[k] for k in ("top", "accel", "handling", "armor", "cargo")}}
+                "nitro": perks["nitro"], "stash": perks["stash"], "scanner": perks["scanner"], "cfg": cfg, "stats": eff}
 
     if action == "finish":
         run_id = str(payload.get("run_id", ""))
@@ -27948,7 +28087,7 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
 
         unlocks = []
         if new_bits & 1:                         # first delivery of this route
-            unlocks.append(lv["unlock"])
+            unlocks.append(NR_CARS["frosty"]["name"] + " joins your garage" if run["level"] == 10 else lv["unlock"])
         notif = None
         try:
             cid_n = get_notification_channel_id(load_config())
@@ -27965,6 +28104,7 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
         achievements = []
         for ach_id, ok in (("nr_first", st["outcome"] == "delivered"),
                            ("nr_clean", st["outcome"] == "delivered" and st["cargo"] >= 100 and run["level"] >= 3),
+                           ("nr_bigone", st["outcome"] == "delivered" and run["level"] == 10),
                            ("nr_allstars", total_stars >= 3 * len(NR_LEVELS))):
             if ok:
                 try:
@@ -27972,13 +28112,12 @@ async def _nr_dispatch(uid: int, action: str, payload: dict) -> dict:
                         achievements.append(ACHIEVEMENTS[ach_id]["name"])
                 except Exception:
                     log.exception("night run achievement failed")
-        if new_stars and total_stars >= 3 * len(NR_LEVELS) and notif:
-            try:
-                await notif.send(f"🌙 **{_dash_name(uid)}** just earned every star in **Night Run**. "
-                                 f"All {len(NR_LEVELS)} routes, perfect. `_nightrun`",
-                                 allowed_mentions=discord.AllowedMentions.none())
-            except Exception:
-                pass
+        if new_bits & 1 and run["level"] == 10:
+            await _nr_notify(f"🚁 **{_dash_name(uid)}** just delivered **The Big One** in Night Run — "
+                             f"helicopter and all — and drove off in a legendary car. `_nightrun`")
+        elif new_stars and total_stars >= 3 * len(NR_LEVELS):
+            await _nr_notify(f"🌙 **{_dash_name(uid)}** just earned every star in **Night Run**. "
+                             f"All {len(NR_LEVELS)} routes, perfect. `_nightrun`")
 
         result = {"ok": True, "outcome": st["outcome"], "seconds": round(st["seconds"], 1),
                   "distance": st["distance"], "cargo": st["cargo"], "bags": st["bags"], "near": st["near"],
@@ -28006,8 +28145,9 @@ async def _handle_nightrun(message: discord.Message, rest: str):
         return
     await message.channel.send(
         f"🌙 **Night Run** — get the package across town. Weave through traffic, grab the cash, "
-        f"don't touch the cops: <{base}/games/nightrun>\n"
-        f"5 routes, 6 cars, 15 stars. Pays up to {NR_DAILY_CAP:,} a day, plus a bonus for every new star.",
+        f"and lose the cops: <{base}/games/nightrun>\n"
+        f"{len(NR_LEVELS)} routes, {len(NR_CARS)} cars, upgrades, {3 * len(NR_LEVELS)} stars. "
+        f"Pays up to {NR_DAILY_CAP:,} a day, plus a bonus for every new star.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 

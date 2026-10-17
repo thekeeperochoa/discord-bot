@@ -91,7 +91,8 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
                  "city": {"state": "GET", "act": "POST"},
-                 "nightrun": {"info": "GET", "start": "POST", "finish": "POST", "buy": "POST", "select": "POST"}}
+                 "nightrun": {"info": "GET", "start": "POST", "finish": "POST", "buy": "POST", "select": "POST",
+                              "upgrade": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
