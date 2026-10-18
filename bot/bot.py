@@ -7248,7 +7248,7 @@ async def casino_command(interaction: discord.Interaction):
         description=f"_{interaction.user.display_name}, what's your poison?_",
         color=discord.Color.gold(),
     )
-    embed.add_field(name="🃏 /blackjack `<bet>`", value="Beat the dealer to 21", inline=False)
+    embed.add_field(name="🃏 /blackjack `<bet>`", value="Beat the dealer to 21 · `_bj max` goes all in", inline=False)
     embed.add_field(name="🎰 /slots `<bet>`",     value="Spin the reels • up to 20x payout", inline=False)
     embed.add_field(name="🪙 /bet `<amount>`",    value="50/50 coinflip • double or nothing", inline=False)
     embed.add_field(name="🎡 /wheel",             value="Spin for a random outcome", inline=False)
@@ -33834,9 +33834,20 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
             else:
                 kwargs[ps["name"]] = member
         elif ptype == "int":
+            if slash_name == "blackjack" and ps["name"] == "bet" and tok.lower() in ("max", "all", "allin"):
+                # _bj max — go all in with your whole balance (blackjack has no table max)
+                bal = int(economy.balance(message.author.id))
+                if bal <= 0:
+                    await message.channel.send("❌ You've got no coins to bet.")
+                    return True
+                kwargs[ps["name"]] = bal
+                continue
             try:
                 kwargs[ps["name"]] = int(tok)
             except ValueError:
+                if slash_name == "blackjack":
+                    await message.channel.send(f"❌ Bet a number of coins, or `_{cmd_name} max` to go all in.")
+                    return True
                 await message.channel.send(f"❌ `{ps['name']}` must be a number for `{cmd_name}`.")
                 return True
         elif ptype == "str":
