@@ -89,7 +89,8 @@ _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "nightrun": Path(__file__).resolve().parent / "web" / "nightrun.html",
           "mines": Path(__file__).resolve().parent / "web" / "mines.html",
           "reels": Path(__file__).resolve().parent / "web" / "reels.html",
-          "flappy": Path(__file__).resolve().parent / "web" / "flappy.html"}
+          "flappy": Path(__file__).resolve().parent / "web" / "flappy.html",
+          "wildkin": Path(__file__).resolve().parent / "web" / "wildkin.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
@@ -98,7 +99,10 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                               "upgrade": "POST", "cos_buy": "POST", "cos_apply": "POST", "plate": "POST"},
                  "mines": {"info": "GET", "start": "POST", "reveal": "POST", "cashout": "POST"},
                  "reels": {"info": "GET", "spin": "POST"},
-                 "flappy": {"info": "GET", "start": "POST", "finish": "POST"}}
+                 "flappy": {"info": "GET", "start": "POST", "finish": "POST"},
+                 "wildkin": {"info": "GET", "new": "POST", "save": "POST", "starter": "POST", "wild": "POST",
+                             "trainer": "POST", "act": "POST", "heal": "POST", "buy": "POST", "use": "POST",
+                             "order": "POST", "box": "POST", "pickup": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 

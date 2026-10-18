@@ -26815,6 +26815,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _reels_dispatch(uid, action, payload)
     if game == "flappy":
         return await _flap_dispatch(uid, action, payload)
+    if game == "wildkin":
+        return await _wk_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27299,6 +27301,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"💣 **Mines** — flip tiles, dodge bombs, cash out before it blows: <{base}/games/mines>\n"
         f"🐺 **Wolf's Fortune** — 3D slots, wild wolves and tripled free spins: <{base}/games/reels>\n"
         f"🐦 **Flappy Degen** — flap through the candles, every pipe pays: <{base}/games/flappy>\n"
+        f"🌿 **Wildkin** — a pocket-sized creature-catching adventure: <{base}/games/wildkin>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -27543,6 +27546,1056 @@ async def _handle_videopoker(message: discord.Message, rest: str):
         f"🃏 **Video Poker** — Jacks or Better. Deal five, hold what you like, draw once. "
         f"Royal flush pays **800×** your bet: <{base}/games/videopoker>\n"
         f"Bets {VP_MIN_BET:,}–{VP_MAX_BET:,} coins. Every deal is provably fair.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🌿 WEB GAME: WILDKIN — a Game Boy-style creature-collecting RPG on the dashboard.
+# Walk the overworld, meet wild kin in tall grass, battle, catch, train and trade
+# blows with trainers. The page draws the world and handles walking and talking;
+# everything that matters (encounters, every battle turn, catches, items, coins,
+# levels) is decided here, so a save can't be edited into a level-100 team.
+# Coins are a side dish, not the point: trainers pay small prizes and the shop
+# sells items for coins, with a daily cap on what the game pays out.
+# Saves live in memory/wildkin.json, one per member.
+# Phase 1 world: home, Mossbrook, the Tamer's Hall, Route 1, Cragmoor (inn, shop).
+# ─────────────────────────────────────────────────────────────────────────────
+WK_FILE = MEMORY_DIR / "wildkin.json"
+WK_DAILY_CAP = 3_000           # most coins the game pays a member per day (EST)
+WK_FIRST_CATCH = 20            # coins for registering a new kind of kin
+WK_PARTY_MAX = 6
+WK_BOX_MAX = 120
+WK_ENC_GAP = 1.0               # seconds between wild encounters (walking takes longer anyway)
+_wk_last: dict[int, float] = {}
+
+WK_TYPES = ["beast", "flame", "tide", "grove", "storm", "stone", "wind", "shade", "spirit"]
+WK_CHART = {
+    ("flame", "grove"): 2, ("flame", "flame"): .5, ("flame", "tide"): .5, ("flame", "stone"): .5,
+    ("tide", "flame"): 2, ("tide", "stone"): 2, ("tide", "tide"): .5, ("tide", "grove"): .5,
+    ("grove", "tide"): 2, ("grove", "stone"): 2, ("grove", "flame"): .5, ("grove", "grove"): .5, ("grove", "wind"): .5,
+    ("storm", "tide"): 2, ("storm", "wind"): 2, ("storm", "storm"): .5, ("storm", "grove"): .5, ("storm", "stone"): 0,
+    ("stone", "flame"): 2, ("stone", "storm"): 2, ("stone", "wind"): 2, ("stone", "grove"): .5,
+    ("wind", "grove"): 2, ("wind", "storm"): .5, ("wind", "stone"): .5,
+    ("beast", "stone"): .5, ("beast", "spirit"): .5,
+    ("shade", "spirit"): 2, ("shade", "shade"): .5,
+    ("spirit", "shade"): 2, ("spirit", "spirit"): .5,
+}
+
+# cat: phys / spec / status.  stat: (stat, stages, "foe"|"self").  status: psn/brn/par/slp.
+WK_MOVES = {
+    "tackle":      {"name": "Slam",        "type": "beast",  "cat": "phys",   "power": 40, "acc": 100, "pp": 35},
+    "scratch":     {"name": "Claw Swipe",       "type": "beast",  "cat": "phys",   "power": 40, "acc": 100, "pp": 35},
+    "quick":       {"name": "Quick Strike",  "type": "beast",  "cat": "phys",   "power": 40, "acc": 100, "pp": 30, "prio": 1},
+    "growl":       {"name": "Snarl",         "type": "beast",  "cat": "status", "acc": 100, "pp": 40, "stat": ("atk", -1, "foe")},
+    "leer":        {"name": "Glare",          "type": "beast",  "cat": "status", "acc": 100, "pp": 30, "stat": ("def", -1, "foe")},
+    "harden":      {"name": "Brace",        "type": "stone",  "cat": "status", "acc": 0,   "pp": 30, "stat": ("def", 1, "self")},
+    "ember":       {"name": "Cinder",         "type": "flame",  "cat": "spec",   "power": 40, "acc": 100, "pp": 25, "status": "brn", "chance": 10},
+    "flamefang":   {"name": "Flame Fang",    "type": "flame",  "cat": "phys",   "power": 65, "acc": 95,  "pp": 15, "status": "brn", "chance": 10},
+    "inferno":     {"name": "Inferno Breath","type": "flame",  "cat": "spec",   "power": 90, "acc": 100, "pp": 10, "status": "brn", "chance": 10},
+    "bubble":      {"name": "Bubble Shot",        "type": "tide",   "cat": "spec",   "power": 40, "acc": 100, "pp": 30, "stat": ("spd", -1, "foe"), "chance": 10},
+    "aquapulse":   {"name": "Aqua Pulse",    "type": "tide",   "cat": "spec",   "power": 60, "acc": 100, "pp": 20},
+    "tidalcrash":  {"name": "Tidal Crash",   "type": "tide",   "cat": "phys",   "power": 90, "acc": 90,  "pp": 10},
+    "toxicsludge": {"name": "Toxic Sludge",  "type": "tide",   "cat": "spec",   "power": 45, "acc": 100, "pp": 20, "status": "psn", "chance": 30},
+    "vinelash":    {"name": "Vine Lash",     "type": "grove",  "cat": "phys",   "power": 45, "acc": 100, "pp": 25},
+    "sapdrain":    {"name": "Sap Drain",     "type": "grove",  "cat": "spec",   "power": 40, "acc": 100, "pp": 20, "drain": 50},
+    "spore":       {"name": "Spore Puff",    "type": "grove",  "cat": "status", "acc": 75,  "pp": 15, "status": "slp"},
+    "razorleaf":   {"name": "Sharp Leaf",    "type": "grove",  "cat": "phys",   "power": 55, "acc": 95,  "pp": 25, "crit": True},
+    "thornbarrage":{"name": "Thorn Barrage", "type": "grove",  "cat": "phys",   "power": 90, "acc": 100, "pp": 10},
+    "spark":       {"name": "Zap",         "type": "storm",  "cat": "phys",   "power": 45, "acc": 100, "pp": 30, "status": "par", "chance": 10},
+    "thunderjolt": {"name": "Thunder Jolt",  "type": "storm",  "cat": "spec",   "power": 65, "acc": 100, "pp": 15, "status": "par", "chance": 10},
+    "staticwave":  {"name": "Static Wave",   "type": "storm",  "cat": "status", "acc": 90,  "pp": 20, "status": "par"},
+    "pebble":      {"name": "Pebble Toss",   "type": "stone",  "cat": "phys",   "power": 40, "acc": 100, "pp": 30},
+    "rockslam":    {"name": "Rock Slam",     "type": "stone",  "cat": "phys",   "power": 65, "acc": 90,  "pp": 15},
+    "quake":       {"name": "Quake",         "type": "stone",  "cat": "phys",   "power": 90, "acc": 100, "pp": 10},
+    "gust":        {"name": "Breeze Blast",          "type": "wind",   "cat": "spec",   "power": 40, "acc": 100, "pp": 35},
+    "wingslice":   {"name": "Wing Slice",    "type": "wind",   "cat": "phys",   "power": 60, "acc": 100, "pp": 20},
+    "aircutter":   {"name": "Air Cutter",    "type": "wind",   "cat": "spec",   "power": 55, "acc": 95,  "pp": 25, "crit": True},
+    "bite":        {"name": "Chomp",          "type": "shade",  "cat": "phys",   "power": 60, "acc": 100, "pp": 25, "flinch": 30},
+    "nightshriek": {"name": "Night Shriek",  "type": "shade",  "cat": "status", "acc": 100, "pp": 20, "stat": ("spc", -1, "foe")},
+    "shadowclaw":  {"name": "Shadow Claw",   "type": "shade",  "cat": "phys",   "power": 70, "acc": 100, "pp": 15, "crit": True},
+    "spiritpulse": {"name": "Spirit Pulse",  "type": "spirit", "cat": "spec",   "power": 60, "acc": 100, "pp": 20},
+    "lullaby":     {"name": "Lullaby",       "type": "spirit", "cat": "status", "acc": 55,  "pp": 15, "status": "slp"},
+    "wisp":        {"name": "Wisp Flame",  "type": "spirit", "cat": "status", "acc": 85,  "pp": 15, "status": "brn"},
+    "moonbeam":    {"name": "Moonbeam",      "type": "spirit", "cat": "spec",   "power": 75, "acc": 100, "pp": 15},
+    "struggle":    {"name": "Last Ditch",      "type": "beast",  "cat": "phys",   "power": 50, "acc": 0,   "pp": 1, "recoil": 25},
+}
+
+# base: (hp, atk, def, spd, spc).  learn: (level, move).  evo: (level, into).
+WK_SPECIES = {
+    "emberwyrm":   {"no": 1,  "name": "Emberwyrm",   "types": ["flame"],          "base": (39, 52, 43, 60, 55), "catch": 45,  "xp": 62,
+                    "learn": [(1, "scratch"), (1, "growl"), (5, "ember"), (13, "quick"), (19, "flamefang"), (31, "inferno")], "evo": (16, "cinderdrake"),
+                    "dex": "A wyrmling whose scales stay warm for days after it naps in the sun."},
+    "cinderdrake": {"no": 2,  "name": "Cinderdrake", "types": ["flame", "wind"],  "base": (60, 66, 58, 80, 72), "catch": 45,  "xp": 142,
+                    "learn": [(1, "scratch"), (1, "growl"), (5, "ember"), (13, "quick"), (19, "flamefang"), (24, "wingslice"), (34, "inferno")], "evo": None,
+                    "dex": "Its first flight leaves a ring of scorched grass. Fiercely loyal to its tamer."},
+    "kelpling":    {"no": 3,  "name": "Kelpling",    "types": ["tide"],           "base": (44, 48, 55, 43, 52), "catch": 45,  "xp": 63,
+                    "learn": [(1, "tackle"), (1, "leer"), (5, "bubble"), (13, "quick"), (19, "aquapulse"), (31, "tidalcrash")], "evo": (16, "kelpstrider"),
+                    "dex": "A water-horse foal with a mane of river weed. It trots on the surface of ponds."},
+    "kelpstrider": {"no": 4,  "name": "Kelpstrider", "types": ["tide"],           "base": (62, 64, 76, 58, 68), "catch": 45,  "xp": 142,
+                    "learn": [(1, "tackle"), (1, "leer"), (5, "bubble"), (13, "quick"), (19, "aquapulse"), (34, "tidalcrash")], "evo": None,
+                    "dex": "It gallops across lakes at dusk. Fishermen say its whinny calls the rain."},
+    "mandrakelet": {"no": 5,  "name": "Mandrakelet", "types": ["grove"],          "base": (45, 49, 49, 45, 62), "catch": 45,  "xp": 64,
+                    "learn": [(1, "tackle"), (1, "growl"), (5, "vinelash"), (11, "spore"), (15, "sapdrain"), (21, "razorleaf"), (33, "thornbarrage")], "evo": (16, "rootmaw"),
+                    "dex": "A root sprite that naps buried to the neck. It screams if you pull it up too fast."},
+    "rootmaw":     {"no": 6,  "name": "Rootmaw",     "types": ["grove", "shade"], "base": (64, 66, 63, 55, 78), "catch": 45,  "xp": 142,
+                    "learn": [(1, "tackle"), (1, "growl"), (5, "vinelash"), (11, "spore"), (15, "sapdrain"), (21, "razorleaf"), (26, "bite"), (36, "thornbarrage")], "evo": None,
+                    "dex": "Its roots run deep under the forest floor. Lost travellers follow its glowing eyes home."},
+    "thornhare":   {"no": 7,  "name": "Thornhare",   "types": ["beast", "grove"], "base": (40, 50, 40, 62, 35), "catch": 255, "xp": 50,
+                    "learn": [(1, "tackle"), (4, "growl"), (8, "quick"), (12, "vinelash"), (20, "razorleaf")], "evo": None,
+                    "dex": "A hare with a coat of soft thorns. It bolts through brambles that would shred a fox."},
+    "gustling":    {"no": 8,  "name": "Gustling",    "types": ["wind"],           "base": (38, 42, 38, 58, 40), "catch": 255, "xp": 50,
+                    "learn": [(1, "tackle"), (1, "growl"), (6, "gust"), (9, "quick"), (15, "wingslice"), (22, "aircutter")], "evo": None,
+                    "dex": "A little sylph that rides the breeze. Where it lands, dandelions scatter."},
+    "pebblit":     {"no": 9,  "name": "Pebblit",     "types": ["stone"],          "base": (40, 72, 95, 22, 30), "catch": 190, "xp": 60,
+                    "learn": [(1, "tackle"), (1, "harden"), (9, "pebble"), (16, "rockslam"), (28, "quake")], "evo": (20, "bouldron"),
+                    "dex": "A pebble that woke up. It sleeps among ordinary stones and hates being skipped."},
+    "bouldron":    {"no": 10, "name": "Bouldron",    "types": ["stone"],          "base": (62, 95, 115, 35, 45), "catch": 90,  "xp": 137,
+                    "learn": [(1, "tackle"), (1, "harden"), (9, "pebble"), (16, "rockslam"), (32, "quake")], "evo": None,
+                    "dex": "A walking boulder. Mountain villages build their walls around the ones that sit still."},
+    "mudslime":    {"no": 11, "name": "Mudslime",    "types": ["tide", "stone"],  "base": (50, 40, 40, 25, 45), "catch": 190, "xp": 65,
+                    "learn": [(1, "tackle"), (7, "toxicsludge"), (11, "harden"), (17, "aquapulse")], "evo": None,
+                    "dex": "A puddle of swamp mud with opinions. It ruins boots on purpose."},
+    "sparkimp":    {"no": 12, "name": "Sparkimp",    "types": ["storm"],          "base": (35, 50, 35, 85, 55), "catch": 150, "xp": 70,
+                    "learn": [(1, "tackle"), (1, "leer"), (6, "spark"), (9, "quick"), (12, "staticwave"), (15, "thunderjolt")], "evo": None,
+                    "dex": "An imp born in a lightning strike. It steals the charge out of lanterns for fun."},
+    "wispkit":     {"no": 13, "name": "Wispkit",     "types": ["spirit"],         "base": (40, 35, 40, 70, 75), "catch": 60,  "xp": 85,
+                    "learn": [(1, "tackle"), (1, "lullaby"), (8, "spiritpulse"), (14, "wisp"), (24, "moonbeam")], "evo": None,
+                    "dex": "A will-o'-wisp with a fox's curiosity. It leads people off the path, then back again."},
+    "duskwing":    {"no": 14, "name": "Duskwing",    "types": ["shade", "wind"],  "base": (45, 55, 40, 75, 40), "catch": 150, "xp": 60,
+                    "learn": [(1, "bite"), (1, "gust"), (6, "nightshriek"), (12, "wingslice"), (22, "shadowclaw")], "evo": None,
+                    "dex": "It sleeps upside down in bell towers and wakes when the last bell rings."},
+}
+
+WK_ITEMS = {
+    "potion":     {"name": "Potion",       "price": 40,  "heal": 20,  "desc": "Restores 20 HP."},
+    "superpotion":{"name": "Big Potion", "price": 120, "heal": 50,  "desc": "Restores 50 HP."},
+    "charm":      {"name": "Rune Charm",   "price": 60,  "ball": 1.0, "desc": "Binds a wild kin."},
+    "greatcharm": {"name": "Great Charm",  "price": 180, "ball": 1.5, "desc": "Stronger charm."},
+    "antidote":   {"name": "Antidote",     "price": 30,  "cure": "psn", "desc": "Cures poison."},
+    "awakening":  {"name": "Wake Bell",    "price": 40,  "cure": "slp", "desc": "Cures sleep."},
+    "parlyzheal": {"name": "Nerve Balm",     "price": 40,  "cure": "par", "desc": "Cures paralysis."},
+    "burnsalve":  {"name": "Burn Salve",   "price": 40,  "cure": "brn", "desc": "Heals a burn."},
+}
+WK_SHOPS = {"shop_cragmoor": ["charm", "potion", "superpotion", "antidote", "awakening", "parlyzheal", "burnsalve"]}
+
+WK_MAPS = {"home", "mossbrook", "hall", "house_moss", "route1", "cragmoor", "inn_cragmoor", "shop_cragmoor", "house_crag"}
+WK_START = ("home", 5, 2, "down")
+WK_INNS = {"home": ("home", 4, 5, "up"), "inn_cragmoor": ("inn_cragmoor", 4, 3, "up")}
+WK_ENCOUNTERS = {
+    "route1": [("thornhare", 2, 4, 35), ("gustling", 2, 4, 30), ("pebblit", 3, 4, 15),
+               ("mudslime", 2, 3, 10), ("sparkimp", 3, 5, 7), ("wispkit", 4, 5, 3)],
+}
+WK_STARTERS = ["emberwyrm", "kelpling", "mandrakelet"]
+WK_RIVAL_PICK = {"emberwyrm": "kelpling", "kelpling": "mandrakelet", "mandrakelet": "emberwyrm"}
+WK_TRAINERS = {
+    "rival1":      {"name": "Kai",  "cls": "Rival", "map": "hall",   "team": None, "prize": 30, "needs": "starter",
+                    "win": "Hah! Lucky pick. I'll train harder!"},
+    "r1_pip":      {"name": "Pip",  "cls": "Kid",   "map": "route1", "team": [("gustling", 3), ("thornhare", 3)], "prize": 15,
+                    "win": "Aww, I need more practice..."},
+    "r1_wren":     {"name": "Wren", "cls": "Lass",  "map": "route1", "team": [("gustling", 3), ("thornhare", 4)], "prize": 15,
+                    "win": "My kin are cuter, though."},
+    "r1_brom":     {"name": "Brom", "cls": "Hiker", "map": "route1", "team": [("pebblit", 5), ("duskwing", 4)], "prize": 20,
+                    "win": "Ho! You've got grit, kid. Cragmoor's just ahead."},
+}
+WK_PICKUPS = {
+    "r1_potion":    {"map": "route1",   "items": [("potion", 1)]},
+    "r1_charm":     {"map": "route1",   "items": [("charm", 2)]},
+    "moss_potion":  {"map": "mossbrook","items": [("potion", 1)]},
+    "elder_charms": {"map": "hall",     "items": [("charm", 5), ("potion", 2)], "needs": "rival1"},
+    "crag_gift":    {"map": "house_crag","items": [("superpotion", 1)]},
+}
+
+
+def _wk_load() -> dict:
+    d = _load_json_file(WK_FILE, {})
+    d.setdefault("users", {})
+    return d
+
+
+def wk_eff(mtype: str, dtypes: list) -> float:
+    m = 1.0
+    for t in dtypes:
+        m *= WK_CHART.get((mtype, t), 1)
+    return m
+
+
+def wk_xp_for(level: int) -> int:
+    return level ** 3
+
+
+def wk_stats(mon: dict) -> dict:
+    b, iv, L = WK_SPECIES[mon["sp"]]["base"], mon["iv"], mon["lvl"]
+    s = {"hp": ((b[0] + iv[0]) * 2 * L) // 100 + L + 10}
+    for i, k in enumerate(("atk", "def", "spd", "spc"), start=1):
+        s[k] = ((b[i] + iv[i]) * 2 * L) // 100 + 5
+    return s
+
+
+def _wk_moves_at(sp: str, level: int) -> list:
+    learned = []
+    for lv, mv in WK_SPECIES[sp]["learn"]:
+        if lv <= level and mv not in learned:
+            learned.append(mv)
+    return learned[-4:]
+
+
+def wk_make(save: dict, sp: str, level: int, rng=random) -> dict:
+    save["next_uid"] = int(save.get("next_uid", 1)) + 1
+    mon = {"uid": save["next_uid"], "sp": sp, "lvl": level, "xp": wk_xp_for(level),
+           "iv": [rng.randint(0, 15) for _ in range(5)], "st": None, "slp": 0,
+           "moves": [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in _wk_moves_at(sp, level)]}
+    mon["hp"] = wk_stats(mon)["hp"]
+    return mon
+
+
+def _wk_foe_mon(sp: str, level: int, rng=random) -> dict:
+    mon = {"uid": 0, "sp": sp, "lvl": level, "xp": wk_xp_for(level), "iv": [rng.randint(0, 15) for _ in range(5)],
+           "st": None, "slp": 0, "moves": [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in _wk_moves_at(sp, level)]}
+    mon["hp"] = wk_stats(mon)["hp"]
+    return mon
+
+
+def wk_mon_public(mon: dict) -> dict:
+    sp = WK_SPECIES[mon["sp"]]
+    st = wk_stats(mon)
+    return {"uid": mon["uid"], "sp": mon["sp"], "name": sp["name"], "types": sp["types"], "lvl": mon["lvl"],
+            "hp": mon["hp"], "max": st["hp"], "st": mon.get("st"), "xp": mon["xp"],
+            "xp_lo": wk_xp_for(mon["lvl"]), "xp_hi": wk_xp_for(mon["lvl"] + 1),
+            "stats": st, "moves": [{"id": m["id"], "name": WK_MOVES[m["id"]]["name"], "type": WK_MOVES[m["id"]]["type"],
+                                    "pp": m["pp"], "max": WK_MOVES[m["id"]]["pp"], "power": WK_MOVES[m["id"]].get("power", 0),
+                                    "cat": WK_MOVES[m["id"]]["cat"]} for m in mon["moves"]]}
+
+
+def _wk_foe_public(mon: dict) -> dict:
+    sp = WK_SPECIES[mon["sp"]]
+    return {"sp": mon["sp"], "name": sp["name"], "types": sp["types"], "lvl": mon["lvl"], "hp": mon["hp"],
+            "max": wk_stats(mon)["hp"], "st": mon.get("st")}
+
+
+def _wk_today(save: dict) -> int:
+    d = save.get("daily", {})
+    return int(d.get("earned", 0)) if d.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _wk_pay(uid: int, save: dict, amount: int, why: str) -> int:
+    """Pay coins from the game, within the daily cap. Returns what was actually paid."""
+    today = _wk_today(save)
+    pay = max(0, min(int(amount), WK_DAILY_CAP - today))
+    if pay > 0:
+        economy.add(uid, pay, f"wildkin: {why}")
+        try:
+            track_economy_event("earned", pay)
+        except Exception:
+            pass
+    save["daily"] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + pay}
+    return pay
+
+
+def _wk_new_save(uid: int, name: str) -> dict:
+    m, x, y, d = WK_START
+    return {"name": name, "map": m, "x": x, "y": y, "dir": d, "party": [], "box": [], "bag": {},
+            "flags": {}, "beaten": [], "picked": [], "seen": [], "caught": [], "respawn": "home",
+            "battle": None, "next_uid": 0, "created": int(time.time()), "daily": {}}
+
+
+def wk_save_public(save: dict) -> dict:
+    b = save.get("battle")
+    return {"name": save["name"], "map": save["map"], "x": save["x"], "y": save["y"], "dir": save["dir"],
+            "party": [wk_mon_public(m) for m in save["party"]], "box": [wk_mon_public(m) for m in save["box"]],
+            "bag": {k: v for k, v in save["bag"].items() if v > 0}, "beaten": save["beaten"], "picked": save["picked"],
+            "seen": save["seen"], "caught": save["caught"], "flags": save["flags"], "today": _wk_today(save),
+            "daily_cap": WK_DAILY_CAP, "battle": _wk_battle_public(save) if b else None}
+
+
+def _wk_battle_public(save: dict) -> dict:
+    b = save["battle"]
+    foe = b["foes"][b["fi"]]
+    out = {"kind": b["kind"], "foe": _wk_foe_public(foe), "mi": b["mi"], "must_switch": b.get("must_switch", False),
+           "foes_left": sum(1 for m in b["foes"] if m["hp"] > 0), "foes_total": len(b["foes"])}
+    if b["kind"] == "trainer":
+        t = WK_TRAINERS[b["tid"]]
+        out["trainer"] = {"id": b["tid"], "name": t["name"], "cls": t["cls"]}
+    return out
+
+
+def _wk_heal_all(save: dict):
+    for m in save["party"]:
+        m["hp"] = wk_stats(m)["hp"]
+        m["st"], m["slp"] = None, 0
+        for mv in m["moves"]:
+            mv["pp"] = WK_MOVES[mv["id"]]["pp"]
+
+
+def _wk_seen(save: dict, sp: str):
+    if sp not in save["seen"]:
+        save["seen"].append(sp)
+
+
+# ── battle engine ────────────────────────────────────────────────────────────
+def _wk_stage_mult(s: int) -> float:
+    return (2 + s) / 2 if s >= 0 else 2 / (2 - s)
+
+
+def _wk_eff_stat(mon: dict, key: str, stages: dict) -> int:
+    v = wk_stats(mon)[key] * _wk_stage_mult(stages.get(key, 0))
+    if key == "spd" and mon.get("st") == "par":
+        v *= 0.5
+    return max(1, int(v))
+
+
+def _wk_name(b: dict, side: str, mon: dict) -> str:
+    n = WK_SPECIES[mon["sp"]]["name"]
+    if side == "me":
+        return n
+    return ("Wild " if b["kind"] == "wild" else "Foe ") + n
+
+
+def _wk_damage(att: dict, dfn: dict, md: dict, astg: dict, dstg: dict, rng) -> tuple:
+    phys = md["cat"] == "phys"
+    A = _wk_eff_stat(att, "atk" if phys else "spc", astg)
+    D = _wk_eff_stat(dfn, "def" if phys else "spc", dstg)
+    if phys and att.get("st") == "brn":
+        A = max(1, A // 2)
+    L = att["lvl"]
+    dmg = ((2 * L // 5 + 2) * md["power"] * A // D) // 50 + 2
+    crit = rng.random() < (1 / 8 if md.get("crit") else 1 / 16)
+    if crit:
+        dmg = dmg * 3 // 2
+    if md["type"] in WK_SPECIES[att["sp"]]["types"]:
+        dmg = dmg * 3 // 2
+    eff = wk_eff(md["type"], WK_SPECIES[dfn["sp"]]["types"])
+    if eff == 0:
+        return 0, 0, False
+    # round once at the end: flooring after each step turned small resisted hits (2.5 → 2 → 1) into chip damage
+    dmg = dmg * eff * rng.randint(217, 255) / 255
+    return max(1, int(dmg + 0.5)), eff, crit
+
+
+_WK_STAT_NAMES = {"atk": "ATTACK", "def": "DEFENSE", "spd": "SPEED", "spc": "SPECIAL"}
+_WK_STATUS_TEXT = {"psn": "was poisoned!", "brn": "was burned!", "par": "went numb! It may not be able to move!", "slp": "fell asleep!"}
+
+
+def _wk_apply_status(b, side, mon, st, ev, rng, quiet_fail=False) -> bool:
+    types = WK_SPECIES[mon["sp"]]["types"]
+    if mon.get("st") or mon["hp"] <= 0 or (st == "brn" and "flame" in types) or (st == "par" and "storm" in types):
+        if not quiet_fail:
+            ev.append({"t": "text", "s": "Nothing happened!"})
+        return False
+    mon["st"] = st
+    if st == "slp":
+        mon["slp"] = rng.randint(1, 3)
+    ev.append({"t": "status", "side": side, "st": st})
+    ev.append({"t": "text", "s": f"{_wk_name(b, side, mon)} {_WK_STATUS_TEXT[st]}"})
+    return True
+
+
+def _wk_apply_stat(b, side, mon, stages, stat, delta, ev):
+    cur = stages.get(stat, 0)
+    nxt = max(-6, min(6, cur + delta))
+    who = _wk_name(b, side, mon)
+    if nxt == cur:
+        ev.append({"t": "text", "s": f"{who}'s {_WK_STAT_NAMES[stat]} can't go any {'higher' if delta > 0 else 'lower'}!"})
+        return
+    stages[stat] = nxt
+    ev.append({"t": "stat", "side": side, "up": delta > 0})
+    ev.append({"t": "text", "s": f"{who}'s {_WK_STAT_NAMES[stat]} {'rose' if delta > 0 else 'fell'}{' sharply' if abs(delta) > 1 else ''}!"})
+
+
+def _wk_use_move(save, b, side, mv_idx, ev, rng, moved_first: bool):
+    """`side` uses move `mv_idx` (-1 = Struggle) on the other side."""
+    party = save["party"]
+    att = party[b["mi"]] if side == "me" else b["foes"][b["fi"]]
+    oside = "foe" if side == "me" else "me"
+    dfn = b["foes"][b["fi"]] if side == "me" else party[b["mi"]]
+    astg, dstg = b["stg"][side], b["stg"][oside]
+    aname = _wk_name(b, side, att)
+    if att.get("st") == "slp":
+        att["slp"] = int(att.get("slp", 1)) - 1
+        if att["slp"] <= 0:
+            att["st"], att["slp"] = None, 0
+            ev.append({"t": "status", "side": side, "st": None})
+            ev.append({"t": "text", "s": f"{aname} woke up!"})
+        else:
+            ev.append({"t": "text", "s": f"{aname} is sound asleep."})
+        return
+    if att.get("st") == "par" and rng.random() < 0.25:
+        ev.append({"t": "text", "s": f"{aname} is too numb to move!"})
+        return
+    if b.get("flinch") == side:
+        ev.append({"t": "text", "s": f"{aname} flinched!"})
+        return
+    if mv_idx < 0:
+        mid = "struggle"
+    else:
+        mid = att["moves"][mv_idx]["id"]
+        att["moves"][mv_idx]["pp"] = max(0, att["moves"][mv_idx]["pp"] - 1)
+    md = WK_MOVES[mid]
+    ev.append({"t": "text", "s": f"{aname} used {md['name'].upper()}!"})
+    ev.append({"t": "use", "side": side, "move": mid, "type": md["type"]})
+    if md["acc"] and rng.random() * 100 >= md["acc"]:
+        ev.append({"t": "text", "s": f"{aname}'s attack missed!"})
+        return
+    if md["cat"] == "status":
+        if "stat" in md:
+            stat, delta, who = md["stat"]
+            if who == "self":
+                _wk_apply_stat(b, side, att, astg, stat, delta, ev)
+            else:
+                _wk_apply_stat(b, oside, dfn, dstg, stat, delta, ev)
+        if "status" in md:
+            _wk_apply_status(b, oside, dfn, md["status"], ev, rng)
+        return
+    dmg, eff, crit = _wk_damage(att, dfn, md, astg, dstg, rng)
+    if eff == 0:
+        ev.append({"t": "text", "s": f"{_wk_name(b, oside, dfn)} shrugged it off!"})
+        return
+    dmg = min(dmg, dfn["hp"])
+    dfn["hp"] -= dmg
+    ev.append({"t": "hit", "side": oside, "eff": eff})
+    ev.append({"t": "hp", "side": oside, "hp": dfn["hp"], "max": wk_stats(dfn)["hp"]})
+    if crit:
+        ev.append({"t": "text", "s": "A lucky hit!"})
+    if eff > 1:
+        ev.append({"t": "text", "s": "It hit hard!"})
+    elif eff < 1:
+        ev.append({"t": "text", "s": "It barely tickled..."})
+    if md.get("drain") and att["hp"] > 0:
+        heal = min(max(1, dmg * md["drain"] // 100), wk_stats(att)["hp"] - att["hp"])
+        if heal > 0:
+            att["hp"] += heal
+            ev.append({"t": "hp", "side": side, "hp": att["hp"], "max": wk_stats(att)["hp"]})
+            ev.append({"t": "text", "s": f"{_wk_name(b, oside, dfn)} had its energy drained!"})
+    if md.get("recoil"):
+        rec = max(1, dmg * md["recoil"] // 100)
+        att["hp"] = max(0, att["hp"] - rec)
+        ev.append({"t": "hp", "side": side, "hp": att["hp"], "max": wk_stats(att)["hp"]})
+        ev.append({"t": "text", "s": f"{aname} is hit with recoil!"})
+    if dfn["hp"] > 0 and md.get("chance") and rng.random() * 100 < md["chance"]:
+        if "status" in md:
+            _wk_apply_status(b, oside, dfn, md["status"], ev, rng, quiet_fail=True)
+        elif "stat" in md:
+            stat, delta, who = md["stat"]
+            _wk_apply_stat(b, oside, dfn, dstg, stat, delta, ev)
+    if dfn["hp"] > 0 and md.get("flinch") and moved_first and rng.random() * 100 < md["flinch"]:
+        b["flinch"] = oside
+
+
+def _wk_ai_move(save, b, rng) -> int:
+    foe = b["foes"][b["fi"]]
+    me = save["party"][b["mi"]]
+    usable = [i for i, m in enumerate(foe["moves"]) if m["pp"] > 0]
+    if not usable:
+        return -1
+    if b["kind"] == "wild":
+        return rng.choice(usable)
+    scored = []
+    for i in usable:
+        md = WK_MOVES[foe["moves"][i]["id"]]
+        if md["cat"] == "status":
+            s = 22 if (("status" in md and not me.get("st")) or ("stat" in md)) else 0
+            if "stat" in md and md["stat"][2] == "self" and b["stg"]["foe"].get(md["stat"][0], 0) >= 2:
+                s = 0
+        else:
+            s = md["power"] * wk_eff(md["type"], WK_SPECIES[me["sp"]]["types"]) * (1.5 if md["type"] in WK_SPECIES[foe["sp"]]["types"] else 1) * md["acc"] / 100
+        scored.append((s, i))
+    scored.sort(reverse=True)
+    return scored[0][1] if rng.random() < 0.75 else rng.choice(usable)
+
+
+def _wk_gain_xp(uid, save, b, ev):
+    """The active kin earns XP for the foe that just fainted; level-ups and new moves."""
+    me = save["party"][b["mi"]]
+    if me["hp"] <= 0:
+        return
+    foe = b["foes"][b["fi"]]
+    xp = WK_SPECIES[foe["sp"]]["xp"] * foe["lvl"] // 7
+    if b["kind"] == "trainer":
+        xp = xp * 3 // 2
+    xp = max(1, xp)
+    name = WK_SPECIES[me["sp"]]["name"]
+    me["xp"] += xp
+    ev.append({"t": "text", "s": f"{name} gained {xp} XP!"})
+    ev.append({"t": "xp", "uid": me["uid"], "xp": me["xp"], "lo": wk_xp_for(me["lvl"]), "hi": wk_xp_for(me["lvl"] + 1)})
+    while me["lvl"] < 100 and me["xp"] >= wk_xp_for(me["lvl"] + 1):
+        old_max = wk_stats(me)["hp"]
+        me["lvl"] += 1
+        new = wk_stats(me)
+        me["hp"] = min(new["hp"], me["hp"] + new["hp"] - old_max)
+        ev.append({"t": "level", "uid": me["uid"], "lvl": me["lvl"], "hp": me["hp"], "max": new["hp"], "stats": new,
+                   "lo": wk_xp_for(me["lvl"]), "hi": wk_xp_for(me["lvl"] + 1), "xp": me["xp"]})
+        ev.append({"t": "text", "s": f"{name} reached level {me['lvl']}!"})
+        for lv, mv in WK_SPECIES[me["sp"]]["learn"]:
+            if lv == me["lvl"] and mv not in [m["id"] for m in me["moves"]]:
+                if len(me["moves"]) < 4:
+                    me["moves"].append({"id": mv, "pp": WK_MOVES[mv]["pp"]})
+                    ev.append({"t": "learn", "uid": me["uid"], "move": mv})
+                    ev.append({"t": "text", "s": f"{name} learned {WK_MOVES[mv]['name'].upper()}!"})
+                else:
+                    # drop the oldest move to make room (a choice screen comes in a later update)
+                    old = me["moves"].pop(0)
+                    me["moves"].append({"id": mv, "pp": WK_MOVES[mv]["pp"]})
+                    ev.append({"t": "learn", "uid": me["uid"], "move": mv})
+                    ev.append({"t": "text", "s": f"{name} forgot {WK_MOVES[old['id']]['name'].upper()} and learned {WK_MOVES[mv]['name'].upper()}!"})
+
+
+def _wk_finish(uid, save, b, result, ev):
+    """Close the battle: prizes, evolutions, blackout."""
+    save["battle"] = None
+    if result == "win" and b["kind"] == "trainer":
+        t = WK_TRAINERS[b["tid"]]
+        if b["tid"] not in save["beaten"]:
+            save["beaten"].append(b["tid"])
+        ev.append({"t": "text", "s": f"You defeated {t['cls'].upper()} {t['name'].upper()}!"})
+        ev.append({"t": "say", "who": t["name"], "s": t["win"]})
+        prize = t["prize"] * max(m["lvl"] for m in b["foes"])
+        paid = _wk_pay(uid, save, prize, f"beat {t['name']}")
+        ev.append({"t": "text", "s": f"You got {paid:,} coins for winning!" if paid else "You've earned the most coins the game pays today."})
+        ev.append({"t": "coins", "paid": paid})
+    if result in ("win", "run", "caught"):
+        for m in save["party"]:
+            evo = WK_SPECIES[m["sp"]]["evo"]
+            if evo and m["lvl"] >= evo[0] and m["hp"] > 0:
+                old_sp = m["sp"]
+                before = WK_SPECIES[old_sp]["name"]
+                old_max = wk_stats(m)["hp"]
+                m["sp"] = evo[1]
+                m["hp"] = min(wk_stats(m)["hp"], m["hp"] + wk_stats(m)["hp"] - old_max)
+                _wk_seen(save, evo[1])
+                if evo[1] not in save["caught"]:
+                    save["caught"].append(evo[1])
+                ev.append({"t": "text", "s": f"Huh? {before} is changing!"})
+                ev.append({"t": "evolve", "uid": m["uid"], "sp_from": old_sp, "sp": evo[1], "mon": wk_mon_public(m)})
+                ev.append({"t": "text", "s": f"{before} became {WK_SPECIES[evo[1]]['name']}!"})
+    if result == "win" and b.get("tid") == "rival1":
+        # don't send a brand-new tamer onto Route 1 half-dead
+        _wk_heal_all(save)
+        ev.append({"t": "text", "s": "Elder Rowan patched up your kin."})
+    if result == "lose" and b.get("tid") == "rival1":
+        # the first rival battle is a lesson, not a wall: the story carries on either way
+        if "rival1" not in save["beaten"]:
+            save["beaten"].append("rival1")
+        _wk_heal_all(save)
+        ev.append({"t": "say", "who": "Kai", "s": "Ha! Told you I picked the better one! Go rest up, loser."})
+        ev.append({"t": "text", "s": "Elder Rowan patched up your kin."})
+        ev.append({"t": "end", "result": "lose_rival"})
+        return
+    if result == "lose":
+        ev.append({"t": "text", "s": "None of your kin can fight anymore!"})
+        ev.append({"t": "text", "s": "Everything went dark..."})
+        _wk_heal_all(save)
+        m, x, y, d = WK_INNS.get(save.get("respawn", "home"), WK_INNS["home"])
+        save["map"], save["x"], save["y"], save["dir"] = m, x, y, d
+        ev.append({"t": "blackout", "map": m, "x": x, "y": y, "dir": d})
+    ev.append({"t": "end", "result": result})
+
+
+def _wk_residual(save, b, side, ev):
+    mon = save["party"][b["mi"]] if side == "me" else b["foes"][b["fi"]]
+    if mon["hp"] <= 0 or mon.get("st") not in ("psn", "brn"):
+        return
+    mx = wk_stats(mon)["hp"]
+    d = max(1, mx // 8) if mon["st"] == "psn" else max(1, mx // 16)
+    mon["hp"] = max(0, mon["hp"] - d)
+    ev.append({"t": "text", "s": f"{_wk_name(b, side, mon)} is {'hurt by the poison' if mon['st'] == 'psn' else 'stung by its burn'}!"})
+    ev.append({"t": "hit", "side": side, "eff": 1, "dot": True})
+    ev.append({"t": "hp", "side": side, "hp": mon["hp"], "max": mx})
+
+
+def _wk_after_faints(uid, save, b, ev) -> bool:
+    """Handle anyone who fainted. Returns True if the battle ended."""
+    foe = b["foes"][b["fi"]]
+    me = save["party"][b["mi"]]
+    if foe["hp"] <= 0:
+        ev.append({"t": "faint", "side": "foe"})
+        ev.append({"t": "text", "s": f"{_wk_name(b, 'foe', foe)} fainted!"})
+        _wk_gain_xp(uid, save, b, ev)
+        nxt = next((i for i, m in enumerate(b["foes"]) if m["hp"] > 0), None)
+        if nxt is None:
+            if me["hp"] <= 0:
+                ev.append({"t": "faint", "side": "me"})
+                ev.append({"t": "text", "s": f"{WK_SPECIES[me['sp']]['name']} fainted!"})
+            _wk_finish(uid, save, b, "win", ev)
+            return True
+        b["fi"] = nxt
+        b["stg"]["foe"] = {}
+        b["flinch"] = None
+        nf = b["foes"][nxt]
+        _wk_seen(save, nf["sp"])
+        t = WK_TRAINERS[b["tid"]]
+        ev.append({"t": "text", "s": f"{t['cls'].upper()} {t['name'].upper()} sent out {WK_SPECIES[nf['sp']]['name'].upper()}!"})
+        ev.append({"t": "send", "side": "foe", "mon": _wk_foe_public(nf), "left": sum(1 for m in b["foes"] if m["hp"] > 0)})
+    if me["hp"] <= 0:
+        ev.append({"t": "faint", "side": "me"})
+        ev.append({"t": "text", "s": f"{WK_SPECIES[me['sp']]['name']} fainted!"})
+        if any(m["hp"] > 0 for m in save["party"]):
+            b["must_switch"] = True
+            ev.append({"t": "must_switch"})
+            return False
+        _wk_finish(uid, save, b, "lose", ev)
+        return True
+    return False
+
+
+def _wk_catch(uid, save, b, item, ev, rng) -> bool:
+    foe = b["foes"][b["fi"]]
+    mx, hp = wk_stats(foe)["hp"], foe["hp"]
+    rate = WK_SPECIES[foe["sp"]]["catch"]
+    bonus = WK_ITEMS[item]["ball"]
+    stb = 2.0 if foe.get("st") == "slp" else (1.5 if foe.get("st") in ("psn", "brn", "par") else 1.0)
+    a = ((3 * mx - 2 * hp) * rate * bonus) / (3 * mx) * stb
+    if a >= 255:
+        shakes = 4
+    else:
+        bb = 65536 / ((255 / max(a, 0.1)) ** 0.1875)
+        shakes = 0
+        while shakes < 4 and rng.randint(0, 65535) < bb:
+            shakes += 1
+    caught = shakes == 4
+    ev.append({"t": "text", "s": f"You threw a {WK_ITEMS[item]['name'].upper()}!"})
+    ev.append({"t": "throw", "shakes": min(3, shakes), "caught": caught, "item": item})
+    if not caught:
+        ev.append({"t": "text", "s": ["It slipped right out!", "Argh! It broke loose!", "So close! It wriggled free!", "Nooo! It was nearly bound!"][min(3, shakes)]})
+        return False
+    name = WK_SPECIES[foe["sp"]]["name"]
+    ev.append({"t": "text", "s": f"Bound! {name} was caught!"})
+    new_kind = foe["sp"] not in save["caught"]
+    if new_kind:
+        save["caught"].append(foe["sp"])
+        _wk_seen(save, foe["sp"])
+        ev.append({"t": "text", "s": f"{name} is now in your KINDEX!"})
+        ev.append({"t": "dex", "sp": foe["sp"]})
+    save["next_uid"] = int(save.get("next_uid", 1)) + 1
+    mon = dict(foe, uid=save["next_uid"])
+    mon["moves"] = [dict(m) for m in foe["moves"]]
+    if len(save["party"]) < WK_PARTY_MAX:
+        save["party"].append(mon)
+        ev.append({"t": "joined", "mon": wk_mon_public(mon)})
+    elif len(save["box"]) < WK_BOX_MAX:
+        save["box"].append(mon)
+        ev.append({"t": "text", "s": f"{name} was sent to the KIN BOX."})
+    else:
+        ev.append({"t": "text", "s": f"Your KIN BOX is full, so {name} was released."})
+    if new_kind:
+        paid = _wk_pay(uid, save, WK_FIRST_CATCH, "new kin registered")
+        if paid:
+            ev.append({"t": "text", "s": f"Elder Rowan sent you {paid} coins for your research!"})
+            ev.append({"t": "coins", "paid": paid})
+    _wk_finish(uid, save, b, "caught", ev)
+    return True
+
+
+def _wk_turn(uid: int, save: dict, action: dict, rng=random) -> dict:
+    b = save["battle"]
+    ev = []
+    party = save["party"]
+    kind = str(action.get("kind", ""))
+    b["flinch"] = None
+    if b.get("must_switch"):
+        if kind != "switch":
+            return {"ok": False, "error": "Choose a kin to send out."}
+    if kind == "switch":
+        try:
+            idx = int(action.get("idx", -1))
+        except (TypeError, ValueError):
+            idx = -1
+        if idx < 0 or idx >= len(party) or party[idx]["hp"] <= 0 or idx == b["mi"]:
+            return {"ok": False, "error": "That kin can't battle." if 0 <= idx < len(party) and idx != b["mi"] else "It's already out!"}
+        forced = b.get("must_switch")
+        if not forced:
+            ev.append({"t": "text", "s": f"Come back, {WK_SPECIES[party[b['mi']]['sp']]['name']}!"})
+            ev.append({"t": "recall"})
+        b["mi"], b["stg"]["me"], b["must_switch"] = idx, {}, False
+        ev.append({"t": "text", "s": f"Go! {WK_SPECIES[party[idx]['sp']]['name'].upper()}!"})
+        ev.append({"t": "send", "side": "me", "mon": wk_mon_public(party[idx])})
+        if forced:
+            return {"ok": True, "events": ev}
+        _wk_foe_turn_only(uid, save, b, ev, rng)
+        return {"ok": True, "events": ev}
+    if kind == "run":
+        if b["kind"] == "trainer":
+            return {"ok": True, "events": [{"t": "text", "s": "You can't run from a trainer battle!"}], "no_turn": True}
+        b["runs"] = int(b.get("runs", 0)) + 1
+        mine = _wk_eff_stat(party[b["mi"]], "spd", b["stg"]["me"])
+        theirs = _wk_eff_stat(b["foes"][b["fi"]], "spd", b["stg"]["foe"])
+        q = (theirs // 4) % 256
+        f = 256 if q == 0 else (mine * 32) // q + 30 * (b["runs"] - 1)
+        if f > 255 or rng.randint(0, 255) < f:
+            ev.append({"t": "text", "s": "You slipped away!"})
+            _wk_finish(uid, save, b, "run", ev)
+            return {"ok": True, "events": ev}
+        ev.append({"t": "text", "s": "Couldn't get away!"})
+        _wk_foe_turn_only(uid, save, b, ev, rng)
+        return {"ok": True, "events": ev}
+    if kind == "item":
+        item = str(action.get("item", ""))
+        if item not in WK_ITEMS or save["bag"].get(item, 0) <= 0:
+            return {"ok": False, "error": "You don't have that."}
+        it = WK_ITEMS[item]
+        if "ball" in it:
+            if b["kind"] == "trainer":
+                return {"ok": True, "events": [{"t": "text", "s": "The trainer swatted the charm away!"}, {"t": "text", "s": "You can only bind wild kin."}], "no_turn": True}
+            save["bag"][item] -= 1
+            if _wk_catch(uid, save, b, item, ev, rng):
+                return {"ok": True, "events": ev}
+            _wk_foe_turn_only(uid, save, b, ev, rng)
+            return {"ok": True, "events": ev}
+        try:
+            tgt = int(action.get("target", b["mi"]))
+        except (TypeError, ValueError):
+            tgt = b["mi"]
+        if tgt < 0 or tgt >= len(party):
+            return {"ok": False, "error": "Pick a kin."}
+        mon = party[tgt]
+        res = _wk_apply_item(mon, item)
+        if res is None:
+            return {"ok": False, "error": "It won't have any effect."}
+        save["bag"][item] -= 1
+        ev.append({"t": "text", "s": f"You used a {it['name'].upper()}!"})
+        if "heal" in it:
+            ev.append({"t": "hp", "side": "me" if tgt == b["mi"] else "bench", "uid": mon["uid"], "hp": mon["hp"], "max": wk_stats(mon)["hp"]})
+        else:
+            ev.append({"t": "status", "side": "me" if tgt == b["mi"] else "bench", "uid": mon["uid"], "st": None})
+        ev.append({"t": "text", "s": res})
+        _wk_foe_turn_only(uid, save, b, ev, rng)
+        return {"ok": True, "events": ev}
+    if kind != "move":
+        return {"ok": False, "error": "Unknown action."}
+    me = party[b["mi"]]
+    if all(m["pp"] <= 0 for m in me["moves"]):
+        mi = -1
+    else:
+        try:
+            mi = int(action.get("idx", -1))
+        except (TypeError, ValueError):
+            mi = -1
+        if mi < 0 or mi >= len(me["moves"]):
+            return {"ok": False, "error": "Pick a move."}
+        if me["moves"][mi]["pp"] <= 0:
+            return {"ok": False, "error": "No PP left for this move!"}
+    foe = b["foes"][b["fi"]]
+    fm = _wk_ai_move(save, b, rng)
+    mp = WK_MOVES[me["moves"][mi]["id"]].get("prio", 0) if mi >= 0 else 0
+    fp = WK_MOVES[foe["moves"][fm]["id"]].get("prio", 0) if fm >= 0 else 0
+    ms, fs = _wk_eff_stat(me, "spd", b["stg"]["me"]), _wk_eff_stat(foe, "spd", b["stg"]["foe"])
+    me_first = mp > fp or (mp == fp and (ms > fs or (ms == fs and rng.random() < 0.5)))
+    order = [("me", mi), ("foe", fm)] if me_first else [("foe", fm), ("me", mi)]
+    for n, (side, idx) in enumerate(order):
+        _wk_use_move(save, b, side, idx, ev, rng, moved_first=(n == 0))
+        if party[b["mi"]]["hp"] <= 0 or b["foes"][b["fi"]]["hp"] <= 0:
+            break
+    if party[b["mi"]]["hp"] > 0 and b["foes"][b["fi"]]["hp"] > 0:
+        for side in (("me", "foe") if me_first else ("foe", "me")):
+            _wk_residual(save, b, side, ev)
+    _wk_after_faints(uid, save, b, ev)
+    return {"ok": True, "events": ev}
+
+
+def _wk_foe_turn_only(uid, save, b, ev, rng):
+    """The foe acts after you switched, used an item or failed to run."""
+    if save.get("battle") is None:
+        return
+    fm = _wk_ai_move(save, b, rng)
+    _wk_use_move(save, b, "foe", fm, ev, rng, moved_first=True)
+    if save["party"][b["mi"]]["hp"] > 0 and b["foes"][b["fi"]]["hp"] > 0:
+        _wk_residual(save, b, "foe", ev)
+        _wk_residual(save, b, "me", ev)
+    _wk_after_faints(uid, save, b, ev)
+
+
+def _wk_apply_item(mon: dict, item: str):
+    """Use a healing/cure item on a kin. Returns the result text, or None if it does nothing."""
+    it = WK_ITEMS[item]
+    name = WK_SPECIES[mon["sp"]]["name"]
+    if "heal" in it:
+        mx = wk_stats(mon)["hp"]
+        if mon["hp"] <= 0 or mon["hp"] >= mx:
+            return None
+        gained = min(it["heal"], mx - mon["hp"])
+        mon["hp"] += gained
+        return f"{name} recovered {gained} HP!"
+    if "cure" in it:
+        if mon["hp"] <= 0 or mon.get("st") != it["cure"]:
+            return None
+        mon["st"], mon["slp"] = None, 0
+        return {"psn": f"{name} was cured of poison!", "slp": f"{name} woke up!", "par": f"{name} can move freely again!",
+                "brn": f"{name}'s burn was healed!"}[it["cure"]]
+    return None
+
+
+def _wk_start_battle(uid, save, kind, foes, tid=None) -> dict:
+    lead = next((i for i, m in enumerate(save["party"]) if m["hp"] > 0), None)
+    b = {"kind": kind, "tid": tid, "foes": foes, "fi": 0, "mi": lead, "stg": {"me": {}, "foe": {}}, "runs": 0,
+         "must_switch": False, "flinch": None}
+    save["battle"] = b
+    for f in foes[:1]:
+        _wk_seen(save, f["sp"])
+    ev = []
+    if kind == "wild":
+        ev.append({"t": "text", "s": f"A wild {WK_SPECIES[foes[0]['sp']]['name'].upper()} leapt out!"})
+    else:
+        t = WK_TRAINERS[tid]
+        ev.append({"t": "text", "s": f"{t['cls'].upper()} {t['name'].upper()} wants to battle!"})
+        ev.append({"t": "text", "s": f"{t['cls'].upper()} {t['name'].upper()} sent out {WK_SPECIES[foes[0]['sp']]['name'].upper()}!"})
+    ev.append({"t": "text", "s": f"Go! {WK_SPECIES[save['party'][lead]['sp']]['name'].upper()}!"})
+    return {"ok": True, "battle": _wk_battle_public(save), "party": [wk_mon_public(m) for m in save["party"]], "events": ev}
+
+
+def _wk_pos(save: dict, payload: dict):
+    m = str(payload.get("map", ""))
+    if m in WK_MAPS:
+        try:
+            x, y = int(payload.get("x")), int(payload.get("y"))
+        except (TypeError, ValueError):
+            return
+        if 0 <= x < 100 and 0 <= y < 100:
+            save["map"], save["x"], save["y"] = m, x, y
+            d = str(payload.get("dir", "down"))
+            save["dir"] = d if d in ("up", "down", "left", "right") else "down"
+
+
+def _wk_static() -> dict:
+    return {"species": {k: {"no": v["no"], "name": v["name"], "types": v["types"], "dex": v["dex"]} for k, v in WK_SPECIES.items()},
+            "items": WK_ITEMS, "shops": WK_SHOPS, "types": WK_TYPES, "starters": WK_STARTERS,
+            "trainers": {k: {"name": v["name"], "cls": v["cls"], "map": v["map"]} for k, v in WK_TRAINERS.items()},
+            "pickups": {k: {"map": v["map"], "items": v["items"]} for k, v in WK_PICKUPS.items()}}
+
+
+async def _wk_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    data = _wk_load()
+    save = data["users"].get(uid_s)
+
+    def done(extra: dict) -> dict:
+        _save_json_file(WK_FILE, data)
+        out = {"ok": True, **extra}
+        out.setdefault("save", wk_save_public(save) if save else None)
+        out["balance"] = int(economy.balance(uid)) if save else None
+        return out
+
+    if action == "info":
+        rec = economy._data.get("users", {}).get(uid_s)   # read-only: never creates an economy record
+        return {"ok": True, "save": wk_save_public(save) if save else None, "static": _wk_static(),
+                "balance": int(rec.get("balance", 0)) if rec else 0, "default_name": re.sub(r"[^A-Za-z0-9 ]", "", _dash_name(uid))[:10] or "TAMER"}
+
+    if action == "new":
+        if save:
+            return {"ok": False, "error": "You already have a save."}
+        name = re.sub(r"[^A-Za-z0-9]", "", str(payload.get("name", "")))[:10] or "TAMER"
+        save = _wk_new_save(uid, name.upper())
+        data["users"][uid_s] = save
+        return done({})
+
+    if not save:
+        return {"ok": False, "error": "Start a new game first."}
+
+    if action == "save":
+        if save.get("battle"):
+            return {"ok": False, "error": "You're in a battle."}
+        _wk_pos(save, payload)
+        flags = payload.get("flags")
+        if isinstance(flags, dict):
+            for k, v in list(flags.items())[:20]:          # only cosmetic flags can be set from the page
+                if isinstance(k, str) and k.startswith("c_") and len(k) <= 32 and isinstance(v, (bool, int)):
+                    save["flags"][k] = v
+        _save_json_file(WK_FILE, data)
+        return {"ok": True}
+
+    if action == "starter":
+        if save["party"]:
+            return {"ok": False, "error": "You already have a kin."}
+        sp = str(payload.get("sp", ""))
+        if sp not in WK_STARTERS:
+            return {"ok": False, "error": "Pick one of the three."}
+        mon = wk_make(save, sp, 5)
+        save["party"].append(mon)
+        save["seen"].append(sp)
+        save["caught"].append(sp)
+        save["flags"]["starter"] = sp
+        rival = WK_RIVAL_PICK[sp]
+        save["flags"]["rival_sp"] = rival
+        _wk_seen(save, rival)
+        return done({"mon": wk_mon_public(mon), "rival": rival})
+
+    if action in ("wild", "trainer", "act") and not save["party"]:
+        return {"ok": False, "error": "You don't have any kin yet!"}
+
+    if action == "wild":
+        if save.get("battle"):
+            return done({"resume": True})
+        _wk_pos(save, payload)
+        table = WK_ENCOUNTERS.get(save["map"])
+        if not table:
+            return {"ok": False, "error": "Nothing lives here."}
+        if not any(m["hp"] > 0 for m in save["party"]):
+            return {"ok": False, "error": "Your kin need rest first."}
+        if now - _wk_last.get(uid, 0) < WK_ENC_GAP:
+            return {"ok": False, "error": "Easy.", "retry": True}
+        _wk_last[uid] = now
+        total = sum(w for *_, w in table)
+        r = random.uniform(0, total)
+        for sp, lo, hi, w in table:
+            r -= w
+            if r <= 0:
+                break
+        foe = _wk_foe_mon(sp, random.randint(lo, hi))
+        res = _wk_start_battle(uid, save, "wild", [foe])
+        _save_json_file(WK_FILE, data)
+        res["save"] = None
+        return res
+
+    if action == "trainer":
+        if save.get("battle"):
+            return done({"resume": True})
+        _wk_pos(save, payload)
+        tid = str(payload.get("tid", ""))
+        t = WK_TRAINERS.get(tid)
+        if not t or t["map"] != save["map"]:
+            return {"ok": False, "error": "There's no one like that here."}
+        if tid in save["beaten"]:
+            return {"ok": False, "error": "You've already beaten them."}
+        if not any(m["hp"] > 0 for m in save["party"]):
+            return {"ok": False, "error": "Your kin need rest first."}
+        team = [(save["flags"].get("rival_sp", "kelpling"), 5)] if tid == "rival1" else t["team"]
+        foes = [_wk_foe_mon(sp, lv) for sp, lv in team]
+        if tid == "rival1":
+            # the first rival battle is a fair fight: his kin doesn't know its type move yet
+            foes[0]["moves"] = [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in _wk_moves_at(foes[0]["sp"], 4)]
+        res = _wk_start_battle(uid, save, "trainer", foes, tid)
+        _save_json_file(WK_FILE, data)
+        res["save"] = None
+        return res
+
+    if action == "act":
+        if not save.get("battle"):
+            return {"ok": False, "error": "You're not in a battle.", "over": True}
+        if now - _wk_last.get(uid, 0) < 0.15:
+            return {"ok": False, "error": "Easy.", "retry": True}
+        _wk_last[uid] = now
+        res = _wk_turn(uid, save, payload if isinstance(payload, dict) else {})
+        if not res.get("ok"):
+            return res
+        _save_json_file(WK_FILE, data)
+        res["party"] = [wk_mon_public(m) for m in save["party"]]
+        res["battle"] = _wk_battle_public(save) if save.get("battle") else None
+        res["bag"] = {k: v for k, v in save["bag"].items() if v > 0}
+        if save.get("battle") is None:
+            res["save"] = wk_save_public(save)
+        res["balance"] = int(economy.balance(uid))
+        return res
+
+    if save.get("battle"):
+        return {"ok": False, "error": "Finish your battle first."}
+
+    if action == "heal":
+        inn = str(payload.get("inn", ""))
+        if inn not in WK_INNS:
+            return {"ok": False, "error": "There's nowhere to rest here."}
+        _wk_heal_all(save)
+        save["respawn"] = inn
+        return done({})
+
+    if action == "buy":
+        shop, item = str(payload.get("shop", "")), str(payload.get("item", ""))
+        try:
+            qty = int(payload.get("qty", 1))
+        except (TypeError, ValueError):
+            qty = 1
+        if shop not in WK_SHOPS or item not in WK_SHOPS[shop] or not 1 <= qty <= 99:
+            return {"ok": False, "error": "That's not for sale here."}
+        cost = WK_ITEMS[item]["price"] * qty
+        bal = economy.balance(uid)
+        if cost > bal:
+            return {"ok": False, "error": f"You need {cost:,} coins. You have {bal:,}."}
+        if save["bag"].get(item, 0) + qty > 99:
+            return {"ok": False, "error": "You can't carry any more of those."}
+        economy.add(uid, -cost, f"wildkin shop: {qty}x {item}")
+        save["bag"][item] = save["bag"].get(item, 0) + qty
+        return done({"bought": {"item": item, "qty": qty, "cost": cost}})
+
+    if action == "use":
+        item = str(payload.get("item", ""))
+        try:
+            tgt = int(payload.get("target", -1))
+        except (TypeError, ValueError):
+            tgt = -1
+        if item not in WK_ITEMS or save["bag"].get(item, 0) <= 0:
+            return {"ok": False, "error": "You don't have that."}
+        if "ball" in WK_ITEMS[item]:
+            return {"ok": False, "error": "Save charms for wild kin."}
+        if not 0 <= tgt < len(save["party"]):
+            return {"ok": False, "error": "Pick a kin."}
+        res = _wk_apply_item(save["party"][tgt], item)
+        if res is None:
+            return {"ok": False, "error": "It won't have any effect."}
+        save["bag"][item] -= 1
+        return done({"text": res})
+
+    if action == "order":
+        order = payload.get("order")
+        if not isinstance(order, list) or sorted(order) != list(range(len(save["party"]))):
+            return {"ok": False, "error": "Bad order."}
+        save["party"] = [save["party"][i] for i in order]
+        return done({})
+
+    if action == "box":
+        op = str(payload.get("op", ""))
+        try:
+            idx = int(payload.get("idx", -1))
+        except (TypeError, ValueError):
+            idx = -1
+        if op == "deposit":
+            if not 0 <= idx < len(save["party"]):
+                return {"ok": False, "error": "Pick a kin."}
+            if len(save["party"]) <= 1:
+                return {"ok": False, "error": "You can't deposit your last kin!"}
+            if len(save["box"]) >= WK_BOX_MAX:
+                return {"ok": False, "error": "The box is full."}
+            save["box"].append(save["party"].pop(idx))
+            return done({})
+        if op == "withdraw":
+            if not 0 <= idx < len(save["box"]):
+                return {"ok": False, "error": "Pick a kin."}
+            if len(save["party"]) >= WK_PARTY_MAX:
+                return {"ok": False, "error": "Your party is full."}
+            save["party"].append(save["box"].pop(idx))
+            return done({})
+        return {"ok": False, "error": "Unknown box action."}
+
+    if action == "pickup":
+        pid = str(payload.get("id", ""))
+        p = WK_PICKUPS.get(pid)
+        if not p or pid in save["picked"]:
+            return {"ok": False, "error": "There's nothing here."}
+        if p.get("needs") and p["needs"] not in save["beaten"]:
+            return {"ok": False, "error": "Not yet."}
+        save["picked"].append(pid)
+        for item, qty in p["items"]:
+            save["bag"][item] = min(99, save["bag"].get(item, 0) + qty)
+        return done({"got": p["items"]})
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+def _wk_public_stats(uid_s: str) -> dict:
+    save = _wk_load()["users"].get(uid_s)
+    if not save:
+        return {"started": False}
+    lead = save["party"][0] if save["party"] else None
+    return {"started": True, "caught": len(save["caught"]), "seen": len(save["seen"]), "total": len(WK_SPECIES),
+            "beaten": len(save["beaten"]), "lead": {"name": WK_SPECIES[lead["sp"]]["name"], "lvl": lead["lvl"]} if lead else None}
+
+
+async def _handle_wildkin(message: discord.Message, rest: str):
+    """_wildkin — link to Wildkin on the web dashboard."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🌿 The web dashboard isn't set up yet.")
+        return
+    await message.channel.send(
+        f"🌿 **Wildkin** — a pocket-sized adventure. Pick a starter, catch wild kin in the tall grass and "
+        f"take on every trainer between Mossbrook and the mountain: <{base}/games/wildkin>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -30286,7 +31339,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "nightrun": _nr_public_stats(data["nightrun"], uid_s),
                 "mines": _mines_public_stats(data["mines"], uid_s),
                 "reels": _reels_public_stats(data["reels"], uid_s),
-                "flappy": _flap_public_stats(data["flappy"], uid_s)}
+                "flappy": _flap_public_stats(data["flappy"], uid_s),
+                "wildkin": _wk_public_stats(uid_s)}
     section("games", _games)
 
     return out
@@ -32581,7 +33635,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen", "wildkin", "wk", "kin",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -33756,6 +34810,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("flappy", "flap", "flappydegen"):
         await _handle_flappy(message, rest)
+        return True
+    if cmd_name in ("wildkin", "wk", "kin"):
+        await _handle_wildkin(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)
