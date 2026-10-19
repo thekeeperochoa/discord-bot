@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#1B1530">
 <title>Wildkin</title>
@@ -23,7 +23,7 @@ a{color:#C9B8FF}
 .wrap{display:flex;flex-direction:column;align-items:center;padding:0 10px 30px}
 
 /* the handheld */
-.shell{position:relative;width:min(100%,430px);border-radius:16px 16px 64px 16px;padding:18px 18px 26px;user-select:none;-webkit-user-select:none;
+.shell{position:relative;width:min(100%,430px);border-radius:16px 16px 64px 16px;padding:18px 18px 26px;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:pan-y;
   background:linear-gradient(160deg,#E7E1D6 0%,var(--shell) 45%,var(--shell2) 100%);
   box-shadow:inset 0 2px 0 rgba(255,255,255,.7),inset 0 -6px 0 rgba(0,0,0,.08),0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(0,0,0,.25)}
 .bezel{background:linear-gradient(180deg,#4C4A60,#3A384C);border-radius:10px 10px 36px 10px;padding:14px 22px 22px;position:relative;box-shadow:inset 0 2px 6px rgba(0,0,0,.6)}
@@ -35,23 +35,26 @@ a{color:#C9B8FF}
 canvas#screen{display:block;width:100%;aspect-ratio:160/144;image-rendering:pixelated;image-rendering:crisp-edges;background:#E0F8D0;border-radius:2px;box-shadow:0 0 0 2px #2A2838}
 .brand{font:400 15px/1 var(--pix);color:#4B3F8F;margin:14px 0 0 4px;letter-spacing:.02em;font-style:italic;text-shadow:0 1px 0 rgba(255,255,255,.6)}
 .brand small{font-size:7px;font-style:normal;color:#6E6690;margin-left:6px}
-.pad{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:0 4px}
+.pad{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:0 4px;touch-action:none}
 .dpad{position:relative;width:118px;height:118px}
-.dpad button{all:unset;position:absolute;width:40px;height:40px;background:#2C2A36;cursor:pointer;touch-action:none}
+.dpad button{all:unset;position:absolute;width:40px;height:40px;background:#2C2A36;pointer-events:none}
+.dpad .dhit{position:absolute;inset:-18px;z-index:2;cursor:pointer;touch-action:none;border-radius:50%}
 .dpad .u{left:39px;top:0;border-radius:6px 6px 0 0}.dpad .d{left:39px;bottom:0;border-radius:0 0 6px 6px}
 .dpad .l{left:0;top:39px;border-radius:6px 0 0 6px}.dpad .r{right:0;top:39px;border-radius:0 6px 6px 0}
 .dpad .c{left:39px;top:39px;width:40px;height:40px;background:#2C2A36}
 .dpad .c::after{content:"";position:absolute;inset:12px;border-radius:50%;background:radial-gradient(circle,#23212C,#2C2A36)}
 .dpad button.down{background:#1B1A22}
 .ab{display:flex;gap:14px;transform:rotate(-24deg);margin-right:4px}
-.ab button{all:unset;cursor:pointer;width:52px;height:52px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#C2457E,#8E1F55 70%);box-shadow:0 4px 0 #5D1037,0 6px 10px rgba(0,0,0,.35);
+.ab button{all:unset;position:relative;cursor:pointer;width:52px;height:52px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#C2457E,#8E1F55 70%);box-shadow:0 4px 0 #5D1037,0 6px 10px rgba(0,0,0,.35);
   font:400 10px/52px var(--pix);color:rgba(255,255,255,.55);text-align:center;touch-action:none}
 .ab button.down{transform:translateY(3px);box-shadow:0 1px 0 #5D1037}
+.ab button::before{content:"";position:absolute;inset:-9px;border-radius:50%}
 .ab .b{margin-top:22px}
-.ss{display:flex;justify-content:center;gap:22px;margin-top:20px;transform:rotate(-24deg) translateX(-10px)}
-.ss button{all:unset;cursor:pointer;width:46px;height:12px;border-radius:8px;background:#8E8676;box-shadow:inset 0 2px 2px rgba(0,0,0,.35);touch-action:none}
+.ss{display:flex;justify-content:center;gap:22px;margin-top:20px;transform:rotate(-24deg) translateX(-10px);touch-action:none}
+.ss button{all:unset;position:relative;cursor:pointer;width:46px;height:12px;border-radius:8px;background:#8E8676;box-shadow:inset 0 2px 2px rgba(0,0,0,.35);touch-action:none}
 .ss label{display:block;font:400 6px/1 var(--pix);color:#6E6690;text-align:center;margin-top:7px}
 .ss button.down{background:#6B6456}
+.ss button::before{content:"";position:absolute;inset:-14px -8px}
 .grille{position:absolute;right:26px;bottom:28px;display:flex;gap:7px;transform:rotate(-30deg)}
 .grille i{display:block;width:5px;height:44px;border-radius:3px;background:#A69E8E;box-shadow:inset 0 2px 2px rgba(0,0,0,.35)}
 .help{max-width:430px;margin:16px auto 0;color:var(--muted);font-size:12px;text-align:center;line-height:1.6}
@@ -77,6 +80,7 @@ canvas#screen{display:block;width:100%;aspect-ratio:160/144;image-rendering:pixe
         <button class="u" data-k="up" aria-label="Up"></button><button class="l" data-k="left" aria-label="Left"></button>
         <span class="c"></span>
         <button class="r" data-k="right" aria-label="Right"></button><button class="d" data-k="down" aria-label="Down"></button>
+        <div class="dhit" aria-hidden="true"></div>
       </div>
       <div class="ab"><button class="b" data-k="b" aria-label="B">B</button><button class="a" data-k="a" aria-label="A">A</button></div>
     </div>
@@ -538,16 +542,88 @@ function call(action, body){
 var KEYS = {}, PRESSED = {};
 var KEYMAP = {ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", w: "up", s: "down", a: "left", d: "right", W: "up", S: "down", A: "left", D: "right",
               z: "a", Z: "a", " ": "a", j: "a", J: "a", x: "b", X: "b", Backspace: "b", k: "b", K: "b", Shift: "b", Enter: "start", Escape: "start", Tab: "select"};
-function press(k){ if (!KEYS[k]) PRESSED[k] = true; KEYS[k] = true; Snd.unlock(); }
-function release(k){ KEYS[k] = false; }
+var TAPMARK = {};   // steps taken when each direction went down: a tap that took no step still gets one
+function press(k){
+  if (!KEYS[k]) PRESSED[k] = true; KEYS[k] = true;
+  if (DIRV[k]) TAPMARK[k] = W.started;
+  Snd.unlock();
+}
+function release(k){
+  if (!KEYS[k]) return;
+  KEYS[k] = false;
+  if (DIRV[k] && scene === "world" && !UI.length && !scriptDepth && W.started === TAPMARK[k]) W.queued = k;
+}
 document.addEventListener("keydown", function(e){ var k = KEYMAP[e.key]; if (!k) return; e.preventDefault(); if (!e.repeat) press(k); });
 document.addEventListener("keyup", function(e){ var k = KEYMAP[e.key]; if (k) release(k); });
-window.addEventListener("blur", function(){ KEYS = {}; });
-Array.prototype.forEach.call(document.querySelectorAll("[data-k]"), function(b){
+
+// Touch / mouse. Every pointer remembers which key it holds, so a lost touch can never leave a key stuck down.
+var PTR = {};
+function keyButton(k){ return document.querySelector('[data-k="' + k + '"]'); }
+function setDown(k, on){ var b = keyButton(k); if (b) b.classList.toggle("down", on); }
+function ptrHold(id, k){
+  if (PTR[id] === k) return;
+  ptrLetGo(id);
+  if (!k) return;
+  PTR[id] = k; setDown(k, true); press(k);
+}
+function ptrLetGo(id){
+  var k = PTR[id]; if (!k) return;
+  delete PTR[id];
+  for (var o in PTR) if (PTR[o] === k) return;      // another finger still holds it
+  setDown(k, false); release(k);
+}
+function releaseAll(){
+  for (var id in PTR) ptrLetGo(id);
+  KEYS = {}; W.queued = null;                         // leaving the app is not a tap
+  Array.prototype.forEach.call(document.querySelectorAll("[data-k].down"), function(b){ b.classList.remove("down"); });
+}
+window.addEventListener("blur", releaseAll);
+document.addEventListener("visibilitychange", function(){ if (document.hidden) releaseAll(); });
+["pointerup", "pointercancel"].forEach(function(t){ document.addEventListener(t, function(e){ ptrLetGo(e.pointerId); }, true); });
+
+// A, B, START, SELECT
+Array.prototype.forEach.call(document.querySelectorAll(".ab [data-k], .ss [data-k]"), function(b){
   var k = b.dataset.k;
-  b.addEventListener("pointerdown", function(e){ e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add("down"); press(k); });
-  var up = function(){ b.classList.remove("down"); release(k); };
-  b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
+  b.addEventListener("pointerdown", function(e){ e.preventDefault(); try { b.setPointerCapture(e.pointerId); } catch (x) {} ptrHold(e.pointerId, k); });
+  b.addEventListener("lostpointercapture", function(e){ ptrLetGo(e.pointerId); });
+});
+
+// The D-pad is one surface: the direction comes from where the thumb is, and sliding changes it.
+(function(){
+  var pad = document.querySelector(".dpad"), hit = pad && pad.querySelector(".dhit"), mine = {};
+  if (!hit) return;
+  function dirAt(e, cur){
+    var r = pad.getBoundingClientRect(), dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    var ax = Math.abs(dx), ay = Math.abs(dy);
+    if (ax * ax + ay * ay < Math.pow(r.width * 0.08, 2)) return cur || null;     // tiny dead zone in the middle
+    var horiz = ax > ay;
+    if (cur === "left" || cur === "right"){ if (ay < ax * 1.3) horiz = true; }      // a little stickiness near the diagonals
+    else if (cur === "up" || cur === "down"){ if (ax < ay * 1.3) horiz = false; }
+    return horiz ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
+  }
+  hit.addEventListener("pointerdown", function(e){
+    e.preventDefault(); try { hit.setPointerCapture(e.pointerId); } catch (x) {}
+    mine[e.pointerId] = 1; ptrHold(e.pointerId, dirAt(e, null));
+  });
+  hit.addEventListener("pointermove", function(e){
+    if (!mine[e.pointerId]) return;
+    if (e.pointerType === "mouse" && !e.buttons) return;
+    ptrHold(e.pointerId, dirAt(e, PTR[e.pointerId]));
+  });
+  function end(e){ delete mine[e.pointerId]; ptrLetGo(e.pointerId); }
+  hit.addEventListener("pointerup", end); hit.addEventListener("pointercancel", end); hit.addEventListener("lostpointercapture", end);
+})();
+
+// No zooming, magnifier or double-tap tricks on the console itself.
+document.addEventListener("touchstart", function(e){ if (e.target.closest && e.target.closest(".pad, .ss")) e.preventDefault(); }, {passive: false});
+var lastTouchEnd = 0;
+document.addEventListener("touchend", function(e){
+  var now = Date.now();
+  if (e.target.closest && e.target.closest("#shell") && now - lastTouchEnd < 400) e.preventDefault();
+  lastTouchEnd = now;
+}, {passive: false});
+["gesturestart", "gesturechange", "dblclick"].forEach(function(t){
+  document.addEventListener(t, function(e){ if (t !== "dblclick" || (e.target.closest && e.target.closest("#shell"))) e.preventDefault(); }, {passive: false});
 });
 function heldDir(){ return KEYS.up ? "up" : KEYS.down ? "down" : KEYS.left ? "left" : KEYS.right ? "right" : null; }
 var DIRV = {up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0]};
@@ -631,7 +707,7 @@ function closeAllUI(){ UI.length = 0; }
 
 // ── World ─────────────────────────────────────────────────────────────────────
 var scene = "boot";
-var W = {map: null, x: 0, y: 0, dir: "down", moving: false, t: 0, dur: .25, fx: 0, fy: 0, turnT: 0, steps: 0, npcs: [], sinceBattle: 99, bumpT: 0};
+var W = {map: null, x: 0, y: 0, dir: "down", moving: false, t: 0, dur: .25, fx: 0, fy: 0, turnT: 0, steps: 0, npcs: [], sinceBattle: 99, bumpT: 0, started: 0, queued: null};
 var scriptDepth = 0;
 function runScript(fn){ scriptDepth++; return Promise.resolve().then(fn).catch(function(e){ console.error(e); toast("Something went wrong — try again."); }).then(function(){ scriptDepth--; }); }
 function tileAt(M, x, y){ if (x < 0 || y < 0 || x >= M.w || y >= M.h) return M.border || "#"; return M.rows[y][x]; }
@@ -649,7 +725,7 @@ function blocked(x, y, who){
   return false;
 }
 function loadMap(id, x, y, dir){
-  var M = MAPS[id]; W.map = M; W.x = x; W.y = y; W.dir = dir || "down"; W.moving = false;
+  var M = MAPS[id]; W.map = M; W.x = x; W.y = y; W.dir = dir || "down"; W.moving = false; W.queued = null;
   W.npcs = M.npcs.filter(function(n){ return !n.cond || n.cond(); }).map(function(n){ return {def: n, id: n.id, style: n.style, x: n.x, y: n.y, dir: n.dir, hx: n.x, hy: n.y, moving: false, t: 0, wt: 1 + Math.random() * 3}; });
   Music.play(M.music);
 }
@@ -728,16 +804,18 @@ function worldUpdate(dt){
     if (W.t >= W.dur){ W.x = W.tx; W.y = W.ty; W.moving = false; W.alt = !W.alt; arrived(); }
     return;
   }
-  if (scriptDepth || UI.length) return;
-  if (PRESSED.start){ Snd.sfx("menu"); runScript(startMenu); return; }
-  if (PRESSED.a){ interact(); return; }
-  var d = heldDir();
+  if (scriptDepth || UI.length){ W.queued = null; return; }
+  if (PRESSED.start){ W.queued = null; Snd.sfx("menu"); runScript(startMenu); return; }
+  if (PRESSED.a){ W.queued = null; interact(); return; }
+  var d = heldDir(), tap = false;
+  if (!d && W.queued){ d = W.queued; tap = true; }     // a quick tap: turn if needed and take one step
+  W.queued = null;
   if (!d) return;
-  if (d !== W.dir){ W.dir = d; W.turnT = .09; return; }
-  if (W.turnT > 0) return;
+  if (d !== W.dir){ W.dir = d; if (!tap){ W.turnT = .09; return; } }
+  if (W.turnT > 0 && !tap) return;
   var v = DIRV[d], nx = W.x + v[0], ny = W.y + v[1];
   if (blocked(nx, ny)){ if (W.bumpT <= 0){ Snd.sfx("bump"); W.bumpT = .3; } return; }
-  W.tx = nx; W.ty = ny; W.moving = true; W.t = 0; W.dur = KEYS.b ? .13 : .25;
+  W.tx = nx; W.ty = ny; W.moving = true; W.t = 0; W.dur = KEYS.b ? .13 : .25; W.started++;
 }
 var saveTimer = 0;
 function arrived(){
@@ -2010,7 +2088,7 @@ window.__wk = {path: function(tx, ty){
       var isWarp = M.warps.some(function(w){ return w.x === nx && w.y === ny; }); if (isWarp && nk !== goal) return;
       prev[nk] = [k, d]; q.push([nx, ny]); }); }
   if (!(goal in prev)) return null; var out = [], cur = goal; while (prev[cur]){ out.unshift(prev[cur][1]); cur = prev[cur][0]; } return out; },
-  top: function(){ var L = UI[UI.length - 1]; return L ? {kind: L.kind || "?", text: L.text || "", items: L.items || null, cur: L.cur} : null; }, W: W, get B(){ return B; }, get SAVE(){ return SAVE; }, get scene(){ return scene; }, get UI(){ return UI; }, press: press, release: release, MAPS: MAPS, monArt: monArt, ART: ART};
+  top: function(){ var L = UI[UI.length - 1]; return L ? {kind: L.kind || "?", text: L.text || "", items: L.items || null, cur: L.cur} : null; }, W: W, get B(){ return B; }, get SAVE(){ return SAVE; }, get KEYS(){ return KEYS; }, get scene(){ return scene; }, get UI(){ return UI; }, press: press, release: release, MAPS: MAPS, monArt: monArt, ART: ART};
 })();
 </script>
 </body>
