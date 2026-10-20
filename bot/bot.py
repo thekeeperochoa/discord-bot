@@ -27560,6 +27560,7 @@ async def _handle_videopoker(message: discord.Message, rest: str):
 # sells items for coins, with a daily cap on what the game pays out.
 # Saves live in memory/wildkin.json, one per member.
 # Phase 1 world: home, Mossbrook, the Tamer's Hall, Route 1, Cragmoor (inn, shop).
+# Phase 2 world: Cragmoor's arena (Warden of Stone), Granite Pass (cave), Route 2, Saltmere.
 # ─────────────────────────────────────────────────────────────────────────────
 WK_FILE = MEMORY_DIR / "wildkin.json"
 WK_DAILY_CAP = 3_000           # most coins the game pays a member per day (EST)
@@ -27592,7 +27593,7 @@ WK_MOVES = {
     "harden":      {"name": "Brace",        "type": "stone",  "cat": "status", "acc": 0,   "pp": 30, "stat": ("def", 1, "self")},
     "ember":       {"name": "Cinder",         "type": "flame",  "cat": "spec",   "power": 40, "acc": 100, "pp": 25, "status": "brn", "chance": 10},
     "flamefang":   {"name": "Flame Fang",    "type": "flame",  "cat": "phys",   "power": 65, "acc": 95,  "pp": 15, "status": "brn", "chance": 10},
-    "inferno":     {"name": "Inferno Breath","type": "flame",  "cat": "spec",   "power": 90, "acc": 100, "pp": 10, "status": "brn", "chance": 10},
+    "inferno":     {"name": "Inferno","type": "flame",  "cat": "spec",   "power": 90, "acc": 100, "pp": 10, "status": "brn", "chance": 10},
     "bubble":      {"name": "Bubble Shot",        "type": "tide",   "cat": "spec",   "power": 40, "acc": 100, "pp": 30, "stat": ("spd", -1, "foe"), "chance": 10},
     "aquapulse":   {"name": "Aqua Pulse",    "type": "tide",   "cat": "spec",   "power": 60, "acc": 100, "pp": 20},
     "tidalcrash":  {"name": "Tidal Crash",   "type": "tide",   "cat": "phys",   "power": 90, "acc": 90,  "pp": 10},
@@ -27618,6 +27619,11 @@ WK_MOVES = {
     "lullaby":     {"name": "Lullaby",       "type": "spirit", "cat": "status", "acc": 55,  "pp": 15, "status": "slp"},
     "wisp":        {"name": "Wisp Flame",  "type": "spirit", "cat": "status", "acc": 85,  "pp": 15, "status": "brn"},
     "moonbeam":    {"name": "Moonbeam",      "type": "spirit", "cat": "spec",   "power": 75, "acc": 100, "pp": 15},
+    "burrow":      {"name": "Burrow Strike", "type": "stone",  "cat": "phys",   "power": 60, "acc": 100, "pp": 20},
+    "prismray":    {"name": "Prism Ray",     "type": "spirit", "cat": "spec",   "power": 70, "acc": 95,  "pp": 15, "status": "par", "chance": 10},
+    "dustveil":    {"name": "Dust Veil",     "type": "shade",  "cat": "status", "acc": 100, "pp": 25, "stat": ("atk", -1, "foe")},
+    "gloomwave":   {"name": "Gloom Wave",    "type": "shade",  "cat": "spec",   "power": 60, "acc": 100, "pp": 20},
+    "voltbite":    {"name": "Volt Bite",     "type": "storm",  "cat": "phys",   "power": 55, "acc": 100, "pp": 20, "status": "par", "chance": 10},
     "struggle":    {"name": "Last Ditch",      "type": "beast",  "cat": "phys",   "power": 50, "acc": 0,   "pp": 1, "recoil": 25},
 }
 
@@ -27642,10 +27648,10 @@ WK_SPECIES = {
                     "learn": [(1, "tackle"), (1, "growl"), (5, "vinelash"), (11, "spore"), (15, "sapdrain"), (21, "razorleaf"), (26, "bite"), (36, "thornbarrage")], "evo": None,
                     "dex": "Its roots run deep under the forest floor. Lost travellers follow its glowing eyes home."},
     "thornhare":   {"no": 7,  "name": "Thornhare",   "types": ["beast", "grove"], "base": (40, 50, 40, 62, 35), "catch": 255, "xp": 50,
-                    "learn": [(1, "tackle"), (4, "growl"), (8, "quick"), (12, "vinelash"), (20, "razorleaf")], "evo": None,
+                    "learn": [(1, "tackle"), (4, "growl"), (8, "quick"), (10, "vinelash"), (20, "razorleaf")], "evo": None,
                     "dex": "A hare with a coat of soft thorns. It bolts through brambles that would shred a fox."},
     "gustling":    {"no": 8,  "name": "Gustling",    "types": ["wind"],           "base": (38, 42, 38, 58, 40), "catch": 255, "xp": 50,
-                    "learn": [(1, "tackle"), (1, "growl"), (6, "gust"), (9, "quick"), (15, "wingslice"), (22, "aircutter")], "evo": None,
+                    "learn": [(1, "tackle"), (1, "growl"), (6, "gust"), (9, "quick"), (15, "wingslice"), (22, "aircutter")], "evo": (18, "galewing"),
                     "dex": "A little sylph that rides the breeze. Where it lands, dandelions scatter."},
     "pebblit":     {"no": 9,  "name": "Pebblit",     "types": ["stone"],          "base": (40, 72, 95, 22, 30), "catch": 190, "xp": 60,
                     "learn": [(1, "tackle"), (1, "harden"), (9, "pebble"), (16, "rockslam"), (28, "quake")], "evo": (20, "bouldron"),
@@ -27665,6 +27671,37 @@ WK_SPECIES = {
     "duskwing":    {"no": 14, "name": "Duskwing",    "types": ["shade", "wind"],  "base": (45, 55, 40, 75, 40), "catch": 150, "xp": 60,
                     "learn": [(1, "bite"), (1, "gust"), (6, "nightshriek"), (12, "wingslice"), (22, "shadowclaw")], "evo": None,
                     "dex": "It sleeps upside down in bell towers and wakes when the last bell rings."},
+    # ── Phase 2 ──
+    "delvin":      {"no": 15, "name": "Delvin",      "types": ["stone", "beast"], "base": (50, 65, 60, 40, 30), "catch": 120, "xp": 70,
+                    "learn": [(1, "scratch"), (1, "harden"), (7, "pebble"), (12, "burrow"), (19, "bite"), (30, "quake")], "evo": (24, "delvorn"),
+                    "dex": "A mole that tunnels by headbutting stone. Miners follow it to find the softest rock."},
+    "delvorn":     {"no": 16, "name": "Delvorn",     "types": ["stone", "beast"], "base": (75, 95, 85, 55, 45), "catch": 60,  "xp": 150,
+                    "learn": [(1, "scratch"), (1, "harden"), (7, "pebble"), (12, "burrow"), (19, "bite"), (26, "rockslam"), (34, "quake")], "evo": None,
+                    "dex": "Its claws are harder than the picks it breaks. A whole mountain hums when it digs."},
+    "shardling":   {"no": 17, "name": "Shardling",   "types": ["stone", "spirit"],"base": (45, 40, 70, 50, 80), "catch": 45,  "xp": 110,
+                    "learn": [(1, "harden"), (1, "pebble"), (10, "lullaby"), (13, "spiritpulse"), (21, "prismray"), (32, "moonbeam")], "evo": None,
+                    "dex": "A crystal that grew a mind of its own. It glows brighter the deeper the cave."},
+    "gloomoth":    {"no": 18, "name": "Gloomoth",    "types": ["shade", "wind"],  "base": (45, 40, 45, 70, 65), "catch": 150, "xp": 75,
+                    "learn": [(1, "gust"), (1, "dustveil"), (11, "nightshriek"), (14, "gloomwave"), (20, "aircutter"), (27, "shadowclaw")], "evo": None,
+                    "dex": "A moth that feeds on lamplight. Its wing dust makes a whole tunnel go dark."},
+    "voltail":     {"no": 19, "name": "Voltail",     "types": ["storm"],          "base": (40, 55, 35, 90, 50), "catch": 120, "xp": 75,
+                    "learn": [(1, "tackle"), (1, "leer"), (7, "spark"), (10, "quick"), (13, "voltbite"), (19, "staticwave")], "evo": (24, "thundertail"),
+                    "dex": "A squirrel that stores static in its bushy tail. Petting it is a bad idea."},
+    "thundertail": {"no": 20, "name": "Thundertail", "types": ["storm"],          "base": (65, 85, 55, 110, 75), "catch": 45,  "xp": 160,
+                    "learn": [(1, "tackle"), (1, "leer"), (7, "spark"), (10, "quick"), (13, "voltbite"), (19, "staticwave"), (26, "thunderjolt")], "evo": None,
+                    "dex": "When it leaps between treetops, its tail leaves a crackling streak in the air."},
+    "pondwick":    {"no": 21, "name": "Pondwick",    "types": ["tide", "grove"],  "base": (55, 45, 55, 45, 60), "catch": 150, "xp": 70,
+                    "learn": [(1, "bubble"), (1, "growl"), (9, "vinelash"), (14, "sapdrain"), (18, "spore"), (23, "aquapulse")], "evo": None,
+                    "dex": "A frog that wears a lily pad like a hat. It croaks in harmony with the rain."},
+    "saltwing":    {"no": 22, "name": "Saltwing",    "types": ["tide", "wind"],   "base": (45, 55, 40, 75, 55), "catch": 150, "xp": 75,
+                    "learn": [(1, "gust"), (1, "growl"), (8, "quick"), (13, "wingslice"), (19, "aquapulse"), (26, "aircutter")], "evo": None,
+                    "dex": "A gull that rides sea spray for fun. It steals a single chip from every picnic."},
+    "mosscap":     {"no": 23, "name": "Mosscap",     "types": ["grove", "spirit"],"base": (60, 40, 55, 30, 70), "catch": 150, "xp": 75,
+                    "learn": [(1, "tackle"), (1, "sapdrain"), (15, "spiritpulse"), (17, "spore"), (22, "razorleaf"), (28, "moonbeam")], "evo": None,
+                    "dex": "A mushroom that wanders at night. Rings of moss mark where it danced."},
+    "galewing":    {"no": 24, "name": "Galewing",    "types": ["wind"],           "base": (65, 70, 60, 95, 60), "catch": 45,  "xp": 150,
+                    "learn": [(1, "tackle"), (1, "growl"), (6, "gust"), (9, "quick"), (15, "wingslice"), (24, "aircutter")], "evo": None,
+                    "dex": "A grown sylph with wings like sails. One flap can push a fishing boat out to sea."},
 }
 
 WK_ITEMS = {
@@ -27676,16 +27713,25 @@ WK_ITEMS = {
     "awakening":  {"name": "Wake Bell",    "price": 40,  "cure": "slp", "desc": "Cures sleep."},
     "parlyzheal": {"name": "Nerve Balm",     "price": 40,  "cure": "par", "desc": "Cures paralysis."},
     "burnsalve":  {"name": "Burn Salve",   "price": 40,  "cure": "brn", "desc": "Heals a burn."},
+    "revive":     {"name": "Revive Herb",  "price": 300, "revive": 50, "desc": "Revives a kin."},
 }
-WK_SHOPS = {"shop_cragmoor": ["charm", "potion", "superpotion", "antidote", "awakening", "parlyzheal", "burnsalve"]}
+WK_SHOPS = {"shop_cragmoor": ["charm", "potion", "superpotion", "antidote", "awakening", "parlyzheal", "burnsalve"],
+            "shop_saltmere": ["charm", "greatcharm", "potion", "superpotion", "revive", "antidote", "awakening", "parlyzheal", "burnsalve"]}
 
-WK_MAPS = {"home", "mossbrook", "hall", "house_moss", "route1", "cragmoor", "inn_cragmoor", "shop_cragmoor", "house_crag"}
+WK_MAPS = {"home", "mossbrook", "hall", "house_moss", "route1", "cragmoor", "inn_cragmoor", "shop_cragmoor", "house_crag",
+           "arena_crag", "pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2"}
 WK_START = ("home", 5, 2, "down")
-WK_INNS = {"home": ("home", 4, 5, "up"), "inn_cragmoor": ("inn_cragmoor", 4, 3, "up")}
+WK_INNS = {"home": ("home", 4, 5, "up"), "inn_cragmoor": ("inn_cragmoor", 4, 3, "up"), "inn_saltmere": ("inn_saltmere", 4, 3, "up")}
 WK_ENCOUNTERS = {
     "route1": [("thornhare", 2, 4, 35), ("gustling", 2, 4, 30), ("pebblit", 3, 4, 15),
                ("mudslime", 2, 3, 10), ("sparkimp", 3, 5, 7), ("wispkit", 4, 5, 3)],
+    "pass":   [("delvin", 9, 12, 32), ("gloomoth", 9, 12, 28), ("pebblit", 10, 12, 20),
+               ("duskwing", 10, 12, 12), ("shardling", 11, 13, 5), ("bouldron", 13, 14, 3)],
+    "route2": [("voltail", 11, 14, 24), ("pondwick", 11, 14, 22), ("saltwing", 12, 14, 20), ("mosscap", 12, 14, 16),
+               ("gustling", 12, 14, 10), ("thornhare", 12, 13, 5), ("wispkit", 13, 14, 3)],
 }
+# maps you can only reach with the Warden of Stone's sigil (the guard at the pass checks it)
+WK_MAP_NEEDS = {m: "warden1" for m in ("pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2")}
 WK_STARTERS = ["emberwyrm", "kelpling", "mandrakelet"]
 WK_RIVAL_PICK = {"emberwyrm": "kelpling", "kelpling": "mandrakelet", "mandrakelet": "emberwyrm"}
 WK_TRAINERS = {
@@ -27697,6 +27743,30 @@ WK_TRAINERS = {
                     "win": "My kin are cuter, though."},
     "r1_brom":     {"name": "Brom", "cls": "Hiker", "map": "route1", "team": [("pebblit", 5), ("duskwing", 4)], "prize": 20,
                     "win": "Ho! You've got grit, kid. Cragmoor's just ahead."},
+    # ── Phase 2 ── team entries: (species, level[, moves]); "@rival" is Kai's starter
+    "ar_cole":     {"name": "Cole", "cls": "Junior", "map": "arena_crag", "team": [("pebblit", 6), ("gustling", 7)], "prize": 20,
+                    "win": "The Warden's going to crush you anyway!"},
+    "ar_ava":      {"name": "Ava",  "cls": "Junior", "map": "arena_crag", "team": [("thornhare", 7), ("delvin", 7)], "prize": 20,
+                    "win": "Okay, okay. You can see the Warden."},
+    "warden1":     {"name": "Petra", "cls": "Warden", "map": "arena_crag", "prize": 60, "boss": True,
+                    "team": [("pebblit", 9, ["tackle", "harden", "pebble"]), ("mudslime", 10, ["tackle", "harden", "toxicsludge"]),
+                             ("bouldron", 11, ["rockslam", "harden", "pebble", "tackle"])],
+                    "win": "Solid as bedrock. The STONE SIGIL is yours, and the pass is open to you."},
+    "ps_dunn":     {"name": "Dunn", "cls": "Hiker", "map": "pass", "team": [("pebblit", 11), ("delvin", 11)], "prize": 20, "needs": "warden1",
+                    "win": "Whew! Mind the dark corners."},
+    "ps_sela":     {"name": "Sela", "cls": "Mystic", "map": "pass", "team": [("wispkit", 11), ("gloomoth", 11)], "prize": 25, "needs": "warden1",
+                    "win": "The spirits did say you'd be trouble."},
+    "ps_ottar":    {"name": "Ottar", "cls": "Hiker", "map": "pass", "team": [("delvin", 12), ("mudslime", 12), ("pebblit", 13)], "prize": 20,
+                    "needs": "warden1", "win": "Fresh air's just past me. Go on."},
+    "rival2":      {"name": "Kai",  "cls": "Rival", "map": "route2", "prize": 40, "boss": True, "needs": "warden1",
+                    "team": [("gustling", 13), ("voltail", 13), ("@rival", 15)],
+                    "win": "What?! I trained for weeks! ...Fine. See you in Saltmere."},
+    "r2_juno":     {"name": "Juno", "cls": "Birder", "map": "route2", "team": [("saltwing", 13), ("gustling", 14)], "prize": 20, "needs": "warden1",
+                    "win": "My birds need a nap after that."},
+    "r2_moss":     {"name": "Moss", "cls": "Angler", "map": "route2", "team": [("pondwick", 14), ("mudslime", 14)], "prize": 22, "needs": "warden1",
+                    "win": "Not even a nibble. Story of my life."},
+    "r2_fenn":     {"name": "Fenn", "cls": "Ranger", "map": "route2", "team": [("voltail", 13), ("mosscap", 14)], "prize": 22, "needs": "warden1",
+                    "win": "You read the land well, tamer."},
 }
 WK_PICKUPS = {
     "r1_potion":    {"map": "route1",   "items": [("potion", 1)]},
@@ -27704,7 +27774,26 @@ WK_PICKUPS = {
     "moss_potion":  {"map": "mossbrook","items": [("potion", 1)]},
     "elder_charms": {"map": "hall",     "items": [("charm", 5), ("potion", 2)], "needs": "rival1"},
     "crag_gift":    {"map": "house_crag","items": [("superpotion", 1)]},
+    # ── Phase 2 ──
+    "sigil_gift":   {"map": "arena_crag","items": [("greatcharm", 3)], "needs": "warden1"},
+    "ps_revive":    {"map": "pass",      "items": [("revive", 1)], "needs": "warden1"},
+    "ps_super":     {"map": "pass",      "items": [("superpotion", 1)], "needs": "warden1"},
+    "ps_great":     {"map": "pass",      "items": [("greatcharm", 2)], "needs": "warden1"},
+    "r2_charms":    {"map": "route2",    "items": [("charm", 3)], "needs": "warden1"},
+    "r2_potion":    {"map": "route2",    "items": [("superpotion", 1)], "needs": "warden1"},
+    "salt_research":{"map": "house_salt1","items": [("greatcharm", 5), ("revive", 1)], "needs": "caught:10"},
 }
+
+
+def _wk_needs_ok(save: dict, need) -> bool:
+    """Story gates: 'starter', 'caught:N', or a trainer id that must be beaten."""
+    if not need:
+        return True
+    if need == "starter":
+        return bool(save["party"])
+    if need.startswith("caught:"):
+        return len(save["caught"]) >= int(need.split(":", 1)[1])
+    return need in save["beaten"]
 
 
 def _wk_load() -> dict:
@@ -27815,7 +27904,7 @@ def _wk_battle_public(save: dict) -> dict:
            "foes_left": sum(1 for m in b["foes"] if m["hp"] > 0), "foes_total": len(b["foes"])}
     if b["kind"] == "trainer":
         t = WK_TRAINERS[b["tid"]]
-        out["trainer"] = {"id": b["tid"], "name": t["name"], "cls": t["cls"]}
+        out["trainer"] = {"id": b["tid"], "name": t["name"], "cls": t["cls"], "boss": bool(t.get("boss"))}
     return out
 
 
@@ -28003,6 +28092,14 @@ def _wk_ai_move(save, b, rng) -> int:
     return scored[0][1] if rng.random() < 0.75 else rng.choice(usable)
 
 
+def _wk_move_value(sp: str, mid: str) -> float:
+    """Rough worth of a move to this species, used to pick which move to forget."""
+    md = WK_MOVES[mid]
+    if md["cat"] == "status":
+        return 50 if md.get("status") in ("slp", "par") else 30
+    return md["power"] * (1.5 if md["type"] in WK_SPECIES[sp]["types"] else 1) * (md["acc"] or 100) / 100 + (5 if md.get("prio") else 0)
+
+
 def _wk_gain_xp(uid, save, b, ev):
     """The active kin earns XP for the foe that just fainted; level-ups and new moves."""
     me = save["party"][b["mi"]]
@@ -28032,8 +28129,13 @@ def _wk_gain_xp(uid, save, b, ev):
                     ev.append({"t": "learn", "uid": me["uid"], "move": mv})
                     ev.append({"t": "text", "s": f"{name} learned {WK_MOVES[mv]['name'].upper()}!"})
                 else:
-                    # drop the oldest move to make room (a choice screen comes in a later update)
-                    old = me["moves"].pop(0)
+                    # make room by forgetting the least useful move; skip a new move weaker than everything it knows
+                    vals = [_wk_move_value(me["sp"], m["id"]) for m in me["moves"]]
+                    drop = min(range(len(vals)), key=lambda i: (vals[i], i))
+                    if _wk_move_value(me["sp"], mv) <= vals[drop]:
+                        ev.append({"t": "text", "s": f"{name} could learn {WK_MOVES[mv]['name'].upper()}, but its moves are stronger. It passed."})
+                        continue
+                    old = me["moves"].pop(drop)
                     me["moves"].append({"id": mv, "pp": WK_MOVES[mv]["pp"]})
                     ev.append({"t": "learn", "uid": me["uid"], "move": mv})
                     ev.append({"t": "text", "s": f"{name} forgot {WK_MOVES[old['id']]['name'].upper()} and learned {WK_MOVES[mv]['name'].upper()}!"})
@@ -28252,7 +28354,7 @@ def _wk_turn(uid: int, save: dict, action: dict, rng=random) -> dict:
             return {"ok": False, "error": "It won't have any effect."}
         save["bag"][item] -= 1
         ev.append({"t": "text", "s": f"You used a {it['name'].upper()}!"})
-        if "heal" in it:
+        if "heal" in it or "revive" in it:
             ev.append({"t": "hp", "side": "me" if tgt == b["mi"] else "bench", "uid": mon["uid"], "hp": mon["hp"], "max": wk_stats(mon)["hp"]})
         else:
             ev.append({"t": "status", "side": "me" if tgt == b["mi"] else "bench", "uid": mon["uid"], "st": None})
@@ -28314,6 +28416,12 @@ def _wk_apply_item(mon: dict, item: str):
         gained = min(it["heal"], mx - mon["hp"])
         mon["hp"] += gained
         return f"{name} recovered {gained} HP!"
+    if "revive" in it:
+        if mon["hp"] > 0:
+            return None
+        mon["hp"] = max(1, wk_stats(mon)["hp"] * it["revive"] // 100)
+        mon["st"], mon["slp"] = None, 0
+        return f"{name} is back on its feet!"
     if "cure" in it:
         if mon["hp"] <= 0 or mon.get("st") != it["cure"]:
             return None
@@ -28321,6 +28429,21 @@ def _wk_apply_item(mon: dict, item: str):
         return {"psn": f"{name} was cured of poison!", "slp": f"{name} woke up!", "par": f"{name} can move freely again!",
                 "brn": f"{name}'s burn was healed!"}[it["cure"]]
     return None
+
+
+def _wk_trainer_team(save: dict, tid: str) -> list:
+    if tid == "rival1":
+        return [_wk_foe_mon(save["flags"].get("rival_sp", "kelpling"), 5)]
+    foes = []
+    for entry in WK_TRAINERS[tid]["team"]:
+        sp, lv = entry[0], entry[1]
+        if sp == "@rival":
+            sp = save["flags"].get("rival_sp", "kelpling")
+        mon = _wk_foe_mon(sp, lv)
+        if len(entry) > 2:
+            mon["moves"] = [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in entry[2]]
+        foes.append(mon)
+    return foes
 
 
 def _wk_start_battle(uid, save, kind, foes, tid=None) -> dict:
@@ -28343,7 +28466,7 @@ def _wk_start_battle(uid, save, kind, foes, tid=None) -> dict:
 
 def _wk_pos(save: dict, payload: dict):
     m = str(payload.get("map", ""))
-    if m in WK_MAPS:
+    if m in WK_MAPS and _wk_needs_ok(save, WK_MAP_NEEDS.get(m)):
         try:
             x, y = int(payload.get("x")), int(payload.get("y"))
         except (TypeError, ValueError):
@@ -28357,7 +28480,7 @@ def _wk_pos(save: dict, payload: dict):
 def _wk_static() -> dict:
     return {"species": {k: {"no": v["no"], "name": v["name"], "types": v["types"], "dex": v["dex"]} for k, v in WK_SPECIES.items()},
             "items": WK_ITEMS, "shops": WK_SHOPS, "types": WK_TYPES, "starters": WK_STARTERS,
-            "trainers": {k: {"name": v["name"], "cls": v["cls"], "map": v["map"]} for k, v in WK_TRAINERS.items()},
+            "trainers": {k: {"name": v["name"], "cls": v["cls"], "map": v["map"], "boss": bool(v.get("boss"))} for k, v in WK_TRAINERS.items()},
             "pickups": {k: {"map": v["map"], "items": v["items"]} for k, v in WK_PICKUPS.items()}}
 
 
@@ -28426,6 +28549,8 @@ async def _wk_dispatch(uid: int, action: str, payload: dict) -> dict:
             return done({"resume": True})
         _wk_pos(save, payload)
         table = WK_ENCOUNTERS.get(save["map"])
+        if table and not _wk_needs_ok(save, WK_MAP_NEEDS.get(save["map"])):
+            table = None
         if not table:
             return {"ok": False, "error": "Nothing lives here."}
         if not any(m["hp"] > 0 for m in save["party"]):
@@ -28455,10 +28580,11 @@ async def _wk_dispatch(uid: int, action: str, payload: dict) -> dict:
             return {"ok": False, "error": "There's no one like that here."}
         if tid in save["beaten"]:
             return {"ok": False, "error": "You've already beaten them."}
+        if not _wk_needs_ok(save, t.get("needs")) or not _wk_needs_ok(save, WK_MAP_NEEDS.get(t["map"])):
+            return {"ok": False, "error": "They aren't ready for you yet."}
         if not any(m["hp"] > 0 for m in save["party"]):
             return {"ok": False, "error": "Your kin need rest first."}
-        team = [(save["flags"].get("rival_sp", "kelpling"), 5)] if tid == "rival1" else t["team"]
-        foes = [_wk_foe_mon(sp, lv) for sp, lv in team]
+        foes = _wk_trainer_team(save, tid)
         if tid == "rival1":
             # the first rival battle is a fair fight: his kin doesn't know its type move yet
             foes[0]["moves"] = [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in _wk_moves_at(foes[0]["sp"], 4)]
@@ -28568,7 +28694,7 @@ async def _wk_dispatch(uid: int, action: str, payload: dict) -> dict:
         p = WK_PICKUPS.get(pid)
         if not p or pid in save["picked"]:
             return {"ok": False, "error": "There's nothing here."}
-        if p.get("needs") and p["needs"] not in save["beaten"]:
+        if not _wk_needs_ok(save, p.get("needs")) or not _wk_needs_ok(save, WK_MAP_NEEDS.get(p["map"])):
             return {"ok": False, "error": "Not yet."}
         save["picked"].append(pid)
         for item, qty in p["items"]:
@@ -28594,8 +28720,8 @@ async def _handle_wildkin(message: discord.Message, rest: str):
         await message.channel.send("🌿 The web dashboard isn't set up yet.")
         return
     await message.channel.send(
-        f"🌿 **Wildkin** — a pocket-sized adventure. Pick a starter, catch wild kin in the tall grass and "
-        f"take on every trainer between Mossbrook and the mountain: <{base}/games/wildkin>",
+        f"🌿 **Wildkin** — a pocket-sized adventure. Pick a starter, catch wild kin, earn the Warden's sigil "
+        f"and cross the mountain to the sea: <{base}/games/wildkin>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
