@@ -13072,6 +13072,7 @@ DM_CATEGORIES = {
     "lottery":    "🎰 You won the lottery",
     "rep":        "👍 Someone gave you rep",
     "tournament": "🏆 Tournament results",
+    "invites":    "🎯 Game challenges from other members",
 }
 
 
@@ -26888,6 +26889,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _flap_dispatch(uid, action, payload)
     if game == "wildkin":
         return await _wk_dispatch(uid, action, payload)
+    if game == "paintball":
+        return await _pb_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -27373,6 +27376,7 @@ async def _handle_arcade(message: discord.Message, rest: str):
         f"🐺 **Wolf's Fortune** — 3D slots, wild wolves and tripled free spins: <{base}/games/reels>\n"
         f"🐦 **Flappy Degen** — flap through the candles, every pipe pays: <{base}/games/flappy>\n"
         f"🌿 **Wildkin** — a pocket-sized creature-catching adventure: <{base}/games/wildkin>\n"
+        f"🎯 **Paintball** — hide, aim, splat. Solo or challenge friends: <{base}/games/paintball>\n"
         f"Your stats are on your dashboard: <{base}/me>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -28795,6 +28799,608 @@ async def _handle_wildkin(message: discord.Message, rest: str):
         f"and cross the mountain to the sea: <{base}/games/wildkin>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎯 WEB GAME: PAINTBALL — pick one of your three bunkers to hide behind and one of
+# theirs to shoot at. Both picks stay secret until both are in; the shots land
+# together. Hit = out (both hit: the round replays). Solo vs the bot for a small
+# capped reward, or challenge members (link, member search + DM, or
+# `_paintball @user [wager]`) with an optional wager the server holds in escrow.
+# Everything is decided here; the page only animates what the server says.
+# ─────────────────────────────────────────────────────────────────────────────
+PB_FILE = MEMORY_DIR / "paintball.json"
+PB_SPOTS = 3
+PB_ROUND_SECONDS = 25        # time to lock in a pick in multiplayer
+PB_REVEAL_SECONDS = 4        # the shots play out on screen before the next clock starts
+PB_IDLE_FORFEIT = 2          # missed picks in a row and you forfeit
+PB_PRESENT = 8               # seconds since your last poll that still count as "here"
+PB_SHOWUP = 120              # both players must show up this soon after the join, or it's called off
+PB_OPEN_TTL = 30 * 60        # an unjoined challenge expires and the wager comes back
+PB_SOLO_TTL = 60 * 60        # an abandoned solo game is cleared
+PB_DONE_TTL = 24 * 3600      # finished matches are kept this long (results, rematch)
+PB_MAX_WAGER = 1_000_000
+PB_SOLO_WIN = 30             # coins per point of match length for beating the bot
+PB_SOLO_DAILY_CAP = 600
+PB_INVITES_PER_MATCH = 8
+PB_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+PB_CPU = "cpu"
+PB_CPU_NAME = "Splat Bot"
+_pb_last: dict[int, float] = {}
+_pb_last_invite: dict[int, float] = {}
+
+
+def _pb_load() -> dict:
+    d = _load_json_file(PB_FILE, {})
+    for k in ("matches", "stats", "daily"):
+        d.setdefault(k, {})
+    return d
+
+
+def _pb_save(d: dict):
+    _save_json_file(PB_FILE, d)
+
+
+def _pb_name(uid_s) -> str:
+    return PB_CPU_NAME if uid_s == PB_CPU else _dash_name(uid_s)
+
+
+def _pb_today(d: dict, uid_s: str) -> int:
+    rec = d["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _pb_stats(d: dict, uid_s: str) -> dict:
+    st = d["stats"].setdefault(uid_s, {})
+    for k in ("played", "wins", "losses", "pvp_wins", "pvp_losses", "solo_wins", "hits", "streak", "best_streak", "won"):
+        st.setdefault(k, 0)
+    return st
+
+
+def _pb_public_stats(uid_s: str) -> dict:
+    st = _pb_load()["stats"].get(uid_s)
+    if not st:
+        return {"played": 0}
+    return {k: int(st.get(k, 0)) for k in ("played", "wins", "losses", "pvp_wins", "best_streak", "hits")}
+
+
+def _pb_players(m: dict) -> list:
+    return [u for u in (m["host"], m.get("guest")) if u]
+
+
+def _pb_other(m: dict, uid_s: str):
+    return m.get("guest") if uid_s == m["host"] else m["host"]
+
+
+def _pb_active(d: dict, uid_s: str, mode: str = "pvp"):
+    for m in d["matches"].values():
+        if m["mode"] == mode and m["status"] in ("open", "live") and uid_s in _pb_players(m):
+            return m
+    return None
+
+
+def _pb_new_match(d: dict, host: str, mode: str, first_to: int, wager: int, now: float) -> dict:
+    while True:
+        code = "".join(random.choice(PB_CODE_ALPHABET) for _ in range(6))
+        if code not in d["matches"]:
+            break
+    m = {"id": code, "mode": mode, "host": host, "guest": None, "status": "open", "first_to": first_to, "wager": wager,
+         "escrow": {}, "created": now, "updated": now, "joined_at": None, "started": None, "deadline": None,
+         "round": 1, "score": {host: 0}, "picks": {}, "idle": {}, "history": [], "seen": {host: now},
+         "winner": None, "reason": "", "paid": 0, "seq": 1, "invited": [], "rematch": {}, "next": None, "ended": None}
+    d["matches"][code] = m
+    return m
+
+
+def _pb_bump(m: dict, now: float):
+    m["seq"] = int(m.get("seq", 0)) + 1
+    m["updated"] = now
+
+
+def _pb_refund_all(m: dict, why: str):
+    for u, amt in list(m["escrow"].items()):
+        if int(amt) > 0 and u != PB_CPU:
+            economy.add(int(u), int(amt), f"paintball refund: {why}")
+    m["escrow"] = {}
+
+
+def _pb_cancel(d: dict, m: dict, reason: str, now: float):
+    _pb_refund_all(m, reason)
+    m.update(status="cancelled", reason=reason, ended=now, deadline=None)
+    _pb_bump(m, now)
+
+
+def _pb_finish(d: dict, m: dict, winner: str, reason: str, now: float):
+    loser = _pb_other(m, winner)
+    m.update(status="done", winner=winner, reason=reason, ended=now, deadline=None, picks={})
+    if m["mode"] == "pvp":
+        pot = sum(int(v) for v in m["escrow"].values())
+        m["escrow"] = {}
+        if pot > 0:
+            economy.add(int(winner), pot, "paintball pot")
+            try:
+                track_economy_event("earned", pot - int(m["wager"]))
+            except Exception:
+                pass
+        m["paid"] = pot
+    elif winner == m["host"]:
+        today = _pb_today(d, winner)
+        pay = max(0, min(PB_SOLO_WIN * int(m["first_to"]), PB_SOLO_DAILY_CAP - today))
+        if pay:
+            economy.add(int(winner), pay, "paintball: beat the bot")
+        d["daily"][winner] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + pay}
+        m["paid"] = pay
+    for u, won in ((winner, True), (loser, False)):
+        if not u or u == PB_CPU:
+            continue
+        st = _pb_stats(d, u)
+        st["played"] += 1
+        if won:
+            st["wins"] += 1
+            st["streak"] += 1
+            st["best_streak"] = max(st["best_streak"], st["streak"])
+            st["pvp_wins" if m["mode"] == "pvp" else "solo_wins"] += 1
+            st["won"] += max(0, int(m["paid"]) - (int(m["wager"]) if m["mode"] == "pvp" else 0))
+        else:
+            st["losses"] += 1
+            st["streak"] = 0
+            if m["mode"] == "pvp":
+                st["pvp_losses"] += 1
+    _pb_bump(m, now)
+
+
+def _pb_resolve(d: dict, m: dict, t: float):
+    """Both picks are in (or were filled in for a no-show): fire."""
+    a, b = m["host"], m["guest"]
+    pa, pb = m["picks"][a], m["picks"][b]
+    hit = {a: pb["shoot"] == pa["hide"], b: pa["shoot"] == pb["hide"]}    # hit[x]: x got splatted
+    m["history"].append({"round": m["round"], "picks": {a: pa, b: pb}, "hit": hit})
+    m["picks"] = {}
+    for u, shooter_hit in ((a, hit[b]), (b, hit[a])):
+        if u != PB_CPU and shooter_hit:
+            _pb_stats(d, u)["hits"] += 1
+    for u in (a, b):
+        m["idle"][u] = int(m["idle"].get(u, 0)) + 1 if m["history"][-1]["picks"][u].get("auto") else 0
+    m["round"] += 1
+    if hit[a] != hit[b]:
+        scorer = b if hit[a] else a
+        m["score"][scorer] = int(m["score"].get(scorer, 0)) + 1
+        if m["score"][scorer] >= int(m["first_to"]):
+            _pb_finish(d, m, scorer, "splat", t)
+            return
+    if m["mode"] == "pvp":
+        gone = [u for u in (a, b) if int(m["idle"].get(u, 0)) >= PB_IDLE_FORFEIT]
+        if len(gone) == 2:
+            _pb_cancel(d, m, "both players left", t)
+            return
+        if gone:
+            _pb_finish(d, m, _pb_other(m, gone[0]), "forfeit", t)
+            return
+        m["deadline"] = t + PB_REVEAL_SECONDS + PB_ROUND_SECONDS
+    _pb_bump(m, t)
+
+
+def _pb_tick(d: dict, m: dict, now: float) -> bool:
+    """Apply the clock: expiries, no-shows and missed picks. Returns True if anything changed."""
+    seq = m["seq"]
+    st = m["status"]
+    if st == "open" and now - m["created"] > PB_OPEN_TTL:
+        _pb_cancel(d, m, "nobody joined in time", now)
+    elif st == "live" and m["mode"] == "solo" and now - m["updated"] > PB_SOLO_TTL:
+        m.update(status="cancelled", reason="abandoned", ended=now)
+        _pb_bump(m, now)
+    elif st == "live" and m["mode"] == "pvp":
+        if not m["started"]:
+            here = [u for u in _pb_players(m) if now - float(m["seen"].get(u, 0)) <= PB_PRESENT]
+            if len(here) == 2:
+                m["started"] = now
+                m["deadline"] = now + PB_ROUND_SECONDS + 1
+                _pb_bump(m, now)
+            elif now - float(m["joined_at"] or now) > PB_SHOWUP:
+                _pb_cancel(d, m, "the other player never showed up", now)
+        else:
+            guard = 0
+            while m["status"] == "live" and m["deadline"] and now >= m["deadline"] and guard < 2 * PB_IDLE_FORFEIT + 2:
+                guard += 1
+                t = m["deadline"]
+                for u in _pb_players(m):
+                    if u not in m["picks"]:
+                        m["picks"][u] = {"hide": random.randrange(PB_SPOTS), "shoot": random.randrange(PB_SPOTS), "auto": True}
+                _pb_resolve(d, m, t)
+    elif st in ("done", "cancelled") and now - float(m.get("ended") or now) > PB_DONE_TTL:
+        d["matches"].pop(m["id"], None)
+        return True
+    return m["seq"] != seq
+
+
+def _pb_tick_all(d: dict, now: float) -> bool:
+    changed = False
+    for m in list(d["matches"].values()):
+        changed = _pb_tick(d, m, now) or changed
+    return changed
+
+
+def _pb_view(d: dict, m: dict, uid_s: str, now: float) -> dict:
+    """The match as one player sees it: the opponent's pick stays hidden until it resolves."""
+    me = uid_s
+    opp = _pb_other(m, me)
+    hist = []
+    for h in m["history"]:
+        hist.append({"round": h["round"], "me": h["picks"].get(me), "opp": h["picks"].get(opp) if opp else None,
+                     "me_hit": bool(h["hit"].get(me)), "opp_hit": bool(h["hit"].get(opp)) if opp else False})
+    base = _dash_public_url() or ""
+    return {"id": m["id"], "mode": m["mode"], "status": m["status"], "first_to": m["first_to"], "wager": m["wager"],
+            "round": m["round"], "seq": m["seq"], "host": me == m["host"],
+            "me": {"id": me, "name": _pb_name(me), "score": int(m["score"].get(me, 0))},
+            "opp": {"id": opp, "name": _pb_name(opp), "score": int(m["score"].get(opp, 0)),
+                    "here": opp == PB_CPU or now - float(m["seen"].get(opp, 0)) <= PB_PRESENT} if opp else None,
+            "started": bool(m["started"]) or m["mode"] == "solo",
+            "picked": me in m["picks"], "opp_ready": bool(opp) and opp in m["picks"],
+            "clock": round(max(0.0, m["deadline"] - now), 1) if m.get("deadline") else None,
+            "history": hist, "winner": ("me" if m["winner"] == me else "opp") if m["winner"] else None,
+            "reason": m["reason"], "paid": int(m["paid"]) if m["winner"] == me else 0,
+            "pot": sum(int(v) for v in m["escrow"].values()) or (2 * int(m["wager"]) if m["status"] == "done" else 0),
+            "rematch": {"me": bool(m["rematch"].get(me)), "opp": bool(m["rematch"].get(opp))} if opp else None,
+            "next": m.get("next"), "invited": [_dash_name(u) for u in m["invited"]][-4:],
+            "link": f"{base}/games/paintball?join={m['id']}" if base else f"/games/paintball?join={m['id']}"}
+
+
+def _pb_peek(m: dict) -> dict:
+    """What someone holding an invite link sees before joining."""
+    return {"id": m["id"], "status": m["status"], "mode": m["mode"], "host_name": _pb_name(m["host"]),
+            "wager": m["wager"], "first_to": m["first_to"], "full": bool(m.get("guest"))}
+
+
+def _pb_board(d: dict, uid_s: str) -> dict:
+    rows = [(int(s.get("pvp_wins", 0)), int(s.get("wins", 0)), u) for u, s in d["stats"].items()
+            if (s.get("pvp_wins") or s.get("wins")) and _is_member(None, u)]
+    rows.sort(reverse=True)
+    top = [{"name": _dash_name(u), "pvp": p, "wins": w, "you": u == uid_s} for p, w, u in rows[:10]]
+    rank = next((i + 1 for i, (_, _, u) in enumerate(rows) if u == uid_s), None)
+    return {"top": top, "rank": rank, "of": len(rows)}
+
+
+def _pb_parse_first_to(v) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 1
+    return n if n in (1, 2, 3) else 1
+
+
+def _pb_create(d: dict, uid_s: str, first_to: int, wager: int, now: float):
+    """Open a multiplayer challenge for uid_s. Returns (match, error)."""
+    cur = _pb_active(d, uid_s)
+    if cur and cur["status"] == "live":
+        return None, "Finish your current match first."
+    if wager < 0 or wager > PB_MAX_WAGER:
+        return None, f"Wagers go from 0 to {PB_MAX_WAGER:,}."
+    if wager and economy.balance(int(uid_s)) < wager:
+        return None, f"You need {wager:,} coins for that wager."
+    if cur:   # replace an unjoined challenge with the new one
+        _pb_cancel(d, cur, "replaced by a new challenge", now)
+    m = _pb_new_match(d, uid_s, "pvp", first_to, wager, now)
+    if wager:
+        economy.add(int(uid_s), -wager, "paintball wager (held until the match ends)")
+        m["escrow"][uid_s] = wager
+    return m, None
+
+
+def _pb_member_search(q: str, uid_s: str) -> list:
+    g = client.get_guild(HOME_GUILD_ID)
+    q = (q or "").strip().lower().lstrip("@")
+    if not g or not q:
+        return []
+    out = []
+    for mem in g.members:
+        if mem.bot or str(mem.id) == uid_s:
+            continue
+        names = [mem.display_name.lower(), mem.name.lower(), (mem.global_name or "").lower()]
+        if any(q in n for n in names):
+            starts = any(n.startswith(q) for n in names)
+            out.append((0 if starts else 1, len(mem.display_name), mem))
+    out.sort(key=lambda r: (r[0], r[1]))
+    return [{"id": str(m.id), "name": m.display_name, "avatar": str(m.display_avatar.replace(size=64).url)} for _, _, m in out[:8]]
+
+
+async def _pb_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    d = _pb_load()
+    if _pb_tick_all(d, now):
+        _pb_save(d)       # clock results (payouts, refunds) are saved before anything can return early
+    dirty = False
+
+    def out(extra: dict) -> dict:
+        if dirty:
+            _pb_save(d)
+        extra.setdefault("ok", True)
+        extra["balance"] = int(economy.balance(uid)) if economy._data.get("users", {}).get(uid_s) else 0
+        return extra
+
+    def get_match():
+        m = d["matches"].get(str(payload.get("id", "")).upper().strip())
+        return m
+
+    if action == "info":
+        act = _pb_active(d, uid_s) or _pb_active(d, uid_s, "solo")
+        invites = [_pb_peek(m) for m in d["matches"].values()
+                   if m["status"] == "open" and m["mode"] == "pvp" and uid_s in m["invited"] and m["host"] != uid_s]
+        return out({"stats": _pb_public_stats(uid_s), "board": _pb_board(d, uid_s), "invites": invites[:5],
+                    "active": _pb_view(d, act, uid_s, now) if act else None,
+                    "solo_win": PB_SOLO_WIN, "solo_cap": PB_SOLO_DAILY_CAP, "solo_today": _pb_today(d, uid_s),
+                    "max_wager": PB_MAX_WAGER, "round_seconds": PB_ROUND_SECONDS})
+
+    if action in ("solo", "create", "join", "pick", "rematch", "invite", "cancel", "forfeit"):
+        if now - _pb_last.get(uid, 0) < 0.25:
+            return {"ok": False, "error": "Easy there.", "retry": True}
+        _pb_last[uid] = now
+
+    if action == "solo":
+        first_to = _pb_parse_first_to(payload.get("first_to"))
+        old = _pb_active(d, uid_s, "solo")
+        if old:
+            old.update(status="cancelled", reason="abandoned", ended=now)
+        m = _pb_new_match(d, uid_s, "solo", first_to, 0, now)
+        m.update(guest=PB_CPU, status="live", started=now, joined_at=now)
+        m["score"][PB_CPU] = 0
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "create":
+        try:
+            wager = int(payload.get("wager", 0) or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Bad wager."}
+        m, err = _pb_create(d, uid_s, _pb_parse_first_to(payload.get("first_to")), wager, now)
+        if err:
+            return {"ok": False, "error": err}
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "peek":
+        m = get_match()
+        if not m or m["mode"] != "pvp":
+            return out({"ok": False, "error": "That challenge doesn't exist. Check the code."})
+        if uid_s in _pb_players(m):
+            return out({"mine": True, "match": _pb_view(d, m, uid_s, now)})
+        return out({"peek": _pb_peek(m)})
+
+    if action == "join":
+        m = get_match()
+        if not m or m["mode"] != "pvp":
+            return {"ok": False, "error": "That challenge doesn't exist. Check the code."}
+        if uid_s in _pb_players(m):
+            m["seen"][uid_s] = now
+            dirty = True
+            return out({"match": _pb_view(d, m, uid_s, now)})
+        if m["status"] != "open" or m.get("guest"):
+            return {"ok": False, "error": "Someone already took that challenge." if m["status"] == "live" else "That challenge is over."}
+        mine = _pb_active(d, uid_s)
+        if mine and mine["status"] == "live":
+            return {"ok": False, "error": "Finish your current match first."}
+        if m["wager"] and economy.balance(uid) < m["wager"]:
+            return {"ok": False, "error": f"You need {m['wager']:,} coins to match the wager."}
+        if mine:
+            _pb_cancel(d, mine, "joined another challenge", now)
+        if m["wager"]:
+            economy.add(uid, -m["wager"], "paintball wager (held until the match ends)")
+            m["escrow"][uid_s] = m["wager"]
+        m.update(guest=uid_s, status="live", joined_at=now)
+        m["score"][uid_s] = 0
+        m["seen"][uid_s] = now
+        _pb_bump(m, now)
+        _pb_tick(d, m, now)
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "state":
+        m = get_match()
+        if not m or uid_s not in _pb_players(m):
+            return {"ok": False, "error": "That match isn't yours.", "gone": True}
+        m["seen"][uid_s] = now
+        if _pb_tick(d, m, now):
+            dirty = True
+        if m["mode"] == "pvp" and m["status"] in ("open", "live"):
+            dirty = True    # who's on the page decides when a match starts and who's "here"
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "pick":
+        m = get_match()
+        if not m or uid_s not in _pb_players(m):
+            return {"ok": False, "error": "That match isn't yours."}
+        m["seen"][uid_s] = now
+        if m["status"] != "live":
+            return out({"ok": False, "error": "This match is over.", "match": _pb_view(d, m, uid_s, now)})
+        if m["mode"] == "pvp" and not m["started"]:
+            return out({"ok": False, "error": "Waiting for both players.", "match": _pb_view(d, m, uid_s, now)})
+        try:
+            hide, shoot, rnd = int(payload.get("hide")), int(payload.get("shoot")), int(payload.get("round", m["round"]))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Pick a bunker to hide behind and one to shoot."}
+        if not (0 <= hide < PB_SPOTS and 0 <= shoot < PB_SPOTS):
+            return {"ok": False, "error": "Pick a bunker to hide behind and one to shoot."}
+        if rnd != m["round"] or uid_s in m["picks"]:
+            return out({"match": _pb_view(d, m, uid_s, now), "stale": True})
+        m["picks"][uid_s] = {"hide": hide, "shoot": shoot}
+        if m["mode"] == "solo":
+            m["picks"][PB_CPU] = {"hide": random.randrange(PB_SPOTS), "shoot": random.randrange(PB_SPOTS)}
+            _pb_resolve(d, m, now)
+        elif all(u in m["picks"] for u in _pb_players(m)):
+            _pb_resolve(d, m, now)
+        else:
+            _pb_bump(m, now)
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "cancel":
+        m = get_match()
+        if not m or m["host"] != uid_s:
+            return {"ok": False, "error": "That challenge isn't yours."}
+        if m["status"] == "open":
+            _pb_cancel(d, m, "cancelled by the host", now)
+        elif m["mode"] == "solo" and m["status"] == "live":
+            m.update(status="cancelled", reason="abandoned", ended=now)
+            _pb_bump(m, now)
+        else:
+            return {"ok": False, "error": "You can only cancel before anyone joins."}
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "forfeit":
+        m = get_match()
+        if not m or uid_s not in _pb_players(m) or m["status"] != "live":
+            return {"ok": False, "error": "No live match to leave."}
+        if m["mode"] == "solo":
+            m.update(status="cancelled", reason="abandoned", ended=now)
+            _pb_bump(m, now)
+        elif not m["started"]:
+            _pb_cancel(d, m, "a player left before it started", now)
+        else:
+            _pb_finish(d, m, _pb_other(m, uid_s), "forfeit", now)
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "rematch":
+        m = get_match()
+        if not m or uid_s not in _pb_players(m) or m["mode"] != "pvp" or m["status"] != "done":
+            return {"ok": False, "error": "No finished match to rematch."}
+        if m.get("next"):
+            return out({"match": _pb_view(d, m, uid_s, now)})
+        other = _pb_other(m, uid_s)
+        if _pb_active(d, uid_s) or _pb_active(d, other):
+            return {"ok": False, "error": "One of you is already in another match."}
+        m["rematch"][uid_s] = True
+        m.pop("rematch_error", None)
+        if all(m["rematch"].get(u) for u in _pb_players(m)):
+            w = int(m["wager"])
+            short = [u for u in _pb_players(m) if w and economy.balance(int(u)) < w]
+            if short:
+                m["rematch"] = {}
+                _pb_bump(m, now)
+                dirty = True
+                return out({"ok": False, "error": f"{_pb_name(short[0])} can't cover the {w:,} wager.", "match": _pb_view(d, m, uid_s, now)})
+            n = _pb_new_match(d, other, "pvp", m["first_to"], w, now)   # the other player hosts the rematch
+            for u in (other, uid_s):
+                if w:
+                    economy.add(int(u), -w, "paintball wager (held until the match ends)")
+                    n["escrow"][u] = w
+                n["score"][u] = 0
+                n["seen"][u] = now
+            n.update(guest=uid_s, status="live", joined_at=now)
+            m["next"] = n["id"]
+            _pb_tick(d, n, now)
+        _pb_bump(m, now)
+        dirty = True
+        return out({"match": _pb_view(d, m, uid_s, now)})
+
+    if action == "members":
+        return out({"members": _pb_member_search(str(payload.get("q", ""))[:32], uid_s)})
+
+    if action == "invite":
+        m = get_match()
+        if not m or m["host"] != uid_s or m["mode"] != "pvp" or m["status"] != "open":
+            return {"ok": False, "error": "Open a challenge first."}
+        target = str(payload.get("user_id", ""))
+        g = client.get_guild(HOME_GUILD_ID)
+        mem = g.get_member(int(target)) if g and target.isdigit() else None
+        if not mem or mem.bot or target == uid_s:
+            return {"ok": False, "error": "Pick a member to invite."}
+        if target in m["invited"]:
+            return out({"ok": True, "already": True, "match": _pb_view(d, m, uid_s, now)})
+        if len(m["invited"]) >= PB_INVITES_PER_MATCH:
+            return {"ok": False, "error": "That's enough invites for one challenge. Share the link instead."}
+        if now - _pb_last_invite.get(uid, 0) < 3:
+            return {"ok": False, "error": "One invite every few seconds.", "retry": True}
+        _pb_last_invite[uid] = now
+        m["invited"].append(target)
+        _pb_bump(m, now)
+        _pb_save(d)
+        dirty = False
+        view = _pb_view(d, m, uid_s, now)
+        terms = (f" for **{m['wager']:,}** coins" if m["wager"] else "") + ("" if m["first_to"] == 1 else f", first to {m['first_to']}")
+        sent = await _web_bounded(send_dm(int(target), "invites",
+                                          f"🎯 **{_pb_name(uid_s)}** challenged you to **Paintball**{terms}!\n"
+                                          f"Hide, aim, splat. Accept here: {view['link']}\n-# Code {m['id']}. Turn these off with /notifications."), 4.0)
+        return out({"match": view, "dm": bool(sent), "invitee": mem.display_name})
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+async def _pb_sweeper():
+    """Runs the match clocks even when nobody has the page open (refunds, no-shows, forfeits)."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            economy._load()
+            d = _pb_load()
+            if _pb_tick_all(d, time.time()):
+                _pb_save(d)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("paintball sweeper")
+
+
+def _pb_parse_wager(tok: str):
+    t = tok.lower().replace(",", "").strip()
+    mult = 1
+    if t.endswith("k"):
+        mult, t = 1_000, t[:-1]
+    elif t.endswith("m"):
+        mult, t = 1_000_000, t[:-1]
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    return int(v * mult) if v >= 0 else None
+
+
+async def _handle_paintball(message: discord.Message, rest: str):
+    """_paintball — open the game. _paintball @user [wager] — challenge someone."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🎯 The web dashboard isn't set up yet.")
+        return
+    target = next((m for m in message.mentions if not m.bot and m.id != message.author.id), None)
+    if not target:
+        await message.channel.send(
+            f"🎯 **Paintball**: pick a bunker, pick a target, splat or get splatted. Play the bot or challenge friends: <{base}/games/paintball>\n"
+            f"Challenge someone right here: `_paintball @user` or `_paintball @user 500` to put coins on it.",
+            allowed_mentions=discord.AllowedMentions.none())
+        return
+    toks = [t for t in rest.split() if not t.startswith("<@")]
+    wager, first_to = 0, 1
+    for t in toks:
+        tl = t.lower()
+        if tl in ("bo3", "ft2"):
+            first_to = 2
+        elif tl in ("bo5", "ft3"):
+            first_to = 3
+        else:
+            v = _pb_parse_wager(t)
+            if v is None:
+                await message.channel.send("Usage: `_paintball @user [wager] [bo3|bo5]`")
+                return
+            wager = v
+    d = _pb_load()
+    now = time.time()
+    _pb_tick_all(d, now)
+    m, err = _pb_create(d, str(message.author.id), first_to, wager, now)
+    if err:
+        await message.channel.send(f"❌ {err}")
+        return
+    m["invited"].append(str(target.id))
+    _pb_save(d)
+    link = f"{base}/games/paintball?join={m['id']}"
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Play Paintball", emoji="🎯", url=link))
+    terms = (f" for **{wager:,}** coins" if wager else "") + ("" if first_to == 1 else f" (first to {first_to})")
+    await message.channel.send(
+        f"🎯 {target.mention}, **{message.author.display_name}** challenged you to **Paintball**{terms}!\n"
+        f"Hit the button to accept. {message.author.mention}, open it too so the match can start.\n-# Code `{m['id']}` · expires in 30 minutes"
+        + (f" · {wager:,} held from each player until it's over" if wager else ""),
+        view=view, allowed_mentions=discord.AllowedMentions(users=[target, message.author]))
 
 
 async def _web_bounded(coro, seconds: float = 4.0):
@@ -31537,7 +32143,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "mines": _mines_public_stats(data["mines"], uid_s),
                 "reels": _reels_public_stats(data["reels"], uid_s),
                 "flappy": _flap_public_stats(data["flappy"], uid_s),
-                "wildkin": _wk_public_stats(uid_s)}
+                "wildkin": _wk_public_stats(uid_s),
+                "paintball": _pb_public_stats(uid_s)}
     section("games", _games)
 
     return out
@@ -31724,6 +32331,7 @@ async def on_ready():
         asyncio.create_task(_tagrole_sweep_loop())
         asyncio.create_task(_verify_queue_loop())
         asyncio.create_task(_fmk_social_flush_loop())
+        asyncio.create_task(_pb_sweeper())
         # Persistent verify button — re-registered so it works after restarts
         try:
             client.add_view(VerifyView())
@@ -33832,7 +34440,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen", "wildkin", "wk", "kin",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen", "wildkin", "wk", "kin", "paintball", "pb", "splat",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -35010,6 +35618,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("wildkin", "wk", "kin"):
         await _handle_wildkin(message, rest)
+        return True
+    if cmd_name in ("paintball", "pb", "splat"):
+        await _handle_paintball(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)

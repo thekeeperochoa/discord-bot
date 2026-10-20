@@ -377,6 +377,8 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     var gf = fl && fl.runs ? 'Best ' + n(fl.best) + ' pipe' + (fl.best === 1 ? '' : 's') + ' · ' + n(fl.runs) + ' flight' + (fl.runs > 1 ? 's' : '') + ' · paid today ' + n(fl.today) + ' of ' + n(fl.daily_cap) : 'flap through the candles';
     var wk = g && g.wildkin;
     var gk = wk && wk.started ? n(wk.caught) + ' of ' + n(wk.total) + ' kin caught' + (wk.lead ? ' · ' + esc(wk.lead.name) + ' Lv' + wk.lead.lvl : '') + ' · ' + n(wk.beaten) + ' trainer' + (wk.beaten === 1 ? '' : 's') + ' beaten' : 'a pocket-sized creature-catching adventure';
+    var pbs = g && g.paintball;
+    var gp = pbs && pbs.played ? n(pbs.wins) + ' win' + (pbs.wins === 1 ? '' : 's') + ' · ' + n(pbs.losses) + ' loss' + (pbs.losses === 1 ? '' : 'es') + (pbs.best_streak > 1 ? ' · best streak ' + n(pbs.best_streak) : '') : 'hide, aim, splat. Solo or vs friends';
     var w = g && g.nightrun;
     var gw = w ? (w.stars ? '★ ' + n(w.stars) + ' of ' + n(w.max_stars) + ' · ' + n(w.cars) + ' car' + (w.cars > 1 ? 's' : '') : 'No deliveries yet') + (w.endless ? ' · Midnight Run ' + (w.endless / 1000).toFixed(1) + ' km' : '') + ' · paid today ' + n(w.today) + ' of ' + n(w.daily_cap) : 'run the package across town';
     return '<ul class="rows games">' +
@@ -388,6 +390,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
       '<li><span class="r-main">🐺 Wolf’s Fortune <span class="r-dim">' + gr + '</span></span><span class="r-side"><a href="/games/reels">Play</a></span></li>' +
       '<li><span class="r-main">🐦 Flappy Degen <span class="r-dim">' + gf + '</span></span><span class="r-side"><a href="/games/flappy">Play</a></span></li>' +
       '<li><span class="r-main">🌿 Wildkin <span class="r-dim">' + gk + '</span></span><span class="r-side"><a href="/games/wildkin">Play</a></span></li>' +
+      '<li><span class="r-main">🎯 Paintball <span class="r-dim">' + gp + '</span></span><span class="r-side"><a href="/games/paintball">Play</a></span></li>' +
       '</ul>';
   }
 

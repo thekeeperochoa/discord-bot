@@ -90,7 +90,8 @@ _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "mines": Path(__file__).resolve().parent / "web" / "mines.html",
           "reels": Path(__file__).resolve().parent / "web" / "reels.html",
           "flappy": Path(__file__).resolve().parent / "web" / "flappy.html",
-          "wildkin": Path(__file__).resolve().parent / "web" / "wildkin.html"}
+          "wildkin": Path(__file__).resolve().parent / "web" / "wildkin.html",
+          "paintball": Path(__file__).resolve().parent / "web" / "paintball.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
@@ -102,7 +103,10 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "flappy": {"info": "GET", "start": "POST", "finish": "POST"},
                  "wildkin": {"info": "GET", "new": "POST", "save": "POST", "starter": "POST", "wild": "POST",
                              "trainer": "POST", "act": "POST", "heal": "POST", "buy": "POST", "use": "POST",
-                             "order": "POST", "box": "POST", "pickup": "POST"}}
+                             "order": "POST", "box": "POST", "pickup": "POST"},
+                 "paintball": {"info": "GET", "solo": "POST", "create": "POST", "peek": "POST", "join": "POST", "state": "POST",
+                               "pick": "POST", "cancel": "POST", "forfeit": "POST", "rematch": "POST", "members": "POST",
+                               "invite": "POST"}}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
@@ -204,6 +208,10 @@ def auth_callback():
     session["user_id"] = user["id"]
     session["username"] = user.get("username", "?")
     session.pop("oauth_state", None)
+    nxt = str(session.pop("next", "") or "")
+    # only ever bounce back to one of our own game pages (never an outside URL)
+    if nxt.startswith("/games/") and "//" not in nxt and "\\" not in nxt:
+        return redirect(nxt)
     return redirect("/")
 
 
@@ -259,6 +267,7 @@ def game_page(game):
     if game not in _GAMES:
         return "No such game.", 404
     if not is_logged_in():
+        session["next"] = request.full_path if request.query_string else request.path
         return redirect("/auth/login")
     try:
         html = _GAMES[game].read_text(encoding="utf-8")
