@@ -395,28 +395,35 @@ function drawBunker(b, key, highlight, mineRow, t){
   }
 }
 // a paintball player: helmet + goggle mask, jersey, marker with a hopper
+// body layout from the feet up; pose 0 = crouched, 1 = up and shooting (leaning out)
+function playerGeom(cx, by, s, pose, lean){
+  var up = pose, x = cx + (lean || 0) * s * .5 * up;
+  var L = s * (.26 + .26 * up), hip = by - L, T = s * .55, torsoTop = hip + s * .04 - T, headY = torsoTop - s * .14;
+  return {x: x, by: by, s: s, hip: hip, L: L, T: T, torsoTop: torsoTop, headY: headY, top: headY - s * .24,
+          torso: {x: x, y: torsoTop + T * .5}};
+}
 function drawPlayer(cx, by, s, team, facing, pose, hit, key, lean){
-  // pose: 0 = crouched out of sight behind the bunker, 1 = up and shooting. by = ground y
   var col = team === "me" ? COL.me : COL.opp, dark = team === "me" ? COL.meDark : COL.oppDark;
-  var up = pose, h = s * 1.0, top = by - s * .35 - h * (.55 + .5 * up);
-  var x = cx + (lean || 0) * s * .5 * up;
+  var G = playerGeom(cx, by, s, pose, lean), x = G.x, tt = G.torsoTop, hy = G.headY;
   g.save();
   if (hit > 0){ g.translate(x, by); g.rotate(hit * (facing === "back" ? -.35 : .35)); g.translate(-x, -by); }
-  // legs
-  g.fillStyle = "#1b1530"; rr(x - s * .22, top + h * .75, s * .18, h * .55, s * .06); g.fill(); rr(x + s * .04, top + h * .75, s * .18, h * .55, s * .06); g.fill();
+  g.fillStyle = "rgba(0,0,0,.3)"; g.beginPath(); g.ellipse(x, by, s * .36, s * .07, 0, 0, 7); g.fill();
+  // legs (short and bent when crouched)
+  g.fillStyle = "#1b1530"; rr(x - s * .22, G.hip - s * .04, s * .18, G.L + s * .04, s * .06); g.fill(); rr(x + s * .04, G.hip - s * .04, s * .18, G.L + s * .04, s * .06); g.fill();
+  g.fillStyle = "#0e0a1c"; rr(x - s * .25, by - s * .07, s * .22, s * .08, s * .03); g.fill(); rr(x + s * .03, by - s * .07, s * .22, s * .08, s * .03); g.fill();
   // torso
-  g.fillStyle = col; rr(x - s * .32, top + h * .28, s * .64, h * .55, s * .16); g.fill();
-  g.fillStyle = dark; g.fillRect(x - s * .32, top + h * .58, s * .64, h * .07);
-  if (facing === "front"){ g.fillStyle = "rgba(255,255,255,.85)"; g.font = "700 " + Math.round(s * .2) + "px IBM Plex Sans"; g.textAlign = "center"; g.fillText("2", x, top + h * .52); }
-  // marker + hopper
-  var gx = facing === "back" ? x + s * .1 : x - s * .1, gy = top + h * .45, dir = facing === "back" ? -1 : 1;
-  g.fillStyle = "#2c2c3a"; rr(gx - s * .1, gy, s * .2, s * .26 * (facing === "back" ? .6 : 1), s * .04); g.fill();
-  g.fillStyle = "#3a3a4a"; g.fillRect(gx - s * .035, gy + (dir > 0 ? s * .18 : -s * .12), s * .07, s * .16);
-  g.fillStyle = team === "me" ? "rgba(255,61,154,.9)" : "rgba(61,224,255,.9)"; g.beginPath(); g.ellipse(gx, gy - s * .06, s * .1, s * .08, 0, 0, 7); g.fill();
+  g.fillStyle = col; rr(x - s * .32, tt, s * .64, G.T, s * .16); g.fill();
+  g.fillStyle = dark; g.fillRect(x - s * .32, tt + G.T * .55, s * .64, s * .07);
+  if (facing === "front"){ g.fillStyle = "rgba(255,255,255,.85)"; g.font = "700 " + Math.round(s * .2) + "px IBM Plex Sans"; g.textAlign = "center"; g.fillText("2", x, tt + G.T * .45); }
+  else { g.fillStyle = "rgba(255,255,255,.85)"; g.font = "700 " + Math.round(s * .22) + "px IBM Plex Sans"; g.textAlign = "center"; g.fillText("1", x, tt + G.T * .48); }
+  // marker + hopper, held up front (seen past the shoulder from behind)
+  var gx = facing === "back" ? x + s * .2 : x - s * .14, gy = tt + s * .14;
+  g.fillStyle = "#2c2c3a"; rr(gx - s * .09, gy, s * .18, s * .2, s * .04); g.fill();
+  g.fillStyle = "#3a3a4a"; g.fillRect(gx - s * .035, facing === "back" ? gy - s * .14 : gy + s * .16, s * .07, s * .16);
+  g.fillStyle = team === "me" ? "rgba(255,61,154,.95)" : "rgba(61,224,255,.95)"; g.beginPath(); g.ellipse(gx, gy - s * .05, s * .1, s * .08, 0, 0, 7); g.fill();
   // arms
-  g.fillStyle = dark; rr(x - s * .4, top + h * .32, s * .16, h * .34, s * .07); g.fill(); rr(x + s * .24, top + h * .32, s * .16, h * .34, s * .07); g.fill();
-  // head
-  var hy = top + h * .12;
+  g.fillStyle = dark; rr(x - s * .42, tt + s * .04, s * .16, s * .3, s * .07); g.fill(); rr(x + s * .26, tt + s * .04, s * .16, s * .3, s * .07); g.fill();
+  // head: helmet + goggle mask
   g.fillStyle = "#26203f"; g.beginPath(); g.arc(x, hy, s * .24, 0, 7); g.fill();
   if (facing === "front"){
     g.fillStyle = "#0b0b14"; rr(x - s * .2, hy - s * .07, s * .4, s * .15, s * .06); g.fill();
@@ -424,9 +431,12 @@ function drawPlayer(cx, by, s, team, facing, pose, hit, key, lean){
     g.fillStyle = "#3a3355"; rr(x - s * .12, hy + s * .1, s * .24, s * .1, s * .04); g.fill();
   } else {
     g.fillStyle = col; g.fillRect(x - s * .24, hy - s * .02, s * .48, s * .07);
+    g.fillStyle = "rgba(255,255,255,.12)"; g.beginPath(); g.arc(x - s * .07, hy - s * .09, s * .08, 0, 7); g.fill();
   }
-  (paint[key] || []).forEach(function(p){ blob(x + p.x * s, top + p.y * h, p.r * s, p.c, p.seed, .8); });
+  var fh = by - G.top;
+  (paint[key] || []).forEach(function(p){ blob(x + p.x * s, G.top + p.y * fh, p.r * s, p.c, p.seed, .8); });
   g.restore();
+  return G;
 }
 function crosshair(x, y, r, t){
   var a = t * 2.2;
@@ -439,8 +449,11 @@ function crosshair(x, y, r, t){
 // ── Animation state ──────────────────────────────────────────────────────────
 var A = {me: {lane: 1, x: 0, pose: 0, hit: 0}, opp: {lane: 1, pose: 0, hit: 0, show: false}, balls: [], drops: [], pops: [], screen: [], shake: 0, slow: 1, flash: 0};
 var showAim = true;
-function lanePosMe(i){ var b = nearB(i); return {x: b.x + b.w * .38, y: b.y}; }
-function lanePosOpp(i){ var b = farB(i); return {x: b.x + b.w * .32, y: b.y}; }
+function lanePosMe(i){ var b = nearB(i); return {x: b.x + b.w * .08, y: b.y + W * .07}; }
+function lanePosOpp(i){ var b = farB(i); return {x: b.x + b.w * .15, y: b.y - b.h * .05}; }
+var ME_S = function(){ return W * .2; }, OPP_S = function(){ return W * .085; }, ME_LEAN = .55, OPP_LEAN = 1.5;
+function meGeom(pose){ return playerGeom(A.me.x, lanePosMe(A.me.lane).y, ME_S(), pose, ME_LEAN); }
+function oppGeom(lane, pose){ var p = lanePosOpp(lane); return playerGeom(p.x, p.y, OPP_S(), pose, OPP_LEAN); }
 function frame(ts){
   var t = ts / 1000, dt = Math.min(.05, (t - (frame.last || t))) * A.slow; frame.last = t;
   // ease my runner toward the chosen lane
@@ -452,10 +465,10 @@ function frame(ts){
   var fs = W * .085;
   for (var i = 0; i < 3; i++){
     var b = farB(i);
-    if (A.opp.show && A.opp.lane === i) drawPlayer(lanePosOpp(i).x, b.y - b.h * .05, fs, "opp", "front", A.opp.pose, A.opp.hit, "p_opp", .6);
+    if (A.opp.show && A.opp.lane === i) drawPlayer(lanePosOpp(i).x, lanePosOpp(i).y, OPP_S(), "opp", "front", A.opp.pose, A.opp.hit, "p_opp", OPP_LEAN);
     drawBunker(b, "f" + i, null, false, t);
     if (A.opp.show && A.opp.lane === i && A.opp.pose < .35){   // peeking helmet when hidden
-      g.fillStyle = "#26203f"; g.beginPath(); g.arc(lanePosOpp(i).x - b.w * .32, b.y - b.h - fs * .05, fs * .17, Math.PI, 0); g.fill();
+      var og = oppGeom(i, A.opp.pose); g.fillStyle = "#26203f"; g.beginPath(); g.arc(og.x, b.y - b.h, fs * .2, Math.PI, 0); g.fill();
     }
   }
   if (showAim && M.aim != null && !M.locked) { var fb = farB(M.aim); crosshair(fb.x, fb.y - fb.h * .55, fb.w * .32, t); }
@@ -467,9 +480,8 @@ function frame(ts){
     var hl = (!M.locked && interactive() && M.hide == null) ? "hide" : (M.hide === j && !M.locked && interactive() ? "hide" : null);
     drawBunker(nb, "n" + j, hl === "hide" && (M.hide == null || M.hide === j) ? "hide" : null, true, t);
   }
-  drawPlayer(A.me.x, nearB(A.me.lane).y + ns * .05, ns, "me", "back", A.me.pose, A.me.hit, "p_me", -.4);
-  // the near bunker in front of me is drawn again so I crouch behind it
-  if (A.me.pose < .6) drawBunker(nearB(A.me.lane), "n" + A.me.lane, interactive() && !M.locked && M.hide === A.me.lane ? "hide" : null, true, t);
+  // I'm on the camera side of my cover (it's between me and them), so I'm drawn over it
+  drawPlayer(A.me.x, lanePosMe(A.me.lane).y, ME_S(), "me", "back", A.me.pose, A.me.hit, "p_me", ME_LEAN);
   // balls
   A.balls = A.balls.filter(function(bl){
     bl.t += dt / bl.dur; var k = Math.min(1, bl.t);
@@ -648,12 +660,12 @@ function reveal(h, v){
   setBanner(null); Snd.play("whistle");
   var decisive = h.me_hit !== h.opp_hit;
   return wait(260).then(function(){ return tween(240, function(k){ A.me.pose = k; A.opp.pose = k; }); }).then(function(){
-    var mp = lanePosMe(me.hide), op = lanePosOpp(opp.hide);
-    var myGun = {x: A.me.x + W * .02, y: mp.y - W * .2 * 1.15}, oppGun = {x: op.x - W * .01, y: op.y - W * .085 * 1.25};
+    var mg = meGeom(1), og = oppGeom(opp.hide, 1);
+    var myGun = {x: mg.x + mg.s * .2, y: mg.torsoTop - mg.s * .04}, oppGun = {x: og.x - og.s * .14, y: og.torsoTop + og.s * .14};
     var tgtFar = farB(me.shoot), tgtNear = nearB(opp.hide === -1 ? 1 : opp.shoot);
     // where each ball lands: on the player if it's a hit, else on the bunker face
-    var myLand = h.opp_hit ? {x: op.x, y: op.y - W * .085 * 1.05} : {x: tgtFar.x + (Math.random() - .5) * tgtFar.w * .5, y: tgtFar.y - tgtFar.h * (.35 + Math.random() * .35)};
-    var opLand = h.me_hit ? {x: A.me.x, y: mp.y - W * .2 * 1.0} : {x: tgtNear.x + (Math.random() - .5) * tgtNear.w * .5, y: tgtNear.y - tgtNear.h * (.3 + Math.random() * .45)};
+    var myLand = h.opp_hit ? {x: og.torso.x, y: og.torso.y} : {x: tgtFar.x + (Math.random() - .5) * tgtFar.w * .5, y: tgtFar.y - tgtFar.h * (.35 + Math.random() * .35)};
+    var opLand = h.me_hit ? {x: mg.torso.x, y: mg.torso.y} : {x: tgtNear.x + (Math.random() - .5) * tgtNear.w * .5, y: tgtNear.y - tgtNear.h * (.3 + Math.random() * .45)};
     A.pops.push({kind: "flash", x: myGun.x, y: myGun.y, r: W * .03, t: 0, dur: .12}); A.pops.push({kind: "flash", x: oppGun.x, y: oppGun.y, r: W * .015, t: 0, dur: .12});
     Snd.play("shot"); Snd.play("shot", .05);
     if (decisive) A.slow = .55;
