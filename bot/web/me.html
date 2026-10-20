@@ -163,9 +163,9 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
 .arcade::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;opacity:.5;
   background:repeating-linear-gradient(90deg,rgba(217,184,108,.05) 0 1px,transparent 1px 44px),repeating-linear-gradient(0deg,rgba(217,184,108,.04) 0 1px,transparent 1px 44px);
   mask-image:radial-gradient(90% 80% at 50% 0%,#000,transparent 80%);-webkit-mask-image:radial-gradient(90% 80% at 50% 0%,#000,transparent 80%)}
-.ar-beams{position:absolute;inset:-20% -10% auto;height:120%;z-index:-1;pointer-events:none;opacity:.55;
-  background:conic-gradient(from 200deg at 15% -10%,transparent 0 6deg,rgba(255,236,190,.10) 8deg 14deg,transparent 16deg 360deg),
-             conic-gradient(from 140deg at 85% -10%,transparent 0 6deg,rgba(255,236,190,.10) 8deg 14deg,transparent 16deg 360deg);
+.ar-beams{position:absolute;inset:-20% -10% auto;height:120%;z-index:-1;pointer-events:none;opacity:.9;
+  background:conic-gradient(from 200deg at 15% -10%,transparent 0 6deg,rgba(255,236,190,.16) 8deg 14deg,transparent 16deg 360deg),
+             conic-gradient(from 140deg at 85% -10%,transparent 0 6deg,rgba(255,236,190,.16) 8deg 14deg,transparent 16deg 360deg);
   animation:ar-sweep 9s ease-in-out infinite alternate}
 @keyframes ar-sweep{0%{transform:rotate(-3deg)}100%{transform:rotate(3deg)}}
 .ar-sparks{position:absolute;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
@@ -174,13 +174,18 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
 
 /* marquee sign */
 .ar-head{display:flex;align-items:center;justify-content:space-between;gap:14px 20px;flex-wrap:wrap;margin-bottom:18px}
-.ar-sign{position:relative;padding:12px 22px 11px;border-radius:14px;background:linear-gradient(180deg,#2A1C06,#130C02);
-  box-shadow:inset 0 0 0 2px #8A6A22,inset 0 0 26px rgba(217,184,108,.25),0 10px 30px rgba(0,0,0,.45)}
-.ar-sign::before{content:"";position:absolute;inset:5px;border-radius:10px;pointer-events:none;
-  background:radial-gradient(circle,#FFE9A8 0 2px,transparent 2.6px) 0 0/14px 14px;
-  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;padding:3px;
-  animation:ar-chase .9s steps(2) infinite;opacity:.95;filter:drop-shadow(0 0 3px rgba(255,220,140,.9))}
-@keyframes ar-chase{to{background-position:7px 0}}
+.ar-sign{position:relative;padding:22px 34px 20px;border-radius:18px;background:linear-gradient(180deg,#3A2708,#170E02);
+  box-shadow:inset 0 0 0 3px #B8923A,inset 0 0 0 5px #3A2708,inset 0 0 0 6px rgba(217,184,108,.5),inset 0 0 40px rgba(255,200,90,.22),0 0 0 1px rgba(0,0,0,.6),0 12px 34px rgba(0,0,0,.5)}
+.ar-sign::before{content:"";position:absolute;inset:-46px -60px;z-index:-1;pointer-events:none;border-radius:50%;
+  background:radial-gradient(closest-side,rgba(255,196,84,.42),rgba(255,170,60,.16) 55%,transparent);animation:ar-halo 2.4s ease-in-out infinite}
+@keyframes ar-halo{0%,100%{opacity:.75;transform:scale(.97)}50%{opacity:1;transform:scale(1.03)}}
+.ar-bulbs{position:absolute;inset:0;pointer-events:none}
+.ar-bulbs i{position:absolute;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;
+  background:radial-gradient(circle at 35% 35%,#fff 0 18%,#FFE9A8 40%,#FFC24A 100%);
+  box-shadow:0 0 3px 1px #FFE29A,0 0 10px 3px rgba(255,190,70,.85),0 0 22px 6px rgba(255,170,50,.35);
+  animation:ar-bulb 1.05s linear infinite}
+@keyframes ar-bulb{0%,30%{background:radial-gradient(circle at 35% 35%,#fff 0 18%,#FFE9A8 40%,#FFC24A 100%);box-shadow:0 0 3px 1px #FFE29A,0 0 10px 3px rgba(255,190,70,.85),0 0 22px 6px rgba(255,170,50,.35)}
+  34%,96%{background:radial-gradient(circle at 35% 35%,#B48A3E,#6B4A14);box-shadow:0 0 2px rgba(255,190,70,.25)}}
 .ar-title{margin:0;font:400 clamp(1.7rem,6vw,2.6rem)/1 "Bungee","Impact",system-ui,sans-serif;letter-spacing:.04em;
   background:linear-gradient(180deg,#FFF3C4 0%,#F4D58D 40%,#B8923A 75%,#FFE7A3 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
   filter:drop-shadow(0 2px 0 #5A3F0A) drop-shadow(0 0 14px rgba(244,213,141,.45));animation:ar-flicker 6s infinite}
@@ -325,7 +330,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
 @keyframes a-ball{0%{transform:translate(0,0);opacity:0}5%{opacity:1}45%{transform:translate(var(--bx),var(--by));opacity:1}50%,100%{transform:translate(var(--bx),var(--by));opacity:0}}
 @keyframes a-flap{0%,100%{transform:rotate(-10deg)}50%{transform:rotate(25deg)}}
 @media (prefers-reduced-motion:reduce){
-  .ar-anim *, .ar-anim, .ar-beams, .ar-sparks i, .ar-sign::before, .ar-title, .ar-btn::after, .ar-kicker, .ar-badge{animation:none!important}
+  .ar-anim *, .ar-anim, .ar-beams, .ar-sparks i, .ar-sign::before, .ar-bulbs i, .ar-title, .ar-btn::after, .ar-kicker, .ar-badge{animation:none!important}
   .ar-card,.ar-card.in{transition:opacity .2s!important;transform:none!important}
   .ar-copy > *{opacity:1;transform:none}
 }
@@ -711,7 +716,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     var playedN = GAMES.filter(function(x){ return x.played(g[x.id]); }).length;
     var C = 2 * Math.PI * 19, off = C * (1 - playedN / GAMES.length);
     var h = '<section class="arcade" id="arcade" aria-labelledby="arTitle"><div class="ar-beams"></div><div class="ar-sparks" id="arSparks"></div>';
-    h += '<div class="ar-head"><div class="ar-sign"><h2 class="ar-title" id="arTitle">THE ARCADE</h2></div>' +
+    h += '<div class="ar-head"><div class="ar-sign" id="arSign"><span class="ar-bulbs" id="arBulbs" aria-hidden="true"></span><h2 class="ar-title" id="arTitle">THE ARCADE</h2></div>' +
          '<div class="ar-meta"><div class="ar-ring"><svg viewBox="0 0 46 46" aria-hidden="true"><defs><linearGradient id="ar-goldgrad"><stop offset="0" stop-color="#FFE7A3"/><stop offset="1" stop-color="#B8923A"/></linearGradient></defs>' +
          '<circle class="bgc" cx="23" cy="23" r="19"/><circle class="fgc" id="arRing" cx="23" cy="23" r="19" stroke-dasharray="' + C.toFixed(1) + '" stroke-dashoffset="' + C.toFixed(1) + '" data-off="' + off.toFixed(1) + '"/></svg>' +
          '<p class="big"><b>' + playedN + '</b> of ' + GAMES.length + ' games played</p></div><p class="sub">' + (playedN < GAMES.length ? 'Try them all. Six are free to play.' : 'Every game tried. Respect.') + '</p></div></div>';
@@ -753,6 +758,20 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
     // sparks
     if (!reduce){ var sp = $("arSparks"), sh = ""; for (var i = 0; i < 16; i++) sh += '<i style="left:' + (Math.random() * 100).toFixed(1) + '%;animation-duration:' + (6 + Math.random() * 7).toFixed(1) + 's;animation-delay:' + (-Math.random() * 10).toFixed(1) + 's"></i>'; sp.innerHTML = sh; }
+    // marquee bulbs around the sign, chasing clockwise
+    var sign = $("arSign"), bulbs = $("arBulbs"), lastW = 0, lastH = 0;
+    function layBulbs(){
+      var w = sign.offsetWidth, h = sign.offsetHeight, d = 10; if (!w || (w === lastW && h === lastH)) return; lastW = w; lastH = h;
+      var pts = [], nx = Math.max(2, Math.round((w - 2 * d) / 17)), ny = Math.max(1, Math.round((h - 2 * d) / 17)), k;
+      for (k = 0; k < nx; k++) pts.push([d + (w - 2 * d) * k / nx, d]);
+      for (k = 0; k < ny; k++) pts.push([w - d, d + (h - 2 * d) * k / ny]);
+      for (k = 0; k < nx; k++) pts.push([w - d - (w - 2 * d) * k / nx, h - d]);
+      for (k = 0; k < ny; k++) pts.push([d, h - d - (h - 2 * d) * k / ny]);
+      bulbs.innerHTML = pts.map(function(p, i){ return '<i style="left:' + p[0].toFixed(1) + 'px;top:' + p[1].toFixed(1) + 'px;animation-delay:' + (-(2 - i % 3) * .35).toFixed(2) + 's"></i>'; }).join("");
+    }
+    layBulbs();
+    if (window.ResizeObserver) new ResizeObserver(layBulbs).observe(sign); else window.addEventListener("resize", layBulbs);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(layBulbs);
     var cards = Array.prototype.slice.call(root.querySelectorAll(".ar-card"));
     // reveal on scroll + pause scenes that are off screen
     function reveal(el){ el.classList.add("in"); var mi = el.querySelector(".ar-meter i"); if (mi) mi.style.width = mi.getAttribute("data-w"); }
