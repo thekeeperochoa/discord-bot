@@ -380,9 +380,9 @@ def _compute_relationships(user_id: int) -> str:
     lines = []
     # 💍 Spouse
     try:
-        sp = _load_marriages().get(uid_s, {}).get("spouse")
-        if sp and _is_member(None, sp):
-            lines.append(f"💍 Married to <@{sp}>.")
+        sps = [s for s in _spouses_of(uid_s) if _is_member(None, s)]
+        if sps:
+            lines.append("💍 Married to " + ", ".join(f"<@{s}>" for s in sps) + ".")
     except Exception:
         pass
     # 🏴 Crew + crewmates (allies)
@@ -6954,19 +6954,66 @@ async def crime_command(interaction: discord.Interaction):
 
 # ── 💍 /marry ────────────────────────────────────────────────────────────────
 MARRIAGES_FILE = MEMORY_DIR / "marriages.json"
+MARRY_MAX_SPOUSES = 10          # members can have several spouses at once
+MARRY_GIFT = 1000               # wedding gift to each partner, once per couple ever
+DIVORCE_COST = 500
+# File shape: {"<uid>": {"spouses": {"<other uid>": since_ts, ...}}, "_gifted": ["<uidA>-<uidB>", ...]}
+# Older saves stored one {"spouse": uid, "since": ts} per member; those are converted on load.
+
+def _marry_pair(a, b) -> str:
+    return "-".join(sorted((str(a), str(b))))
 
 def _load_marriages() -> dict:
+    data = {}
     if MARRIAGES_FILE.exists():
         try:
             with open(MARRIAGES_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
         except Exception:
-            pass
-    return {}
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    gifted = data.get("_gifted")
+    if not isinstance(gifted, list):
+        gifted = []
+    for k, v in list(data.items()):
+        if k.startswith("_"):
+            continue
+        if not isinstance(v, dict):
+            del data[k]
+            continue
+        if "spouses" not in v:                       # one-spouse format from before polygamy
+            sp = v.get("spouse")
+            data[k] = {"spouses": {str(sp): v.get("since", time.time())} if sp else {}}
+            if sp and _marry_pair(k, sp) not in gifted:
+                gifted.append(_marry_pair(k, sp))     # they already got their wedding gift
+        if not data[k].get("spouses"):
+            del data[k]
+    data["_gifted"] = gifted
+    return data
 
 def _save_marriages(data: dict):
     with open(MARRIAGES_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+def _spouses_of(uid, data: dict = None) -> list:
+    """Spouse uids (strings), longest marriage first."""
+    rec = (data if data is not None else _load_marriages()).get(str(uid), {})
+    sp = rec.get("spouses", {}) if isinstance(rec, dict) else {}
+    return [u for u, _ in sorted(sp.items(), key=lambda kv: kv[1])]
+
+def _marry(data: dict, a, b):
+    now = time.time()
+    data.setdefault(str(a), {"spouses": {}})["spouses"][str(b)] = now
+    data.setdefault(str(b), {"spouses": {}})["spouses"][str(a)] = now
+
+def _unmarry(data: dict, a, b):
+    for x, y in ((str(a), str(b)), (str(b), str(a))):
+        rec = data.get(x)
+        if rec:
+            rec.get("spouses", {}).pop(y, None)
+            if not rec.get("spouses"):
+                del data[x]
 
 
 class MarryView(discord.ui.View):
@@ -6986,35 +7033,47 @@ class MarryView(discord.ui.View):
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.responded = True
         marriages = _load_marriages()
-        # Check both are single
-        if str(self.proposer_id) in marriages or str(self.target_id) in marriages:
-            await interaction.response.edit_message(
-                content="❌ Someone is already married. This proposal is void.",
-                view=None,
-            )
+        mine, theirs = _spouses_of(self.proposer_id, marriages), _spouses_of(self.target_id, marriages)
+        # Re-check: things may have changed while the proposal was open
+        if str(self.target_id) in mine:
+            await interaction.response.edit_message(content="💍 You two are already married.", view=None)
             return
-        # Marry them
-        marriages[str(self.proposer_id)] = {"spouse": str(self.target_id), "since": time.time()}
-        marriages[str(self.target_id)] = {"spouse": str(self.proposer_id), "since": time.time()}
+        if len(mine) >= MARRY_MAX_SPOUSES or len(theirs) >= MARRY_MAX_SPOUSES:
+            await interaction.response.edit_message(
+                content=f"❌ Someone already has {MARRY_MAX_SPOUSES} spouses. This proposal is void.", view=None)
+            return
+        _marry(marriages, self.proposer_id, self.target_id)
+        pair = _marry_pair(self.proposer_id, self.target_id)
+        first_time = pair not in marriages["_gifted"]
+        if first_time:
+            marriages["_gifted"].append(pair)
         _save_marriages(marriages)
-        # Wedding bonus to both
-        bonus = 1000
-        economy.add(self.proposer_id, bonus, "wedding gift")
-        economy.add(self.target_id, bonus, "wedding gift")
+        # Wedding gift, once per couple ever (remarrying the same person doesn't pay again)
+        if first_time:
+            economy.add(self.proposer_id, MARRY_GIFT, "wedding gift")
+            economy.add(self.target_id, MARRY_GIFT, "wedding gift")
         # Achievements
         chan = interaction.channel
         await trigger_event(self.proposer_id, "married", channel=chan)
         await trigger_event(self.target_id, "married", channel=chan)
         for child in self.children:
             child.disabled = True
+        def tally(uid, before):
+            n = len(before) + 1
+            return f"<@{uid}> now has **{n}** spouses." if n > 1 else None
+        extra = [t for t in (tally(self.proposer_id, mine), tally(self.target_id, theirs)) if t]
+        gift_line = (f"💰 Both received **{MARRY_GIFT:,}** coin wedding gifts!" if first_time
+                     else "💰 No wedding gift this time. You two already got one.")
         await interaction.response.edit_message(
             content=(
                 f"💒 **WEDDING BELLS** 💒\n\n"
                 f"<@{self.proposer_id}> and <@{self.target_id}> are now married!\n\n"
-                f"💰 Both received **{bonus:,}** coin wedding gifts!\n"
+                + ("\n".join(extra) + "\n" if extra else "")
+                + f"{gift_line}\n"
                 f"💑 Use `/divorce` to end it (with consequences)."
             ),
             view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @discord.ui.button(label="Reject 💔", style=discord.ButtonStyle.danger)
@@ -7045,17 +7104,23 @@ async def marry_command(interaction: discord.Interaction, user: discord.Member):
         return
 
     marriages = _load_marriages()
-    if str(proposer.id) in marriages:
-        spouse_id = marriages[str(proposer.id)]["spouse"]
+    mine = _spouses_of(proposer.id, marriages)
+    if str(user.id) in mine:
         await interaction.response.send_message(
-            f"❌ You're already married to <@{spouse_id}>. Use `/divorce` first.",
+            f"💍 You're already married to {user.mention}.",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
-    if str(user.id) in marriages:
+    if len(mine) >= MARRY_MAX_SPOUSES:
         await interaction.response.send_message(
-            f"❌ {user.mention} is already married.",
+            f"❌ You already have {MARRY_MAX_SPOUSES} spouses. That's the limit. `/divorce` someone first.",
+            ephemeral=True,
+        )
+        return
+    if len(_spouses_of(user.id, marriages)) >= MARRY_MAX_SPOUSES:
+        await interaction.response.send_message(
+            f"❌ {user.mention} already has {MARRY_MAX_SPOUSES} spouses.",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -7097,30 +7162,43 @@ async def marry_command(interaction: discord.Interaction, user: discord.Member):
     )
 
 
-@tree.command(name="divorce", description="End your marriage. Costs coins.")
-async def divorce_command(interaction: discord.Interaction):
-    user = interaction.user
+@tree.command(name="divorce", description="End a marriage. Costs coins.")
+@discord.app_commands.describe(user="Which spouse to divorce (needed if you have more than one)")
+async def divorce_command(interaction: discord.Interaction, user: discord.Member = None):
+    me = interaction.user
     marriages = _load_marriages()
-    if str(user.id) not in marriages:
+    spouses = _spouses_of(me.id, marriages)
+    if not spouses:
         await interaction.response.send_message("You're not married.", ephemeral=True)
         return
+    if user is not None:
+        if str(user.id) not in spouses:
+            await interaction.response.send_message(
+                f"You're not married to {user.mention}.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            return
+        spouse_id = str(user.id)
+    elif len(spouses) == 1:
+        spouse_id = spouses[0]
+    else:
+        await interaction.response.send_message(
+            f"You have {len(spouses)} spouses: " + ", ".join(f"<@{s}>" for s in spouses)
+            + ".\nPick one: `/divorce user:@them` (or `_divorce @them`).",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        return
 
-    spouse_id = int(marriages[str(user.id)]["spouse"])
-    cost = 500
-    bal = economy.balance(user.id)
-    actual = min(cost, bal)
-    economy.add(user.id, -actual, "divorce")
-    await trigger_event(user.id, "divorced", channel=interaction.channel)
-
-    del marriages[str(user.id)]
-    if str(spouse_id) in marriages:
-        del marriages[str(spouse_id)]
+    bal = economy.balance(me.id)
+    actual = min(DIVORCE_COST, bal)
+    economy.add(me.id, -actual, "divorce")
+    _unmarry(marriages, me.id, spouse_id)
     _save_marriages(marriages)
+    await trigger_event(me.id, "divorced", channel=interaction.channel)
 
+    left = len(spouses) - 1
     await interaction.response.send_message(
         f"💔 **DIVORCED**\n\n"
-        f"{user.mention} divorced <@{spouse_id}>.\n"
-        f"Lawyer fees: **{actual:,}** coins.",
+        f"{me.mention} divorced <@{spouse_id}>.\n"
+        f"Lawyer fees: **{actual:,}** coins."
+        + (f"\n💍 Still married to {left} other{'s' if left != 1 else ''}." if left else ""),
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -26116,15 +26194,8 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     stocks_total = sum(int(_stock_price(t, s_data) * sh) for t, sh in holdings.items() if sh > 0)
     stocks_count = sum(1 for v in holdings.values() if v > 0)
 
-    marriages = _load_marriages()
-    spouse_id = None
-    for info in marriages.get("married", {}).values():
-        if info.get("user_a") == uid:
-            spouse_id = info.get("user_b")
-            break
-        if info.get("user_b") == uid:
-            spouse_id = info.get("user_a")
-            break
+    n_spouses = len(_spouses_of(uid))
+    married_tag = ("💍 MARRIED" if n_spouses == 1 else f"💍 MARRIED x{n_spouses}") if n_spouses else None
 
     h_data = _load_heist_crew()
     crew_info = h_data.get("users", {}).get(str(uid), {})
@@ -26267,8 +26338,8 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     f5_lines.append("◤ STATS")
     f5_lines.append(kv("W/L", f"{total_wins}/{total_losses} ({win_rate:.0f}%)", 7))
     f5_lines.append(kv("ACHIEV", str(len(achievements)), 7))
-    if spouse_id:
-        f5_lines.append("💍 MARRIED")
+    if married_tag:
+        f5_lines.append(married_tag)
     f5 = f5_lines
 
     # Frame 6 — full dossier (everything visible)
@@ -26362,8 +26433,8 @@ async def whois_command(interaction: discord.Interaction, user: discord.Member =
     f6.append("◤ STATS")
     f6.append(kv("W/L", f"{total_wins}/{total_losses} ({win_rate:.0f}%)", 7))
     f6.append(kv("ACHIEV", str(len(achievements)), 7))
-    if spouse_id:
-        f6.append("💍 MARRIED")
+    if married_tag:
+        f6.append(married_tag)
     f6.append("")
     f6.append("◤ ASSESSMENT")
     # Kingpins can set a custom classification title
@@ -31417,8 +31488,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
     section("crew", _crew)
 
     def _spouse():
-        sp = _load_marriages().get(uid_s, {}).get("spouse")
-        return _dash_name(sp) if sp and _is_member(None, sp) else None
+        names = [_dash_name(s) for s in _spouses_of(uid_s) if _is_member(None, s)]
+        return ", ".join(names) if names else None
     section("spouse", _spouse)
 
     def _fmk():
@@ -31942,7 +32013,7 @@ PREFIX_COMMANDS = {
     "roll":         ("roll",          [{"name":"sides","type":"int","required":False,"default":100}]),
     "flip":         ("flip",          []),
     "marry":        ("marry",         [{"name":"user","type":"user","required":True}]),
-    "divorce":      ("divorce",       []),
+    "divorce":      ("divorce",       [{"name":"user","type":"user","required":False,"default":None}]),
     # Shop & redeem
     "protect":      ("protect",       []),
     "lottery":      ("lottery",       [{"name":"tickets","type":"int","required":False,"default":0}]),
