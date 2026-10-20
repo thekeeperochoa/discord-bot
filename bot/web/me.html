@@ -153,7 +153,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
 .err button{margin-top:12px;font:inherit;background:var(--gold);color:#16261F;border:0;border-radius:4px;padding:9px 16px;font-weight:600;cursor:pointer}
 
 /* ═════════════════ THE ARCADE ═════════════════ */
-.arcade{position:relative;margin:30px -6px 6px;padding:22px 18px 24px;border-radius:22px;isolation:isolate;overflow:hidden;
+.arcade{position:relative;margin:30px -6px 6px;padding:22px 18px 24px;border-radius:22px;isolation:isolate;overflow:hidden;overflow:clip;
   background:
     radial-gradient(120% 70% at 50% -10%,rgba(217,184,108,.20),transparent 60%),
     radial-gradient(60% 50% at 0% 100%,rgba(57,135,229,.16),transparent 70%),
@@ -823,7 +823,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
     chips.forEach(function(ch){ ch.addEventListener("click", function(){
       if (ch.getAttribute("aria-pressed") === "true") return;
       chips.forEach(function(x){ x.setAttribute("aria-pressed", String(x === ch)); });
-      movePill(ch); ch.scrollIntoView({block: "nearest", inline: "center", behavior: reduce ? "auto" : "smooth"});
+      movePill(ch); var fl = ch.parentNode; if (fl.scrollWidth > fl.clientWidth) fl.scrollTo({left: ch.offsetLeft - (fl.clientWidth - ch.offsetWidth) / 2, behavior: reduce ? "auto" : "smooth"});
       applyFilter(ch.getAttribute("data-cat"));
     }); });
     // spotlight carousel
