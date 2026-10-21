@@ -91,7 +91,8 @@ _GAMES = {"getaway": Path(__file__).resolve().parent / "web" / "getaway.html",
           "reels": Path(__file__).resolve().parent / "web" / "reels.html",
           "flappy": Path(__file__).resolve().parent / "web" / "flappy.html",
           "wildkin": Path(__file__).resolve().parent / "web" / "wildkin.html",
-          "paintball": Path(__file__).resolve().parent / "web" / "paintball.html"}
+          "paintball": Path(__file__).resolve().parent / "web" / "paintball.html",
+          "kart": Path(__file__).resolve().parent / "web" / "kart.html"}
 _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                  "pumpdump": {"info": "GET", "start": "POST", "finish": "POST", "tick": "POST", "trade": "POST"},
                  "videopoker": {"info": "GET", "deal": "POST", "draw": "POST"},
@@ -106,7 +107,13 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                              "order": "POST", "box": "POST", "pickup": "POST"},
                  "paintball": {"info": "GET", "solo": "POST", "create": "POST", "peek": "POST", "join": "POST", "state": "POST",
                                "pick": "POST", "cancel": "POST", "forfeit": "POST", "rematch": "POST", "members": "POST",
-                               "invite": "POST"}}
+                               "invite": "POST"},
+                 "kart": {"info": "POST", "solo_start": "POST", "solo_finish": "POST", "create": "POST", "peek": "POST",
+                          "join": "POST", "state": "POST", "config": "POST", "start": "POST", "leave": "POST", "again": "POST",
+                          "members": "POST", "invite": "POST", "tick": "POST"}}
+# Actions answered straight from the web thread (no bot-loop hop): the kart racing heartbeat.
+_FAST_PROVIDER = None
+_FAST_ACTIONS = {("kart", "tick")}
 _ME_PAGE_PATH = Path(__file__).resolve().parent / "web" / "me.html"
 _me_page_cache = {"html": None}
 
@@ -293,7 +300,13 @@ def game_api(game, action):
     payload = request.get_json(silent=True) if request.method == "POST" else {}
     if not isinstance(payload, dict):
         payload = {}
-    if _GAME_PROVIDER is None:
+    if (game, action) in _FAST_ACTIONS and _FAST_PROVIDER is not None:
+        try:
+            data = dict(_FAST_PROVIDER(int(session["user_id"]), game, action, payload) or {})
+        except Exception:
+            log.exception("fast game provider failed")
+            data = {"ok": False, "error": "Something went wrong."}
+    elif _GAME_PROVIDER is None:
         data = {"ok": False, "error": "Games aren't connected to the bot right now. Try again shortly."}
     else:
         try:
@@ -2163,11 +2176,13 @@ def _rebind_memory_dir(memory_dir):
              MEMORY_DIR, MEMORY_DIR.exists())
 
 
-def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None, game_provider=None):
+def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None, game_provider=None, fast_provider=None):
     """Run the Flask server. Called from bot.py on a background thread."""
-    global _PROFILE_PROVIDER, _GAME_PROVIDER
+    global _PROFILE_PROVIDER, _GAME_PROVIDER, _FAST_PROVIDER
     if game_provider is not None:
         _GAME_PROVIDER = game_provider
+    if fast_provider is not None:
+        _FAST_PROVIDER = fast_provider
     if memory_dir is not None:
         _rebind_memory_dir(memory_dir)
     if profile_provider is not None:
@@ -2176,7 +2191,7 @@ def start_dashboard(port: int = 8080, memory_dir=None, profile_provider=None, ga
     # Use waitress if available (production-quality), else Flask dev server
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=port, threads=4)
+        serve(app, host="0.0.0.0", port=port, threads=12)    # karts poll ~10×/s each
     except ImportError:
         # Suppress Flask dev-server "WARNING: This is a development server" noise
         import logging as logging_mod

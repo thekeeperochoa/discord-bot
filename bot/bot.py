@@ -26891,6 +26891,8 @@ async def _web_game_dispatch(uid: int, game: str, action: str, payload: dict) ->
         return await _wk_dispatch(uid, action, payload)
     if game == "paintball":
         return await _pb_dispatch(uid, action, payload)
+    if game == "kart":
+        return await _kart_dispatch(uid, action, payload)
     if game != "getaway":
         return {"ok": False, "error": "Unknown game."}
     uid_s = str(uid)
@@ -29521,6 +29523,807 @@ async def _handle_paintball(message: discord.Message, rest: str):
         view=view, allowed_mentions=discord.AllowedMentions(users=[target, message.author]))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏎️ WEB GAME: DEGEN KART — a 3D kart racer on the dashboard. Solo against bots,
+# or multiplayer lobbies of up to 8 (bots fill the empty grid spots). Free races
+# pay small capped prizes; hosts can set an entry fee that the server holds in
+# escrow and pays out by finishing order.
+# Netcode: every racer's page drives its own kart and posts its state ~10×/s to
+# the "tick" action, which runs straight on the web thread (no bot-loop hop, no
+# file I/O) against the in-memory races below. The server checks that nobody
+# moves faster than any kart can, keeps karts on the track, and decides the
+# finishing order; money only ever moves on the bot loop (lobby actions and the
+# settlement sweeper). Fees are mirrored to memory/kart.json so a restart
+# refunds them instead of losing them.
+# ─────────────────────────────────────────────────────────────────────────────
+import threading as _kart_threading
+
+KART_FILE = MEMORY_DIR / "kart.json"
+# ground-plane control points (x, z, height) for a closed Catmull-Rom loop, in metres
+KART_TRACKS = {
+    "wallst":   {"name": "Wall Street Loop", "width": 15, "laps": 3,
+                 "pts": [(0, 0, 0), (120, 0, 0), (152, 32, 0), (152, 82, 0), (120, 114, 0), (80, 114, 0), (48, 146, 0), (48, 186, 0),
+                         (16, 218, 0), (-52, 218, 0), (-84, 186, 0), (-84, 32, 0), (-52, 0, 0)]},
+    "yacht":    {"name": "Yacht Club Coast", "width": 16, "laps": 2,
+                 "pts": [(0, 0, 0), (150, 0, 0), (235, 30, 2), (265, 100, 5), (225, 165, 7), (155, 160, 6), (115, 200, 4), (135, 260, 3),
+                         (80, 300, 2), (0, 265, 1), (-60, 205, 2), (-130, 225, 4), (-205, 175, 3), (-215, 80, 1), (-150, 0, 0)]},
+    "hamptons": {"name": "Hamptons Hills", "width": 14, "laps": 3,
+                 "pts": [(0, 0, 0), (95, 0, 0), (160, 35, 6), (175, 110, 13), (125, 160, 11), (70, 130, 6), (15, 170, 3), (-60, 180, 0),
+                         (-125, 130, 5), (-105, 70, 9), (-150, 25, 6), (-85, -25, 2)]},
+}
+KART_STEP = 2.0               # spacing of the sampled centre line
+KART_VMAX_SAFE = 42.0         # m/s; no kart (even boosted) goes this fast, so progress can't outrun it
+KART_MAX_PLAYERS = 8
+KART_GRID = 8                 # bots fill the grid up to this many karts
+KART_MAX_FEE = 1_000_000
+KART_FREE_PRIZE = (150, 100, 70)   # by finishing place among humans; everyone else who finishes gets the last value
+KART_FREE_REST = 40
+KART_SOLO_PRIZE = (100, 60, 40)
+KART_SOLO_REST = 15
+KART_DAILY_CAP = 1_000
+KART_PRESENT = 8              # seconds since the last poll that still count as "here" in a lobby
+KART_DROP = 20                # no ticks for this long mid-race and you're out
+KART_COUNTDOWN = 5
+KART_AFTER_FIRST = 45         # once the first human finishes, the rest have this long
+KART_LOBBY_TTL = 30 * 60
+KART_DONE_TTL = 3600
+KART_INVITES = 12
+KART_COLORS = ["#E8443A", "#3A7BE8", "#F2C230", "#33C46B", "#B04CE0", "#F2862E", "#2EC6D6", "#F25AA8"]
+KART_BOTS = ["Donnie", "Brad", "Naomi", "Mark Hanna", "Agent Denham", "Aunt Emma", "Chester", "Rugrat", "Max", "Captain Ted"]
+KART_EVENTS = {"banana", "shot", "gone", "spin", "shield"}
+_kart_lock = _kart_threading.Lock()
+_kart_races: dict[str, dict] = {}     # live lobbies and races, in memory only
+_kart_solo: dict[str, dict] = {}      # uid -> the solo race they started
+_kart_last: dict[int, float] = {}
+_kart_last_invite: dict[int, float] = {}
+_kart_geo_cache: dict[str, dict] = {}
+
+
+def _kart_geo(tid: str) -> dict:
+    """The sampled centre line of a track: points (x, z, h), cumulative distance, length."""
+    g = _kart_geo_cache.get(tid)
+    if g:
+        return g
+    P = KART_TRACKS[tid]["pts"]
+    n = len(P)
+    dense = []
+    for i in range(n):
+        p0, p1, p2, p3 = P[(i - 1) % n], P[i], P[(i + 1) % n], P[(i + 2) % n]
+        for k in range(40):
+            t = k / 40
+            t2, t3 = t * t, t * t * t
+            dense.append(tuple(0.5 * ((2 * p1[j]) + (-p0[j] + p2[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2
+                                      + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t3) for j in range(3)))
+    cum = [0.0]
+    for i in range(1, len(dense) + 1):
+        a, b = dense[i - 1], dense[i % len(dense)]
+        cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    L = cum[-1]
+    N = int(L // KART_STEP)
+    pts, j = [], 0
+    for k in range(N):
+        s = k * L / N
+        while cum[j + 1] < s:
+            j += 1
+        a, b = dense[j], dense[(j + 1) % len(dense)]
+        f = (s - cum[j]) / max(1e-9, cum[j + 1] - cum[j])
+        pts.append(tuple(round(a[q] + (b[q] - a[q]) * f, 2) for q in range(3)))
+    g = {"pts": pts, "L": L, "seg": L / N}
+    _kart_geo_cache[tid] = g
+    return g
+
+
+def _kart_static() -> dict:
+    return {"tracks": {k: {"name": v["name"], "width": v["width"], "laps": v["laps"], "L": round(_kart_geo(k)["L"], 2),
+                           "pts": _kart_geo(k)["pts"]} for k, v in KART_TRACKS.items()},
+            "colors": KART_COLORS}
+
+
+def _kart_load() -> dict:
+    d = _load_json_file(KART_FILE, {})
+    for k in ("stats", "daily", "escrow", "best"):
+        d.setdefault(k, {})
+    return d
+
+
+def _kart_save(d: dict):
+    _save_json_file(KART_FILE, d)
+
+
+def _kart_today(d: dict, uid_s: str) -> int:
+    rec = d["daily"].get(uid_s, {})
+    return int(rec.get("earned", 0)) if rec.get("date") == now_est().strftime("%Y-%m-%d") else 0
+
+
+def _kart_pay_capped(d: dict, uid_s: str, amount: int, why: str) -> int:
+    today = _kart_today(d, uid_s)
+    pay = max(0, min(int(amount), KART_DAILY_CAP - today))
+    if pay:
+        economy.add(int(uid_s), pay, f"degen kart: {why}")
+        try:
+            track_economy_event("earned", pay)
+        except Exception:
+            pass
+    d["daily"][uid_s] = {"date": now_est().strftime("%Y-%m-%d"), "earned": today + pay}
+    return pay
+
+
+def _kart_stats(d: dict, uid_s: str) -> dict:
+    st = d["stats"].setdefault(uid_s, {})
+    for k in ("races", "wins", "podiums", "mp_races", "mp_wins", "won"):
+        st.setdefault(k, 0)
+    return st
+
+
+def _kart_public_stats(uid_s: str) -> dict:
+    d = _kart_load()
+    st = d["stats"].get(uid_s) or {}
+    best = {t: v.get(uid_s) for t, v in d["best"].items() if v.get(uid_s)}
+    return {"races": int(st.get("races", 0)), "wins": int(st.get("wins", 0)), "podiums": int(st.get("podiums", 0)),
+            "mp_wins": int(st.get("mp_wins", 0)), "best": best}
+
+
+def _kart_record_lap(d: dict, uid_s: str, tid: str, laps_ms) -> int | None:
+    """Keep a member's best lap per track. Laps faster than any kart can drive are ignored."""
+    if tid not in KART_TRACKS or not isinstance(laps_ms, list):
+        return None
+    floor = _kart_geo(tid)["L"] / KART_VMAX_SAFE * 1000
+    good = [int(x) for x in laps_ms[:10] if isinstance(x, (int, float)) and floor <= x < 10 * 60_000]
+    if not good:
+        return None
+    best = min(good)
+    row = d["best"].setdefault(tid, {})
+    if uid_s not in row or best < row[uid_s]:
+        row[uid_s] = best
+    return best
+
+
+def _kart_board(d: dict, tid: str, uid_s: str) -> list:
+    rows = sorted((v, u) for u, v in d["best"].get(tid, {}).items())
+    return [{"name": _dash_name(u), "ms": v, "you": u == uid_s} for v, u in rows[:8]]
+
+
+# ── lobbies & races (in memory, shared with the web thread under _kart_lock) ──
+def _kart_code() -> str:
+    while True:
+        code = "".join(random.choice(PB_CODE_ALPHABET) for _ in range(5))
+        if code not in _kart_races:
+            return code
+
+
+def _kart_humans(r: dict) -> list:
+    return [u for u, p in r["players"].items() if not p.get("left")]
+
+
+def _kart_new_race(host: str, tid: str, laps: int, fee: int, bots: bool, now: float) -> dict:
+    code = _kart_code()
+    r = {"id": code, "host": host, "track": tid, "laps": laps, "fee": fee, "bots": bots, "status": "lobby",
+         "players": {}, "botlist": [], "created": now, "updated": now, "start_at": None, "first_fin": None,
+         "events": [], "seq": 0, "driver": host, "invited": [], "escrow": {}, "results": None, "next": None,
+         "settle": False, "ended": None, "reason": ""}
+    _kart_races[code] = r
+    return r
+
+
+def _kart_add_player(r: dict, uid_s: str, now: float):
+    used = {p["color"] for p in r["players"].values() if not p.get("left")}
+    color = next((c for c in KART_COLORS if c not in used), KART_COLORS[len(r["players"]) % len(KART_COLORS)])
+    r["players"][uid_s] = {"name": _dash_name(uid_s)[:16], "color": color, "joined": now, "seen": now,
+                           "st": None, "s": 0.0, "fin": None, "dnf": None, "flags": 0, "laps": [], "last": 0.0}
+
+
+def _kart_grid_slots(n: int) -> list:
+    """Grid slot i: metres behind the line and sideways offset."""
+    return [(8 + (i // 2) * 8 + (i % 2) * 3, -3.5 if i % 2 == 0 else 3.5) for i in range(n)]
+
+
+def _kart_lobby_view(r: dict, uid_s: str, now: float) -> dict:
+    base = _dash_public_url() or ""
+    players = [{"id": u, "name": p["name"], "color": p["color"], "host": u == r["host"],
+                "here": now - p["seen"] <= KART_PRESENT, "you": u == uid_s}
+               for u, p in sorted(r["players"].items(), key=lambda kv: kv[1]["joined"]) if not p.get("left")]
+    return {"id": r["id"], "status": r["status"], "host": r["host"] == uid_s, "track": r["track"], "laps": r["laps"],
+            "fee": r["fee"], "bots": r["bots"], "players": players, "max": KART_MAX_PLAYERS,
+            "pot": sum(int(v) for v in r["escrow"].values()), "start_at": r["start_at"], "now": now,
+            "botlist": [{k: b[k] for k in ("id", "name", "color", "skill")} for b in r["botlist"]], "grid": r.get("grid"),
+            "driver": r["driver"], "results": r["results"], "next": r["next"], "reason": r["reason"],
+            "invited": [_dash_name(u) for u in r["invited"]][-4:],
+            "link": f"{base}/games/kart?join={r['id']}" if base else f"/games/kart?join={r['id']}"}
+
+
+def _kart_active(uid_s: str):
+    for r in _kart_races.values():
+        p = r["players"].get(uid_s)
+        if p and not p.get("left") and r["status"] in ("lobby", "countdown", "racing"):
+            return r
+    return None
+
+
+def _kart_progress_ok(r: dict, x: float, z: float, s: float) -> bool:
+    """Is (x, z) close to where the centre line is at progress s?"""
+    g = _kart_geo(r["track"])
+    pts = g["pts"]
+    i = int((s % g["L"]) / g["seg"]) % len(pts)
+    cx, cz, _ = pts[i]
+    return math.hypot(x - cx, z - cz) <= KART_TRACKS[r["track"]]["width"] / 2 + 30
+
+
+def _kart_num(v, default=0.0) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
+def _kart_check_end(r: dict, now: float):
+    """Called under the lock while racing: drops, the after-first-finisher clock, the hard time limit."""
+    if r["status"] != "racing":
+        return
+    g = _kart_geo(r["track"])
+    for u in _kart_humans(r):
+        p = r["players"][u]
+        if p["fin"] is None and not p["dnf"] and now - p["seen"] > KART_DROP:
+            p["dnf"] = "left"
+    live = [r["players"][u] for u in _kart_humans(r)]
+    done = all(p["fin"] is not None or p["dnf"] for p in live)
+    late = r["first_fin"] and now - r["first_fin"] > KART_AFTER_FIRST
+    over = now - r["start_at"] > r["laps"] * g["L"] / 6 + 120
+    if done or late or over:
+        for p in live:
+            if p["fin"] is None and not p["dnf"]:
+                p["dnf"] = "time"
+        r["status"] = "finished"
+        r["settle"] = True
+        r["ended"] = now
+
+
+def kart_tick(uid: int, payload: dict) -> dict:
+    """The racing heartbeat. Runs on the web thread; never touches money or files."""
+    uid_s, now = str(uid), time.time()
+    code = str(payload.get("id", "")).upper().strip()
+    with _kart_lock:
+        r = _kart_races.get(code)
+        if not r or uid_s not in r["players"] or r["players"][uid_s].get("left"):
+            return {"ok": False, "error": "You're not in this race.", "gone": True}
+        p = r["players"][uid_s]
+        p["seen"] = now
+        if r["status"] == "countdown" and now >= r["start_at"]:
+            r["status"] = "racing"
+        g = _kart_geo(r["track"])
+        total = r["laps"] * g["L"]
+        if r["status"] == "racing":
+            elapsed = now - r["start_at"]
+            bound = KART_VMAX_SAFE * max(0.0, elapsed) + 25
+            me = payload.get("me")
+            if isinstance(me, list) and len(me) >= 7 and p["fin"] is None and not p["dnf"]:
+                x, h, z, yaw, v, s, fl = (_kart_num(me[i]) for i in range(7))
+                if s > bound or s < -50 or not _kart_progress_ok(r, x, z, s):
+                    p["flags"] += 1
+                    if p["flags"] >= 12:
+                        p["dnf"] = "dq"
+                else:
+                    p["st"] = [round(x, 2), round(h, 2), round(z, 2), round(yaw, 3), round(v, 2), round(s, 1), int(fl) & 0xFF]
+                    p["s"] = s
+                    p["last"] = now
+            laps = payload.get("laps")
+            if isinstance(laps, list):
+                p["laps"] = [int(_kart_num(x)) for x in laps[:12]]
+            fin = payload.get("fin")
+            if fin is not None and p["fin"] is None and not p["dnf"]:
+                ms = _kart_num(fin, -1)
+                floor = total / KART_VMAX_SAFE * 1000
+                if p["s"] >= total - 6 and floor <= ms <= elapsed * 1000 + 800 and ms >= elapsed * 1000 - 6000:
+                    p["fin"] = int(ms)
+                    if not r["first_fin"]:
+                        r["first_fin"] = now
+            # the race's bots are driven by one page (the "driver")
+            if r["driver"] not in r["players"] or now - r["players"][r["driver"]]["seen"] > 3:
+                here = sorted((q["joined"], u) for u, q in r["players"].items() if not q.get("left") and now - q["seen"] <= 3)
+                if here:
+                    r["driver"] = here[0][1]
+            if r["driver"] == uid_s and isinstance(payload.get("bots"), list):
+                for b, st in zip(r["botlist"], payload["bots"][:KART_GRID]):
+                    if isinstance(st, list) and len(st) >= 7 and b["fin"] is None:
+                        s = min(_kart_num(st[5]), bound)
+                        b["st"] = [round(_kart_num(st[i]), 2) for i in range(5)] + [round(s, 1), int(_kart_num(st[6])) & 0xFF]
+                        if len(st) >= 8 and st[7] is not None and s >= total - 6:
+                            b["fin"] = int(max(_kart_num(st[7]), total / KART_VMAX_SAFE * 1000))
+            for ev in (payload.get("ev") or [])[:8]:
+                if isinstance(ev, dict) and ev.get("type") in KART_EVENTS:
+                    clean = {k: (round(_kart_num(v), 2) if isinstance(v, (int, float)) else str(v)[:24])
+                             for k, v in list(ev.items())[:10]}
+                    r["seq"] += 1
+                    clean.update(seq=r["seq"], by=str(ev.get("by") or uid_s)[:24], t=round(now, 3))
+                    r["events"].append(clean)
+            if len(r["events"]) > 200:
+                r["events"] = r["events"][-200:]
+            _kart_check_end(r, now)
+        since = int(_kart_num(payload.get("since"), 0))
+        karts = {u: q["st"] + [1 if q["fin"] is not None else 0]
+                 for u, q in r["players"].items() if u != uid_s and q["st"] and not q.get("left")}
+        for b in r["botlist"]:
+            if b["st"] and r["driver"] != uid_s:
+                karts[b["id"]] = b["st"] + [1 if b["fin"] is not None else 0]
+        return {"ok": True, "now": now, "status": r["status"], "start_at": r["start_at"], "driver": r["driver"],
+                "karts": karts, "ev": [e for e in r["events"] if e["seq"] > since], "seq": r["seq"],
+                "done": dict({u: (q["fin"], q["dnf"]) for u, q in r["players"].items() if q["fin"] is not None or q["dnf"]},
+                             **{b["id"]: (b["fin"], None) for b in r["botlist"] if b["fin"] is not None}),
+                "results": r["results"]}
+
+
+def _kart_order(r: dict) -> list:
+    """Final order: finishers by time, then everyone else by how far they got."""
+    rows = []
+    for u, p in r["players"].items():
+        if p.get("left") and p["fin"] is None and not p["dnf"]:
+            continue
+        rows.append({"id": u, "name": p["name"], "color": p["color"], "bot": False, "ms": p["fin"],
+                     "dnf": None if p["fin"] is not None else (p["dnf"] or "dnf"), "s": p["s"], "laps": p["laps"]})
+    for b in r["botlist"]:
+        rows.append({"id": b["id"], "name": b["name"], "color": b["color"], "bot": True, "ms": b["fin"],
+                     "dnf": None if b["fin"] is not None else "dnf", "s": (b["st"] or [0] * 6)[5], "laps": []})
+    rows.sort(key=lambda w: (0, w["ms"]) if w["ms"] is not None else (1, -w["s"]))
+    for i, w in enumerate(rows):
+        w["place"] = i + 1
+    return rows
+
+
+def _kart_settle(d: dict, r: dict, now: float):
+    """Pay out a finished race (bot loop only)."""
+    order = _kart_order(r)
+    humans = [w for w in order if not w["bot"]]
+    finishers = [w for w in humans if w["ms"] is not None]
+    paid = {}
+    if r["fee"] > 0:
+        pot = sum(int(v) for v in r["escrow"].values())
+        if not finishers:
+            for u, amt in r["escrow"].items():
+                if int(amt) > 0:
+                    economy.add(int(u), int(amt), "degen kart refund: nobody finished")
+                    paid[u] = int(amt)
+        else:
+            n = len(r["escrow"])
+            split = [1.0] if n <= 2 else [0.7, 0.3] if n == 3 else [0.6, 0.3, 0.1]
+            shares = [int(pot * f) for f in split[:len(finishers)]]
+            shares[0] += pot - sum(shares)          # rounding and unclaimed places go to the winner
+            for w, amt in zip(finishers, shares):
+                if amt > 0:
+                    economy.add(int(w["id"]), amt, "degen kart winnings")
+                    paid[w["id"]] = amt
+            try:
+                track_economy_event("earned", max(0, pot - r["fee"]))
+            except Exception:
+                pass
+        r["escrow"] = {}
+    elif len(humans) >= 2:
+        for i, w in enumerate(finishers):
+            prize = KART_FREE_PRIZE[i] if i < len(KART_FREE_PRIZE) else KART_FREE_REST
+            got = _kart_pay_capped(d, w["id"], prize, f"{['1st', '2nd', '3rd'][i] if i < 3 else 'finished'} in a race")
+            if got:
+                paid[w["id"]] = got
+    for i, w in enumerate(humans):
+        st = _kart_stats(d, w["id"])
+        st["races"] += 1
+        st["mp_races"] += 1
+        if w["ms"] is not None and i == 0:
+            st["wins"] += 1
+            st["mp_wins"] += 1
+        if w["ms"] is not None and w["place"] <= 3:
+            st["podiums"] += 1
+        st["won"] += max(0, paid.get(w["id"], 0) - r["fee"])
+        _kart_record_lap(d, w["id"], r["track"], w["laps"])
+    for w in order:
+        w["paid"] = paid.get(w["id"], 0)
+    d["escrow"].pop(r["id"], None)
+    r["results"] = {"order": order, "fee": r["fee"], "pot": sum(paid.values()) if r["fee"] else 0}
+    r["status"] = "done"
+    r["settle"] = False
+    r["updated"] = now
+
+
+def _kart_cancel(d: dict, r: dict, reason: str, now: float):
+    for u, amt in list(r["escrow"].items()):
+        if int(amt) > 0:
+            economy.add(int(u), int(amt), f"degen kart refund: {reason}")
+    r["escrow"] = {}
+    d["escrow"].pop(r["id"], None)
+    r.update(status="cancelled", reason=reason, ended=now, settle=False)
+
+
+def _kart_sweep(d: dict, now: float) -> bool:
+    """Clocks that run on the bot loop: settlements, lobby expiry, clean-up. Returns True if d changed."""
+    changed = False
+    with _kart_lock:
+        for code, r in list(_kart_races.items()):
+            if r["status"] == "racing":
+                _kart_check_end(r, now)
+            if r["settle"]:
+                _kart_settle(d, r, now)
+                changed = True
+            elif r["status"] == "lobby":
+                here = [u for u in _kart_humans(r) if now - r["players"][u]["seen"] <= 600]
+                if now - r["created"] > KART_LOBBY_TTL or not here:
+                    _kart_cancel(d, r, "the lobby closed", now)
+                    changed = True
+            elif r["status"] in ("done", "cancelled") and now - (r["ended"] or r["updated"]) > KART_DONE_TTL:
+                _kart_races.pop(code, None)
+    return changed
+
+
+def _kart_ledger(d: dict, r: dict):
+    if r["escrow"]:
+        d["escrow"][r["id"]] = dict(r["escrow"])
+    else:
+        d["escrow"].pop(r["id"], None)
+
+
+def _kart_refund_player(r: dict, uid_s: str, why: str):
+    amt = int(r["escrow"].pop(uid_s, 0))
+    if amt > 0:
+        economy.add(int(uid_s), amt, f"degen kart refund: {why}")
+
+
+async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
+    uid_s, now = str(uid), time.time()
+    economy._load()
+    d = _kart_load()
+    if _kart_sweep(d, now):
+        _kart_save(d)
+    dirty = False
+
+    def out(extra: dict) -> dict:
+        if dirty:
+            _kart_save(d)
+        extra.setdefault("ok", True)
+        extra["balance"] = int(economy.balance(uid)) if economy._data.get("users", {}).get(uid_s) else 0
+        return extra
+
+    def get_race():
+        return _kart_races.get(str(payload.get("id", "")).upper().strip())
+
+    if action in ("create", "join", "start", "leave", "config", "invite", "again", "solo_start", "solo_finish"):
+        if now - _kart_last.get(uid, 0) < 0.25:
+            return {"ok": False, "error": "Easy there.", "retry": True}
+        _kart_last[uid] = now
+
+    if action == "info":
+        with _kart_lock:
+            act = _kart_active(uid_s)
+            invites = [{"id": r["id"], "host_name": r["players"][r["host"]]["name"] if r["host"] in r["players"] else "?",
+                        "fee": r["fee"], "track": r["track"], "count": len(_kart_humans(r))}
+                       for r in _kart_races.values() if r["status"] == "lobby" and uid_s in r["invited"] and uid_s not in r["players"]]
+            view = _kart_lobby_view(act, uid_s, now) if act else None
+        tid = str(payload.get("track", "")) or "wallst"
+        return out({"static": _kart_static(), "stats": _kart_public_stats(uid_s), "active": view, "invites": invites[:5],
+                    "boards": {t: _kart_board(d, t, uid_s) for t in KART_TRACKS},
+                    "solo_today": _kart_today(d, uid_s), "daily_cap": KART_DAILY_CAP, "max_fee": KART_MAX_FEE,
+                    "prizes": {"solo": list(KART_SOLO_PRIZE) + [KART_SOLO_REST], "free": list(KART_FREE_PRIZE) + [KART_FREE_REST]},
+                    "bot_names": KART_BOTS, "now": now, "name": _dash_name(uid_s)[:16]})
+
+    if action == "solo_start":
+        tid = str(payload.get("track", ""))
+        if tid not in KART_TRACKS:
+            return {"ok": False, "error": "Pick a track."}
+        laps = max(1, min(5, int(_kart_num(payload.get("laps"), KART_TRACKS[tid]["laps"]))))
+        token = secrets.token_hex(8)
+        _kart_solo[uid_s] = {"token": token, "track": tid, "laps": laps, "start": now}
+        return out({"token": token, "now": now})
+
+    if action == "solo_finish":
+        rec = _kart_solo.get(uid_s)
+        if not rec or rec["token"] != str(payload.get("token", "")):
+            return {"ok": False, "error": "That race has expired."}
+        _kart_solo.pop(uid_s, None)
+        g = _kart_geo(rec["track"])
+        ms = _kart_num(payload.get("ms"), -1)
+        place = int(_kart_num(payload.get("place"), 8))
+        elapsed = (now - rec["start"]) * 1000
+        if not (rec["laps"] * g["L"] / KART_VMAX_SAFE * 1000 <= ms <= elapsed + 2000) or not 1 <= place <= KART_GRID:
+            return out({"ok": False, "error": "That race didn't add up, so it doesn't count."})
+        prize = KART_SOLO_PRIZE[place - 1] if place <= len(KART_SOLO_PRIZE) else KART_SOLO_REST
+        paid = _kart_pay_capped(d, uid_s, prize, f"placed {place} vs the bots")
+        st = _kart_stats(d, uid_s)
+        st["races"] += 1
+        if place == 1:
+            st["wins"] += 1
+        if place <= 3:
+            st["podiums"] += 1
+        best = _kart_record_lap(d, uid_s, rec["track"], payload.get("laps"))
+        dirty = True
+        return out({"paid": paid, "best": best, "today": _kart_today(d, uid_s), "board": _kart_board(d, rec["track"], uid_s)})
+
+    if action == "create":
+        tid = str(payload.get("track", "wallst"))
+        if tid not in KART_TRACKS:
+            return {"ok": False, "error": "Pick a track."}
+        laps = max(1, min(5, int(_kart_num(payload.get("laps"), KART_TRACKS[tid]["laps"]))))
+        fee = int(_kart_num(payload.get("fee"), 0))
+        if not 0 <= fee <= KART_MAX_FEE:
+            return {"ok": False, "error": f"Entry fees go from 0 to {KART_MAX_FEE:,}."}
+        if fee and economy.balance(uid) < fee:
+            return {"ok": False, "error": f"You need {fee:,} coins to cover your own entry fee."}
+        with _kart_lock:
+            cur = _kart_active(uid_s)
+            if cur and cur["status"] != "lobby":
+                return {"ok": False, "error": "Finish your current race first."}
+            if cur:
+                _kart_leave(d, cur, uid_s, now)
+            r = _kart_new_race(uid_s, tid, laps, fee, bool(payload.get("bots", True)), now)
+            _kart_add_player(r, uid_s, now)
+            if fee:
+                economy.add(uid, -fee, "degen kart entry fee (held until the race ends)")
+                r["escrow"][uid_s] = fee
+            _kart_ledger(d, r)
+            view = _kart_lobby_view(r, uid_s, now)
+        dirty = True
+        return out({"lobby": view})
+
+    if action == "peek":
+        with _kart_lock:
+            r = get_race()
+            if not r:
+                return out({"ok": False, "error": "That race doesn't exist. Check the code."})
+            if uid_s in r["players"] and not r["players"][uid_s].get("left"):
+                return out({"mine": True, "lobby": _kart_lobby_view(r, uid_s, now)})
+            return out({"peek": {"id": r["id"], "status": r["status"], "fee": r["fee"], "track": r["track"], "laps": r["laps"],
+                                 "host_name": r["players"][r["host"]]["name"] if r["host"] in r["players"] else "?",
+                                 "count": len(_kart_humans(r)), "max": KART_MAX_PLAYERS}})
+
+    if action == "join":
+        with _kart_lock:
+            r = get_race()
+            if not r:
+                return {"ok": False, "error": "That race doesn't exist. Check the code."}
+            p = r["players"].get(uid_s)
+            if p and not p.get("left"):
+                p["seen"] = now
+                return out({"lobby": _kart_lobby_view(r, uid_s, now)})
+            if r["status"] != "lobby":
+                return {"ok": False, "error": "That race has already started." if r["status"] in ("countdown", "racing") else "That race is over."}
+            if len(_kart_humans(r)) >= KART_MAX_PLAYERS:
+                return {"ok": False, "error": "That race is full."}
+            cur = _kart_active(uid_s)
+            if cur and cur["status"] != "lobby":
+                return {"ok": False, "error": "Finish your current race first."}
+            if r["fee"] and economy.balance(uid) < r["fee"]:
+                return {"ok": False, "error": f"You need {r['fee']:,} coins for the entry fee."}
+            if cur:
+                _kart_leave(d, cur, uid_s, now)
+            r["players"].pop(uid_s, None)
+            _kart_add_player(r, uid_s, now)
+            if r["fee"]:
+                economy.add(uid, -r["fee"], "degen kart entry fee (held until the race ends)")
+                r["escrow"][uid_s] = r["fee"]
+            _kart_ledger(d, r)
+            r["updated"] = now
+            view = _kart_lobby_view(r, uid_s, now)
+        dirty = True
+        return out({"lobby": view})
+
+    if action == "state":
+        with _kart_lock:
+            r = get_race()
+            if not r or uid_s not in r["players"] or r["players"][uid_s].get("left"):
+                return {"ok": False, "error": "You're not in that race.", "gone": True}
+            r["players"][uid_s]["seen"] = now
+            return out({"lobby": _kart_lobby_view(r, uid_s, now)})
+
+    if action == "config":
+        with _kart_lock:
+            r = get_race()
+            if not r or r["host"] != uid_s or r["status"] != "lobby":
+                return {"ok": False, "error": "Only the host can change the race, before it starts."}
+            tid = str(payload.get("track", r["track"]))
+            if tid in KART_TRACKS:
+                r["track"] = tid
+            if "laps" in payload:
+                r["laps"] = max(1, min(5, int(_kart_num(payload.get("laps"), r["laps"]))))
+            if "bots" in payload:
+                r["bots"] = bool(payload.get("bots"))
+            r["updated"] = now
+            return out({"lobby": _kart_lobby_view(r, uid_s, now)})
+
+    if action == "start":
+        with _kart_lock:
+            r = get_race()
+            if not r or r["host"] != uid_s or r["status"] != "lobby":
+                return {"ok": False, "error": "Only the host can start the race."}
+            here = [u for u in _kart_humans(r) if now - r["players"][u]["seen"] <= KART_PRESENT]
+            if len(here) < 2:
+                return out({"ok": False, "error": "You need at least one more racer here. Race the bots in Solo instead!",
+                            "lobby": _kart_lobby_view(r, uid_s, now)})
+            for u in _kart_humans(r):
+                if u not in here:          # gone quiet in the lobby: refunded and dropped
+                    _kart_refund_player(r, u, "wasn't there when the race started")
+                    r["players"][u]["left"] = True
+            racers = sorted(here, key=lambda u: r["players"][u]["joined"])
+            nbots = max(0, KART_GRID - len(racers)) if r["bots"] else 0
+            names = random.sample(KART_BOTS, k=min(nbots, len(KART_BOTS)))
+            used = {r["players"][u]["color"] for u in racers}
+            spare = [c for c in KART_COLORS if c not in used] or KART_COLORS
+            r["botlist"] = [{"id": f"bot{i}", "name": names[i], "color": spare[i % len(spare)], "st": None, "fin": None,
+                             "skill": round(random.uniform(.86, .97), 3)} for i in range(nbots)]
+            order = racers[:]
+            random.shuffle(order)
+            r["grid"] = order + [b["id"] for b in r["botlist"]]
+            r.update(status="countdown", start_at=now + KART_COUNTDOWN, driver=r["host"], updated=now)
+            _kart_ledger(d, r)
+            view = _kart_lobby_view(r, uid_s, now)
+        dirty = True
+        return out({"lobby": view})
+
+    if action == "leave":
+        with _kart_lock:
+            r = get_race()
+            if not r or uid_s not in r["players"] or r["players"][uid_s].get("left"):
+                return out({"left": True})
+            _kart_leave(d, r, uid_s, now)
+            view = _kart_lobby_view(r, uid_s, now)
+        dirty = True
+        return out({"left": True, "lobby": view})
+
+    if action == "again":
+        with _kart_lock:
+            r = get_race()
+            if not r or uid_s not in r["players"] or r["status"] not in ("done", "cancelled"):
+                return {"ok": False, "error": "That race isn't over yet."}
+            if r["next"] and r["next"] in _kart_races and _kart_races[r["next"]]["status"] == "lobby":
+                return out({"next": r["next"]})
+            if _kart_active(uid_s):
+                return {"ok": False, "error": "You're already in another race."}
+            if r["fee"] and economy.balance(uid) < r["fee"]:
+                return {"ok": False, "error": f"You need {r['fee']:,} coins for the entry fee."}
+            n = _kart_new_race(uid_s, r["track"], r["laps"], r["fee"], r["bots"], now)
+            _kart_add_player(n, uid_s, now)
+            if n["fee"]:
+                economy.add(uid, -n["fee"], "degen kart entry fee (held until the race ends)")
+                n["escrow"][uid_s] = n["fee"]
+            _kart_ledger(d, n)
+            r["next"] = n["id"]
+        dirty = True
+        return out({"next": n["id"]})
+
+    if action == "members":
+        return out({"members": _pb_member_search(str(payload.get("q", ""))[:32], uid_s)})
+
+    if action == "invite":
+        with _kart_lock:
+            r = get_race()
+            if not r or uid_s not in r["players"] or r["status"] != "lobby":
+                return {"ok": False, "error": "Open a lobby first."}
+            target = str(payload.get("user_id", ""))
+            g = client.get_guild(HOME_GUILD_ID)
+            mem = g.get_member(int(target)) if g and target.isdigit() else None
+            if not mem or mem.bot or target == uid_s:
+                return {"ok": False, "error": "Pick a member to invite."}
+            if target in r["invited"]:
+                return out({"already": True, "lobby": _kart_lobby_view(r, uid_s, now)})
+            if len(r["invited"]) >= KART_INVITES:
+                return {"ok": False, "error": "That's plenty of invites. Share the link instead."}
+            if now - _kart_last_invite.get(uid, 0) < 3:
+                return {"ok": False, "error": "One invite every few seconds.", "retry": True}
+            _kart_last_invite[uid] = now
+            r["invited"].append(target)
+            view = _kart_lobby_view(r, uid_s, now)
+            host_name = r["players"][uid_s]["name"]
+            terms = (f" Entry fee **{r['fee']:,}** coins, winner takes the biggest share." if r["fee"] else " Free to enter.")
+            track = KART_TRACKS[r["track"]]["name"]
+        sent = await _web_bounded(send_dm(int(target), "invites",
+                                          f"🏎️ **{host_name}** invited you to a **Degen Kart** race on **{track}**!{terms}\n"
+                                          f"Jump in: {view['link']}\n-# Code {r['id']}. Turn these off with /notifications."), 4.0)
+        return out({"lobby": view, "dm": bool(sent), "invitee": mem.display_name})
+
+    return {"ok": False, "error": "Unknown action."}
+
+
+def _kart_leave(d: dict, r: dict, uid_s: str, now: float):
+    """A player walks away (call under the lock, on the bot loop)."""
+    p = r["players"].get(uid_s)
+    if not p or p.get("left"):
+        return
+    if r["status"] == "lobby":
+        _kart_refund_player(r, uid_s, "left the lobby")
+        p["left"] = True
+        if r["host"] == uid_s:
+            rest = sorted((q["joined"], u) for u, q in r["players"].items() if not q.get("left"))
+            if rest:
+                r["host"] = rest[0][1]
+            else:
+                _kart_cancel(d, r, "everyone left", now)
+    elif r["status"] in ("countdown", "racing"):
+        if p["fin"] is None and not p["dnf"]:
+            p["dnf"] = "left"          # the entry fee stays in the pot
+        if r["status"] == "racing":
+            _kart_check_end(r, now)
+        elif all(r["players"][u]["dnf"] for u in _kart_humans(r)):
+            r.update(status="finished", settle=True, ended=now)
+    _kart_ledger(d, r)
+
+
+async def _kart_sweeper():
+    """Settles finished races and closes stale lobbies even when nobody has the page open.
+    On the first pass after a restart it refunds fees from races that only lived in memory."""
+    first = True
+    while True:
+        try:
+            economy._load()
+            d = _kart_load()
+            changed = False
+            if first:
+                with _kart_lock:
+                    for code, held in list(d["escrow"].items()):
+                        if code not in _kart_races:
+                            for u, amt in held.items():
+                                if int(amt) > 0:
+                                    economy.add(int(u), int(amt), "degen kart refund: the race was interrupted by a restart")
+                            d["escrow"].pop(code, None)
+                            changed = True
+                first = False
+            if _kart_sweep(d, time.time()) or changed:
+                _kart_save(d)
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("kart sweeper")
+            await asyncio.sleep(5)
+
+
+async def _handle_kart(message: discord.Message, rest: str):
+    """_kart — open Degen Kart. _kart @user [fee] — open a lobby and invite them."""
+    base = _dash_public_url()
+    if not base:
+        await message.channel.send("🏎️ The web dashboard isn't set up yet.")
+        return
+    targets = [m for m in message.mentions if not m.bot and m.id != message.author.id][:KART_MAX_PLAYERS - 1]
+    if not targets:
+        await message.channel.send(
+            f"🏎️ **Degen Kart**: 3D kart racing with drifts, boosts and items. Race the bots or up to 7 friends: <{base}/games/kart>\n"
+            f"Start a race right here: `_kart @user` (add more @s for more racers) or `_kart @user 500` for an entry fee.",
+            allowed_mentions=discord.AllowedMentions.none())
+        return
+    fee = 0
+    for t in [t for t in rest.split() if not t.startswith("<@")]:
+        v = _pb_parse_wager(t)
+        if v is None:
+            await message.channel.send("Usage: `_kart @user [@user2 ...] [entry fee]`")
+            return
+        fee = v
+    if fee > KART_MAX_FEE:
+        await message.channel.send(f"❌ Entry fees go up to {KART_MAX_FEE:,}.")
+        return
+    uid, uid_s, now = message.author.id, str(message.author.id), time.time()
+    if fee and economy.balance(uid) < fee:
+        await message.channel.send(f"❌ You need {fee:,} coins to cover your own entry fee.")
+        return
+    d = _kart_load()
+    with _kart_lock:
+        cur = _kart_active(uid_s)
+        if cur and cur["status"] != "lobby":
+            await message.channel.send("❌ Finish your current race first.")
+            return
+        if cur:
+            _kart_leave(d, cur, uid_s, now)
+        r = _kart_new_race(uid_s, "wallst", KART_TRACKS["wallst"]["laps"], fee, True, now)
+        _kart_add_player(r, uid_s, now)
+        if fee:
+            economy.add(uid, -fee, "degen kart entry fee (held until the race ends)")
+            r["escrow"][uid_s] = fee
+        r["invited"] = [str(m.id) for m in targets]
+        _kart_ledger(d, r)
+    _kart_save(d)
+    link = f"{base}/games/kart?join={r['id']}"
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Join the race", emoji="🏎️", url=link))
+    terms = f" Entry fee **{fee:,}** coins." if fee else ""
+    await message.channel.send(
+        f"🏎️ {' '.join(m.mention for m in targets)}, **{message.author.display_name}** wants to race you in **Degen Kart**!{terms}\n"
+        f"Hit the button to join the lobby. {message.author.mention}, open it too, then start the race when everyone's in.\n"
+        f"-# Code `{r['id']}` · the lobby closes after 30 minutes",
+        view=view, allowed_mentions=discord.AllowedMentions(users=True))
+
+
 async def _web_bounded(coro, seconds: float = 4.0):
     """Discord-side extras (XP, achievement messages) after a web game has already paid
     and saved. The web request gives up after 10 s and cancels the coroutine, so these
@@ -31995,6 +32798,18 @@ async def _handle_city(message: discord.Message, rest: str):
     )
 
 
+def dashboard_fast_provider(uid: int, game: str, action: str, payload: dict) -> dict:
+    """Called from the web thread for the few actions that must not wait on the bot loop
+    (the kart racing heartbeat). Pure in-memory work under a lock."""
+    try:
+        if game == "kart" and action == "tick":
+            return kart_tick(int(uid), dict(payload or {}))
+        return {"ok": False, "error": "Not found."}
+    except Exception:
+        log.exception("fast game provider failed")
+        return {"ok": False, "error": "Something went wrong."}
+
+
 def dashboard_game_provider(uid: int, game: str, action: str, payload: dict) -> dict:
     """Called from the web thread; runs the game action on the bot's event loop."""
     fut = None
@@ -32262,7 +33077,8 @@ async def _gather_dashboard_profile(uid: int) -> dict:
                 "reels": _reels_public_stats(data["reels"], uid_s),
                 "flappy": _flap_public_stats(data["flappy"], uid_s),
                 "wildkin": _wk_public_stats(uid_s),
-                "paintball": _pb_public_stats(uid_s)}
+                "paintball": _pb_public_stats(uid_s),
+                "kart": _kart_public_stats(uid_s)}
     section("games", _games)
 
     return out
@@ -32450,6 +33266,7 @@ async def on_ready():
         asyncio.create_task(_verify_queue_loop())
         asyncio.create_task(_fmk_social_flush_loop())
         asyncio.create_task(_pb_sweeper())
+        asyncio.create_task(_kart_sweeper())
         # Persistent verify button — re-registered so it works after restarts
         try:
             client.add_view(VerifyView())
@@ -34558,7 +35375,7 @@ ASK_PREFIX_ONLY_COMMANDS = {
     "sellme", "sellmethispen", "sellpen", "pitch", "pitchme",
     "mydash", "mydashboard", "myprofile", "getaway", "arcade", "webgames",
     "pumpdump", "pnd", "pumpanddump", "videopoker", "vp", "poker", "citymap", "empire", "skyline",
-    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen", "wildkin", "wk", "kin", "paintball", "pb", "splat",
+    "nightrun", "nr", "drive", "garage", "mines", "minesweeper", "reels", "vegas", "wolfslots", "flappy", "flap", "flappydegen", "wildkin", "wk", "kin", "paintball", "pb", "splat", "kart", "karts", "gokart", "degenkart",
     # Invites
     "invites", "invitelb", "topinviters", "invitedby", "whoinvited", "invitelist",
     "myinvites", "attributejoin", "creditinvite", "uncreditinvite", "removeinvite",
@@ -35739,6 +36556,9 @@ async def handle_prefix_command(message: discord.Message, body: str) -> bool:
         return True
     if cmd_name in ("paintball", "pb", "splat"):
         await _handle_paintball(message, rest)
+        return
+    if cmd_name in ("kart", "karts", "gokart", "degenkart"):
+        await _handle_kart(message, rest)
         return True
     if cmd_name in ("nightrun", "nr", "drive", "garage"):
         await _handle_nightrun(message, rest)
@@ -36455,7 +37275,8 @@ if __name__ == "__main__":
             t = threading.Thread(
                 target=start_dashboard, args=(port, MEMORY_DIR),
                 kwargs={"profile_provider": dashboard_profile_provider,
-                        "game_provider": dashboard_game_provider}, daemon=True,
+                        "game_provider": dashboard_game_provider,
+                        "fast_provider": dashboard_fast_provider}, daemon=True,
             )
             t.start()
             log.info("Dashboard thread started on port %s", port)
