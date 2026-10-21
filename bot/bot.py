@@ -27636,6 +27636,8 @@ async def _handle_videopoker(message: discord.Message, rest: str):
 # Saves live in memory/wildkin.json, one per member.
 # Phase 1 world: home, Mossbrook, the Tamer's Hall, Route 1, Cragmoor (inn, shop).
 # Phase 2 world: Cragmoor's arena (Warden of Stone), Granite Pass (cave), Route 2, Saltmere.
+# Phase 3 world: the ferry to the Sea Isles, Coral Cove, Route 3 (wade the shallows), the Sunken
+# Grotto (the Drowned Hand poachers) and Saltmere's Tide Arena (Warden Neris).
 # ─────────────────────────────────────────────────────────────────────────────
 WK_FILE = MEMORY_DIR / "wildkin.json"
 WK_DAILY_CAP = 3_000           # most coins the game pays a member per day (EST)
@@ -27699,6 +27701,19 @@ WK_MOVES = {
     "dustveil":    {"name": "Dust Veil",     "type": "shade",  "cat": "status", "acc": 100, "pp": 25, "stat": ("atk", -1, "foe")},
     "gloomwave":   {"name": "Gloom Wave",    "type": "shade",  "cat": "spec",   "power": 60, "acc": 100, "pp": 20},
     "voltbite":    {"name": "Volt Bite",     "type": "storm",  "cat": "phys",   "power": 55, "acc": 100, "pp": 20, "status": "par", "chance": 10},
+    # ── Phase 3 ── "heal": % of max HP restored to the user
+    "crabhammer":  {"name": "Claw Crusher",  "type": "tide",   "cat": "phys",   "power": 85, "acc": 90,  "pp": 10, "crit": True},
+    "coconut":     {"name": "Coconut Drop",  "type": "grove",  "cat": "phys",   "power": 70, "acc": 90,  "pp": 15, "flinch": 20},
+    "coralspike":  {"name": "Coral Spike",   "type": "stone",  "cat": "phys",   "power": 55, "acc": 100, "pp": 20, "crit": True},
+    "tendril":     {"name": "Sting Tendril", "type": "storm",  "cat": "spec",   "power": 50, "acc": 100, "pp": 20, "status": "par", "chance": 30},
+    "brine":       {"name": "Brine Jet",     "type": "tide",   "cat": "spec",   "power": 65, "acc": 100, "pp": 15},
+    "sandtrap":    {"name": "Sand Pit",      "type": "stone",  "cat": "status", "acc": 90,  "pp": 20, "stat": ("spd", -2, "foe")},
+    "spinebarb":   {"name": "Spine Barb",    "type": "shade",  "cat": "phys",   "power": 60, "acc": 100, "pp": 20, "status": "psn", "chance": 30},
+    "ambush":      {"name": "Ambush",        "type": "shade",  "cat": "phys",   "power": 40, "acc": 100, "pp": 30, "prio": 1},
+    "tidemend":    {"name": "Tide Mend",     "type": "tide",   "cat": "status", "acc": 0,   "pp": 10, "heal": 50},
+    "shellup":     {"name": "Shell Up",      "type": "tide",   "cat": "status", "acc": 0,   "pp": 20, "stat": ("def", 2, "self")},
+    "thunderclap": {"name": "Thunderclap",   "type": "storm",  "cat": "spec",   "power": 90, "acc": 90,  "pp": 10, "status": "par", "chance": 10},
+    "starglimmer": {"name": "Star Glimmer",  "type": "spirit", "cat": "spec",   "power": 55, "acc": 100, "pp": 20, "stat": ("spc", -1, "foe"), "chance": 20},
     "struggle":    {"name": "Last Ditch",      "type": "beast",  "cat": "phys",   "power": 50, "acc": 0,   "pp": 1, "recoil": 25},
 }
 
@@ -27777,6 +27792,37 @@ WK_SPECIES = {
     "galewing":    {"no": 24, "name": "Galewing",    "types": ["wind"],           "base": (65, 70, 60, 95, 60), "catch": 45,  "xp": 150,
                     "learn": [(1, "tackle"), (1, "growl"), (6, "gust"), (9, "quick"), (15, "wingslice"), (24, "aircutter")], "evo": None,
                     "dex": "A grown sylph with wings like sails. One flap can push a fishing boat out to sea."},
+    # ── Phase 3 ──
+    "crabble":     {"no": 25, "name": "Crabble",     "types": ["tide", "beast"],  "base": (50, 70, 80, 40, 35), "catch": 150, "xp": 70,
+                    "learn": [(1, "scratch"), (1, "harden"), (7, "bubble"), (13, "shellup"), (18, "brine"), (23, "crabhammer")], "evo": (26, "clawcrest"),
+                    "dex": "A crab that picks fights with waves. It practises pinching on driftwood all day."},
+    "clawcrest":   {"no": 26, "name": "Clawcrest",   "types": ["tide", "beast"],  "base": (70, 105, 110, 55, 50), "catch": 60, "xp": 155,
+                    "learn": [(1, "scratch"), (1, "harden"), (7, "bubble"), (13, "shellup"), (18, "brine"), (23, "crabhammer"), (30, "tidalcrash")], "evo": None,
+                    "dex": "One claw is bigger than its whole body. A single snap splits a coconut clean in half."},
+    "palmonk":     {"no": 27, "name": "Palmonk",     "types": ["grove", "beast"], "base": (60, 72, 50, 72, 40), "catch": 150, "xp": 72,
+                    "learn": [(1, "scratch"), (1, "growl"), (8, "vinelash"), (12, "quick"), (17, "coconut"), (22, "razorleaf"), (30, "thornbarrage")], "evo": None,
+                    "dex": "It lives in palm crowns and drops coconuts on anyone napping below. It thinks this is hilarious."},
+    "coralyx":     {"no": 28, "name": "Coralyx",     "types": ["stone", "grove"], "base": (55, 50, 85, 30, 70), "catch": 150, "xp": 74,
+                    "learn": [(1, "harden"), (1, "pebble"), (9, "sapdrain"), (14, "coralspike"), (19, "spore"), (25, "rockslam"), (31, "thornbarrage")], "evo": None,
+                    "dex": "Living coral that walks on stubby branches. Little fish hide in its arms when storms roll in."},
+    "jellume":     {"no": 29, "name": "Jellume",     "types": ["tide", "storm"],  "base": (55, 40, 50, 60, 80), "catch": 150, "xp": 75,
+                    "learn": [(1, "bubble"), (1, "staticwave"), (10, "tendril"), (16, "aquapulse"), (22, "brine"), (29, "thunderclap")], "evo": None,
+                    "dex": "It drifts toward light and glows when it's happy. Its sting tingles for a whole day."},
+    "sparkeel":    {"no": 30, "name": "Sparkeel",    "types": ["storm"],          "base": (45, 60, 40, 75, 60), "catch": 120, "xp": 75,
+                    "learn": [(1, "tackle"), (1, "leer"), (7, "spark"), (11, "quick"), (15, "voltbite"), (20, "tendril"), (25, "thunderjolt")], "evo": (25, "tempeel"),
+                    "dex": "An eel that charges up by rubbing against sea stones. Fishing nets come back smoking."},
+    "tempeel":     {"no": 31, "name": "Tempeel",     "types": ["storm", "tide"],  "base": (70, 85, 60, 95, 85), "catch": 45, "xp": 165,
+                    "learn": [(1, "tackle"), (1, "leer"), (7, "spark"), (11, "quick"), (15, "voltbite"), (20, "tendril"), (25, "thunderjolt"), (28, "brine"), (34, "thunderclap")], "evo": None,
+                    "dex": "Sailors see its light under the waves before a storm. It rides the lightning down into the sea."},
+    "barbfin":     {"no": 32, "name": "Barbfin",     "types": ["tide", "shade"],  "base": (55, 70, 55, 65, 50), "catch": 150, "xp": 74,
+                    "learn": [(1, "bubble"), (1, "ambush"), (9, "bite"), (14, "spinebarb"), (19, "aquapulse"), (26, "shadowclaw")], "evo": None,
+                    "dex": "It puffs up into a spiky ball when startled. Islanders wade very, very carefully."},
+    "lumistar":    {"no": 33, "name": "Lumistar",    "types": ["tide", "spirit"], "base": (50, 45, 60, 90, 95), "catch": 45, "xp": 120,
+                    "learn": [(1, "bubble"), (1, "tidemend"), (12, "spiritpulse"), (17, "starglimmer"), (23, "aquapulse"), (30, "moonbeam")], "evo": None,
+                    "dex": "A starfish that fell from the night sky, or so the islanders say. It glows to call its friends."},
+    "sandsnap":    {"no": 34, "name": "Sandsnap",    "types": ["stone", "shade"], "base": (55, 80, 70, 35, 40), "catch": 150, "xp": 72,
+                    "learn": [(1, "bite"), (1, "sandtrap"), (8, "pebble"), (13, "ambush"), (18, "burrow"), (24, "shadowclaw"), (31, "rockslam")], "evo": None,
+                    "dex": "It waits buried with only its jaws showing. Whoever steps on the 'rock' learns a lesson."},
 }
 
 WK_ITEMS = {
@@ -27789,14 +27835,19 @@ WK_ITEMS = {
     "parlyzheal": {"name": "Nerve Balm",     "price": 40,  "cure": "par", "desc": "Cures paralysis."},
     "burnsalve":  {"name": "Burn Salve",   "price": 40,  "cure": "brn", "desc": "Heals a burn."},
     "revive":     {"name": "Revive Herb",  "price": 300, "revive": 50, "desc": "Revives a kin."},
+    "hyperpotion":{"name": "Mega Potion",  "price": 300, "heal": 100, "desc": "Restores 100 HP."},
+    "tidecharm":  {"name": "Tide Charm",   "price": 150, "ball": 1.0, "ball_type": ["tide", 3.0], "desc": "Great on tide kin."},
 }
 WK_SHOPS = {"shop_cragmoor": ["charm", "potion", "superpotion", "antidote", "awakening", "parlyzheal", "burnsalve"],
-            "shop_saltmere": ["charm", "greatcharm", "potion", "superpotion", "revive", "antidote", "awakening", "parlyzheal", "burnsalve"]}
+            "shop_saltmere": ["charm", "greatcharm", "potion", "superpotion", "revive", "antidote", "awakening", "parlyzheal", "burnsalve"],
+            "shop_coral": ["charm", "greatcharm", "tidecharm", "superpotion", "hyperpotion", "revive", "antidote", "awakening", "parlyzheal", "burnsalve"]}
 
 WK_MAPS = {"home", "mossbrook", "hall", "house_moss", "route1", "cragmoor", "inn_cragmoor", "shop_cragmoor", "house_crag",
-           "arena_crag", "pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2"}
+           "arena_crag", "pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2",
+           "coralcove", "inn_coral", "shop_coral", "house_coral1", "house_coral2", "route3", "grotto", "arena_salt"}
 WK_START = ("home", 5, 2, "down")
-WK_INNS = {"home": ("home", 4, 5, "up"), "inn_cragmoor": ("inn_cragmoor", 4, 3, "up"), "inn_saltmere": ("inn_saltmere", 4, 3, "up")}
+WK_INNS = {"home": ("home", 4, 5, "up"), "inn_cragmoor": ("inn_cragmoor", 4, 3, "up"), "inn_saltmere": ("inn_saltmere", 4, 3, "up"),
+           "inn_coral": ("inn_coral", 4, 3, "up")}
 WK_ENCOUNTERS = {
     "route1": [("thornhare", 2, 4, 35), ("gustling", 2, 4, 30), ("pebblit", 3, 4, 15),
                ("mudslime", 2, 3, 10), ("sparkimp", 3, 5, 7), ("wispkit", 4, 5, 3)],
@@ -27804,9 +27855,18 @@ WK_ENCOUNTERS = {
                ("duskwing", 10, 12, 12), ("shardling", 11, 13, 5), ("bouldron", 13, 14, 3)],
     "route2": [("voltail", 11, 14, 24), ("pondwick", 11, 14, 22), ("saltwing", 12, 14, 20), ("mosscap", 12, 14, 16),
                ("gustling", 12, 14, 10), ("thornhare", 12, 13, 5), ("wispkit", 13, 14, 3)],
+    # "<map>:water" is the table for wading in the shallows on that map
+    "route3": [("palmonk", 16, 19, 30), ("crabble", 16, 18, 24), ("sandsnap", 16, 19, 18), ("saltwing", 17, 19, 14),
+               ("coralyx", 17, 19, 11), ("voltail", 17, 18, 3)],
+    "route3:water": [("jellume", 16, 19, 34), ("crabble", 16, 18, 24), ("barbfin", 16, 19, 24), ("sparkeel", 17, 19, 15), ("lumistar", 18, 19, 3)],
+    "grotto": [("sandsnap", 18, 21, 30), ("coralyx", 18, 21, 24), ("gloomoth", 18, 20, 18), ("shardling", 19, 21, 14),
+               ("barbfin", 18, 20, 10), ("delvin", 19, 21, 4)],
+    "grotto:water": [("barbfin", 19, 22, 30), ("jellume", 19, 22, 28), ("sparkeel", 19, 21, 26), ("lumistar", 20, 22, 10), ("crabble", 20, 22, 6)],
 }
 # maps you can only reach with the Warden of Stone's sigil (the guard at the pass checks it)
-WK_MAP_NEEDS = {m: "warden1" for m in ("pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2")}
+WK_MAP_NEEDS = {m: "warden1" for m in ("pass", "route2", "saltmere", "inn_saltmere", "shop_saltmere", "house_salt1", "house_salt2",
+                                       "coralcove", "inn_coral", "shop_coral", "house_coral1", "house_coral2", "route3", "grotto")}
+WK_MAP_NEEDS["arena_salt"] = "hand_vex"     # Neris only opens her arena once the poachers are gone
 WK_STARTERS = ["emberwyrm", "kelpling", "mandrakelet"]
 WK_RIVAL_PICK = {"emberwyrm": "kelpling", "kelpling": "mandrakelet", "mandrakelet": "emberwyrm"}
 WK_TRAINERS = {
@@ -27842,6 +27902,36 @@ WK_TRAINERS = {
                     "win": "Not even a nibble. Story of my life."},
     "r2_fenn":     {"name": "Fenn", "cls": "Ranger", "map": "route2", "team": [("voltail", 13), ("mosscap", 14)], "prize": 22, "needs": "warden1",
                     "win": "You read the land well, tamer."},
+    # ── Phase 3 ── "@rival+" is Kai's starter, fully grown
+    "rt_kiko":     {"name": "Kiko", "cls": "Swimmer", "map": "route3", "team": [("barbfin", 17), ("jellume", 18)], "prize": 22, "needs": "warden1",
+                    "win": "I swallowed half the sea during that one."},
+    "rt_tam":      {"name": "Tam",  "cls": "Beachcomber", "map": "route3", "team": [("crabble", 17), ("palmonk", 18)], "prize": 22, "needs": "warden1",
+                    "win": "Found more than shells today, huh?"},
+    "rt_wade":     {"name": "Wade", "cls": "Sailor", "map": "route3", "team": [("saltwing", 18), ("sparkeel", 18)], "prize": 24, "needs": "warden1",
+                    "win": "Blow me down! You've got sea legs."},
+    "hg_ruck":     {"name": "Ruck", "cls": "Hand Grunt", "map": "route3", "team": [("barbfin", 18), ("sandsnap", 19)], "prize": 25, "needs": "warden1",
+                    "win": "Tch. The captain won't like this."},
+    "rival3":      {"name": "Kai",  "cls": "Rival", "map": "route3", "prize": 40, "boss": True, "needs": "warden1",
+                    "team": [("galewing", 22), ("voltail", 22), ("palmonk", 21), ("@rival+", 25)],
+                    "win": "Again?! ...Okay. You're good. Go sink those poachers. I'll guard the entrance."},
+    "hg_nox":      {"name": "Nox",  "cls": "Hand Grunt", "map": "grotto", "team": [("sandsnap", 19), ("barbfin", 20)], "prize": 25, "needs": "warden1",
+                    "win": "The grotto's ours! ...Was ours."},
+    "hg_pike":     {"name": "Pike", "cls": "Hand Grunt", "map": "grotto", "team": [("jellume", 20), ("gloomoth", 20)], "prize": 25, "needs": "warden1",
+                    "win": "You're making the captain look bad."},
+    "hg_sable":    {"name": "Sable", "cls": "Hand Grunt", "map": "grotto", "team": [("crabble", 20), ("sparkeel", 21), ("barbfin", 20)], "prize": 25,
+                    "needs": "warden1", "win": "Fine! Go! He'll sink you himself."},
+    "hand_vex":    {"name": "Vex",  "cls": "Captain", "map": "grotto", "prize": 50, "boss": True, "needs": "warden1",
+                    "team": [("barbfin", 21, ["spinebarb", "bite", "aquapulse", "ambush"]), ("sandsnap", 20, ["sandtrap", "bite", "pebble", "ambush"]),
+                             ("clawcrest", 23, ["crabhammer", "brine", "scratch", "harden"])],
+                    "win": "Blast it! Crew, abandon ship! This isn't over, tamer!"},
+    "ta_rio":      {"name": "Rio",  "cls": "Junior", "map": "arena_salt", "team": [("jellume", 22), ("crabble", 22)], "prize": 22,
+                    "win": "Okay, okay. Neris is going to love you."},
+    "ta_lyn":      {"name": "Lyn",  "cls": "Junior", "map": "arena_salt", "team": [("barbfin", 22), ("pondwick", 23)], "prize": 22,
+                    "win": "Tip: plants and storms soak up her waves."},
+    "warden2":     {"name": "Neris", "cls": "Warden", "map": "arena_salt", "prize": 60, "boss": True,
+                    "team": [("lumistar", 25, ["starglimmer", "tidemend", "aquapulse", "bubble"]), ("barbfin", 25, ["spinebarb", "aquapulse", "bite", "ambush"]),
+                             ("kelpstrider", 26, ["tidalcrash", "aquapulse", "quick", "leer"]), ("clawcrest", 27, ["crabhammer", "shellup", "brine", "tidemend"])],
+                    "win": "The tide turns your way. The TIDE SIGIL is yours, tamer."},
 }
 WK_PICKUPS = {
     "r1_potion":    {"map": "route1",   "items": [("potion", 1)]},
@@ -27857,6 +27947,17 @@ WK_PICKUPS = {
     "r2_charms":    {"map": "route2",    "items": [("charm", 3)], "needs": "warden1"},
     "r2_potion":    {"map": "route2",    "items": [("superpotion", 1)], "needs": "warden1"},
     "salt_research":{"map": "house_salt1","items": [("greatcharm", 5), ("revive", 1)], "needs": "caught:10"},
+    # ── Phase 3 ──
+    "r3_great":     {"map": "route3",    "items": [("greatcharm", 2)], "needs": "warden1"},
+    "r3_hyper":     {"map": "route3",    "items": [("hyperpotion", 1)], "needs": "warden1"},
+    "r3_tide":      {"map": "route3",    "items": [("tidecharm", 3)], "needs": "warden1"},
+    "gr_revive":    {"map": "grotto",    "items": [("revive", 1)], "needs": "warden1"},
+    "gr_hyper":     {"map": "grotto",    "items": [("hyperpotion", 1)], "needs": "warden1"},
+    "gr_great":     {"map": "grotto",    "items": [("greatcharm", 3)], "needs": "warden1"},
+    "vex_loot":     {"map": "grotto",    "items": [("tidecharm", 5), ("revive", 1)], "needs": "hand_vex"},
+    "coral_collect":{"map": "house_coral2","items": [("tidecharm", 5), ("revive", 1)], "needs": "caught:20"},
+    "tide_gift":    {"map": "arena_salt","items": [("hyperpotion", 2), ("revive", 2)], "needs": "warden2"},
+    "lamp_gift":    {"map": "house_coral1","items": [("hyperpotion", 1), ("greatcharm", 3)], "needs": "warden2"},
 }
 
 
@@ -28101,6 +28202,14 @@ def _wk_use_move(save, b, side, mv_idx, ev, rng, moved_first: bool):
         ev.append({"t": "text", "s": f"{aname}'s attack missed!"})
         return
     if md["cat"] == "status":
+        if md.get("heal"):
+            mx = wk_stats(att)["hp"]
+            if att["hp"] >= mx:
+                ev.append({"t": "text", "s": "But its HP is already full!"})
+            else:
+                att["hp"] = min(mx, att["hp"] + max(1, mx * md["heal"] // 100))
+                ev.append({"t": "hp", "side": side, "hp": att["hp"], "max": mx})
+                ev.append({"t": "text", "s": f"{aname} restored its HP!"})
         if "stat" in md:
             stat, delta, who = md["stat"]
             if who == "self":
@@ -28160,6 +28269,8 @@ def _wk_ai_move(save, b, rng) -> int:
             s = 22 if (("status" in md and not me.get("st")) or ("stat" in md)) else 0
             if "stat" in md and md["stat"][2] == "self" and b["stg"]["foe"].get(md["stat"][0], 0) >= 2:
                 s = 0
+            if md.get("heal"):
+                s = 95 if foe["hp"] * 100 < wk_stats(foe)["hp"] * 40 else 0
         else:
             s = md["power"] * wk_eff(md["type"], WK_SPECIES[me["sp"]]["types"]) * (1.5 if md["type"] in WK_SPECIES[foe["sp"]]["types"] else 1) * md["acc"] / 100
         scored.append((s, i))
@@ -28171,7 +28282,7 @@ def _wk_move_value(sp: str, mid: str) -> float:
     """Rough worth of a move to this species, used to pick which move to forget."""
     md = WK_MOVES[mid]
     if md["cat"] == "status":
-        return 50 if md.get("status") in ("slp", "par") else 30
+        return 50 if md.get("status") in ("slp", "par") or md.get("heal") else 30
     return md["power"] * (1.5 if md["type"] in WK_SPECIES[sp]["types"] else 1) * (md["acc"] or 100) / 100 + (5 if md.get("prio") else 0)
 
 
@@ -28319,6 +28430,9 @@ def _wk_catch(uid, save, b, item, ev, rng) -> bool:
     mx, hp = wk_stats(foe)["hp"], foe["hp"]
     rate = WK_SPECIES[foe["sp"]]["catch"]
     bonus = WK_ITEMS[item]["ball"]
+    bt = WK_ITEMS[item].get("ball_type")
+    if bt and bt[0] in WK_SPECIES[foe["sp"]]["types"]:
+        bonus = bt[1]
     stb = 2.0 if foe.get("st") == "slp" else (1.5 if foe.get("st") in ("psn", "brn", "par") else 1.0)
     a = ((3 * mx - 2 * hp) * rate * bonus) / (3 * mx) * stb
     if a >= 255:
@@ -28512,8 +28626,10 @@ def _wk_trainer_team(save: dict, tid: str) -> list:
     foes = []
     for entry in WK_TRAINERS[tid]["team"]:
         sp, lv = entry[0], entry[1]
-        if sp == "@rival":
-            sp = save["flags"].get("rival_sp", "kelpling")
+        if sp in ("@rival", "@rival+"):
+            base = save["flags"].get("rival_sp", "kelpling")
+            evo = WK_SPECIES[base]["evo"]
+            sp = evo[1] if sp == "@rival+" and evo else base
         mon = _wk_foe_mon(sp, lv)
         if len(entry) > 2:
             mon["moves"] = [{"id": m, "pp": WK_MOVES[m]["pp"]} for m in entry[2]]
@@ -28624,6 +28740,8 @@ async def _wk_dispatch(uid: int, action: str, payload: dict) -> dict:
             return done({"resume": True})
         _wk_pos(save, payload)
         table = WK_ENCOUNTERS.get(save["map"])
+        if payload.get("zone") == "water" and save["map"] + ":water" in WK_ENCOUNTERS:
+            table = WK_ENCOUNTERS[save["map"] + ":water"]
         if table and not _wk_needs_ok(save, WK_MAP_NEEDS.get(save["map"])):
             table = None
         if not table:
@@ -28795,8 +28913,8 @@ async def _handle_wildkin(message: discord.Message, rest: str):
         await message.channel.send("🌿 The web dashboard isn't set up yet.")
         return
     await message.channel.send(
-        f"🌿 **Wildkin** — a pocket-sized adventure. Pick a starter, catch wild kin, earn the Warden's sigil "
-        f"and cross the mountain to the sea: <{base}/games/wildkin>",
+        f"🌿 **Wildkin** — a pocket-sized adventure. Pick a starter, catch wild kin, earn the Wardens' sigils, "
+        f"cross the mountain and sail to the Sea Isles: <{base}/games/wildkin>",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 

@@ -229,14 +229,24 @@ var TILE_ROWS = {
   "D": ["3333333333333333","1111111111111111","1111111111111111","2122222222222212","3333333333333333","1111111111111111","1111111111111111","2222122222222222",
         "3333333333333333","1111111111111111","1111111111111111","2222222222212222","3333333333333333","1111111111111111","1121111111111211","2222222222222222"],
   "q": ["2222222222222222","2111111121111111","2111111121111111","2110111121111011","2111111121111111","2111111121111111","2111111121111111","2222222222222222",
-        "1111211111112111","1111211111112111","1011211111112110","1111211111112111","1111211111112111","1111211111112111","1111211111112111","2222222222222222"]
+        "1111211111112111","1111211111112111","1011211111112110","1111211111112111","1111211111112111","1111211111112111","1111211111112111","2222222222222222"],
+  // ── Phase 3: wading shallows (animated), palm trees, boulders on sand ──
+  "~": ["1111111111111111","1100011111111111","1011101111111111","1111111111100011","1111111111011101","1111111111111111","1111211111111111","1111111111111111",
+        "1111111111111111","1111111000111111","1111110111011111","1111111111111111","1111111111111211","1000111111111111","0111011111111111","1111111111111111"],
+  "~2":["1111111111111111","1111000111111111","1110111011111111","1111111111111000","1111111111110111","1111111111111111","1111111211111111","1111111111111111",
+        "1111111111111111","1111111110001111","1111111101110111","1111111111111111","1111111111111121","1110001111111111","1101110111111111","1111111111111111"],
+  "Y": ["..333.....333...",".32223...32223..","3211122332111223",".3311112211113..","...3321111233...","..321123321123..",".32113.3223.3113","..33...3223..33.",
+        ".......3223.....","......3223......","......3223......",".......3223.....",".......3223.....","......322223....",".....32222223...","......333333...."],
+  "O": ["................","................","......3333......","....33222233....","...3211112223...","..321001112223..","..321011111223..",".32111111112223.",
+        ".32111111122223.",".32211111222223.",".32222122222233.","..322222222233..","..333222222333..","...3333333333...","................","................"]
 };
 var TILE_INFO = {   // solid, grass, water, talk-through (counter), warp-ish mat
   ".": {}, ",": {grass: 1}, "T": {solid: 1}, "p": {}, "f": {}, "w": {solid: 1, water: 1}, "=": {solid: 1}, "S": {solid: 1, sign: 1}, "R": {solid: 1},
   "_": {}, "#": {solid: 1}, "X": {solid: 1}, "W": {solid: 1}, "b": {solid: 1}, "B": {solid: 1}, "t": {solid: 1}, "c": {solid: 1, counter: 1}, "m": {}, "r": {}, "P": {solid: 1}, "k": {solid: 1},
-  "K": {solid: 1}, "g": {floor: 1}, "o": {solid: 1}, "E": {}, "M": {solid: 1}, "e": {}, "s": {}, "D": {}, "q": {}
+  "K": {solid: 1}, "g": {floor: 1}, "o": {solid: 1}, "E": {}, "M": {solid: 1}, "e": {}, "s": {}, "D": {}, "q": {},
+  "~": {shallow: 1}, "Y": {solid: 1}, "O": {solid: 1}
 };
-var TILE_UNDER = {"T": ".", "f": ".", "=": ".", "S": ".", "R": "p", "f2": ".", "o": "g"};   // what to draw beneath see-through tiles
+var TILE_UNDER = {"T": ".", "f": ".", "=": ".", "S": ".", "R": "p", "f2": ".", "o": "g", "Y": "s", "O": "s"};   // what to draw beneath see-through tiles
 (function(){
   Object.keys(TILE_ROWS).forEach(function(k){
     art("tile_" + k, function(){
@@ -258,10 +268,12 @@ var BUILDINGS = {
   inn:   {w: 5, h: 4, door: 2, roof: 34, sign: "INN"},
   hall:  {w: 6, h: 4, door: 2, roof: 32, sign: "HALL"},
   arena: {w: 6, h: 4, door: 2, roof: 30, sign: "ARENA"},
-  arena_locked: {w: 6, h: 4, door: 2, roof: 30, sign: "ARENA", locked: true}
+  arena_locked: {w: 6, h: 4, door: 2, roof: 30, sign: "ARENA", locked: true},
+  boat: {w: 3, h: 2, deco: true}          // the ferry, moored by the dock (all solid, no door)
 };
 function glyphTo(x, s, px, py, ci){ for (var i = 0; i < s.length; i++) if (s[i] !== " ") x.drawImage(glyphCanvas(s.charCodeAt(i), ci), px + i * 8, py); }
 Object.keys(BUILDINGS).forEach(function(kind){
+  if (BUILDINGS[kind].deco) return;
   art("bld_" + kind, function(){
     var B = BUILDINGS[kind], W = B.w * 16, H = B.h * 16, o = canvasOf(W, H), p = painter(o.x), R = B.roof;
     // roof
@@ -291,6 +303,16 @@ Object.keys(BUILDINGS).forEach(function(kind){
     if (kind === "house"){ p.r(3, W - 14, 2, 6, 10).r(1, W - 13, 3, 4, 8); }   // chimney
     return o.c;
   });
+});
+
+art("bld_boat", function(){
+  var o = canvasOf(48, 32), p = painter(o.x);
+  p.r(3, 22, 0, 2, 20).r(3, 24, 1, 10, 7).r(0, 25, 2, 8, 5).r(3, 26, 4, 4, 1);                  // mast and pennant
+  p.r(3, 8, 10, 22, 10).r(1, 9, 11, 20, 8).r(3, 12, 13, 4, 4).r(0, 13, 14, 2, 2).r(3, 20, 13, 4, 4).r(0, 21, 14, 2, 2);   // cabin with portholes
+  p.r(3, 0, 18, 48, 2).r(3, 2, 20, 44, 6).r(3, 6, 26, 36, 3).r(2, 3, 20, 42, 5).r(2, 7, 25, 34, 3).r(0, 3, 21, 42, 1);   // hull
+  for (var x = 6; x < 44; x += 7) p.r(1, x, 23, 3, 1);
+  p.r(0, 2, 29, 6, 1).r(0, 40, 29, 6, 1).r(0, 18, 30, 10, 1);                                       // foam
+  return o.c;
 });
 
 // ── People (16×16, 3 directions × stand/walk) ────────────────────────────────
@@ -343,7 +365,14 @@ var STYLES = {
   angler:  {head: "hat",   H: 1, C: 2, P: 2},
   ranger:  {head: "hat",   H: 3, C: 2, P: 2},
   sailor:  {head: "cap",   H: 3, C: 0, P: 3},
-  researcher: {head: "bun", H: 1, C: 0, P: 2}
+  researcher: {head: "bun", H: 1, C: 0, P: 2},
+  // ── Phase 3 ──
+  tidewarden: {head: "long", H: 2, C: 0, P: 3},
+  swimmer:  {head: "cap",   H: 0, C: 1, P: 1},
+  beachcomber: {head: "hat", H: 0, C: 1, P: 2},
+  grunt:    {head: "hood",  H: 3, C: 2, P: 3},
+  captain:  {head: "hat",   H: 3, C: 3, P: 1},
+  lamplighter: {head: "elder", H: 1, C: 2, P: 3}
 };
 function personCanvas(style, dir, walk){
   var S = STYLES[style], heads = HEADS[S.head], side = dir === "left" || dir === "right";
@@ -367,6 +396,7 @@ art("pouch", function(){ return grid(["................","................","...
 art("bang", function(){ return grid(["3333333333","3000000003","3000330003","3000330003","3000330003","3000330003","3000000003","3000330003","3000000003","3333333333",".333......","..3......."]); });
 art("charm", function(){ return grid(["..3333..",".322223.","32033023","32300323","32300323","32033023",".322223.","..3333.."]); });
 // the Warden of Stone's sigil, shown on the tamer card
+art("sigil_tide", function(){ return grid(["......33......",".....3223.....","....321123....","...32111123...","..3211111123..",".321111111123.",".321101111123.","32111011111123","32111101111123","32111111111123",".321111111123.","..3321111233..","....33333333..",".............."]); });
 art("sigil_stone", function(){ return grid(["......33......","....332233....","..3322112233..",".321111111123.","32111131111123","32111333111123","32113323311123","32133222331123","32111111111123",".321111111123.","..3322112233..","....332233....","......33......",".............."]); });
 
 // ── Maps ──────────────────────────────────────────────────────────────────────
@@ -652,14 +682,15 @@ var MAPS = {
     "wwwwwwwwDDwwwwwwwwww",
     "wwwwwwwwwwwwwwwwwwww"],
     buildings: [{kind: "inn", x: 2, y: 2, to: "inn_saltmere", tx: 4, ty: 6}, {kind: "shop", x: 14, y: 3, to: "shop_saltmere", tx: 3, ty: 5},
-                {kind: "arena_locked", x: 7, y: 7, note: "The door is locked.\nA note reads: THE TIDE WARDEN IS OUT AT SEA. THIS ARENA OPENS IN A FUTURE UPDATE!"},
+                {kind: "arena_locked", open: "arena", unlock: "hand_vex", to: "arena_salt", tx: 4, ty: 10, x: 7, y: 7,
+                 note: "The door is locked.\nA note reads: GONE TO THE SEA ISLES TO DEAL WITH POACHERS. ARENA CLOSED. -NERIS"},
+                {kind: "boat", x: 10, y: 15},
                 {kind: "house", x: 3, y: 8, to: "house_salt1", tx: 3, ty: 5}, {kind: "house", x: 13, y: 8, to: "house_salt2", tx: 3, ty: 5}],
     warps: [{x: 9, y: 0, to: "route2", tx: 9, ty: 23, dir: "up"}, {x: 10, y: 0, to: "route2", tx: 10, ty: 23, dir: "up"}],
     signs: [{x: 3, y: 12, text: "SALTMERE\nWhere the mountain meets the sea."}],
-    npcs: [{id: "s_sailor", style: "sailor", x: 8, y: 16, dir: "up",
-            text: ["Ahoy! This dock's for the ferry to the SEA ISLES.", "She isn't sailing yet, though. The islands open in a future update. Keep an eye out!"]},
-           {id: "s_kai", style: "rival", x: 12, y: 12, dir: "down", cond: function(){ return beaten("rival2"); },
-            text: ["KAI: The arena here's locked. The TIDE WARDEN is out at sea.", "Guess we both have to wait. I'll be training until then. You'd better be too!"]},
+    npcs: [{id: "s_sailor", style: "sailor", x: 8, y: 16, dir: "up", talk: "ferry"},
+           {id: "s_kai", style: "rival", x: 12, y: 12, dir: "down", cond: function(){ return beaten("rival2") && !beaten("rival3"); },
+            text: ["KAI: The ferry's running again! The TIDE WARDEN went to the SEA ISLES and never came back.", "I'm going after her. Bet I find out what happened before you do!"]},
            {id: "s_lass", style: "lass", x: 16, y: 13, dir: "left", wander: 1,
             text: ["The gulls here are SALTWINGS. They'll steal your lunch!", "If you want a PONDWICK, try the grass by the pond on ROUTE 2."]}]},
   inn_saltmere: {name: "TIDE INN", indoor: 1, music: "inn", rows: [
@@ -705,7 +736,184 @@ var MAPS = {
     "XXXmmXXX"],
     warps: [{x: 3, y: 6, to: "saltmere", tx: 14, ty: 11, dir: "down"}, {x: 4, y: 6, to: "saltmere", tx: 14, ty: 11, dir: "down"}],
     npcs: [{id: "hs_granny", style: "granny", x: 5, y: 3, dir: "left",
-            text: ["My husband sails the ferry. He says the SEA ISLES are full of kin nobody's ever seen.", "When the ferry runs again, you should go have a look!"]}]}
+            text: ["My husband sails the ferry. He says the SEA ISLES are full of kin nobody's ever seen.", "Some of them only live in the shallows. You have to wade right in to find them!"]}]},
+  // ── Phase 3 ──────────────────────────────────────────────────────────────────
+  arena_salt: {name: "TIDE ARENA", indoor: 1, music: "hall", rows: [
+    "##WW##WW##",
+    "X__qqqq__X",
+    "Xw_qqqq_wX",
+    "Xw_qqqq_wX",
+    "X________X",
+    "Xww____wwX",
+    "X________X",
+    "X__w__w__X",
+    "X________X",
+    "XP______PX",
+    "X________X",
+    "XXXXmmXXXX"],
+    warps: [{x: 4, y: 11, to: "saltmere", tx: 9, ty: 11, dir: "down"}, {x: 5, y: 11, to: "saltmere", tx: 9, ty: 11, dir: "down"}],
+    npcs: [{id: "neris", style: "tidewarden", x: 4, y: 2, dir: "down", trainer: "warden2", sight: -1, won: "neris_won",
+            pre: ["WARDEN NERIS: You're the tamer who sent the DROWNED HAND running. Thank you.", "But a SIGIL isn't given for kindness. It's earned in battle.", "Let the tide decide!"],
+            after: ["WARDEN NERIS: Water bends around a rock and wears it down in time. Keep flowing, tamer.", "The next WARDEN keeps watch over STORMCREST PEAK, far to the north."]},
+           {id: "j_rio", style: "junior", x: 7, y: 4, dir: "left", trainer: "ta_rio", sight: 3,
+            pre: ["Neris is back! And you'll have to get past me to see her!"], after: ["Did you know CLAWCREST can split a coconut? Terrifying."]},
+           {id: "j_lyn", style: "swimmer", x: 2, y: 6, dir: "right", trainer: "ta_lyn", sight: 3,
+            pre: ["I swim laps in these pools every morning. Ready to get soaked?"], after: ["Neris heals her kin mid-battle. Hit hard and fast!"]},
+           {id: "ta_guide", style: "villager", x: 7, y: 9, dir: "left", talk: "tide_guide"}]},
+  coralcove: {name: "CORAL COVE", music: "isle", border: "T", borderS: "w", rows: [
+    "TTTTTTTTTppTTTTTTTTT",
+    "TYsssssssppsssssssYT",
+    "TssssssssppsYssssssT",
+    "TYsssssYsppssssssssT",
+    "TssssssssppsssssssYT",
+    "TssssssssppssssssssT",
+    "TsppppppppppppppppsT",
+    "TspssssssppsssssspsT",
+    "TspssssssppsssssspsT",
+    "TspssssssppsssssspsT",
+    "TspssssssppsssssspsT",
+    "TsppppppppppppppppsT",
+    "TsSssssYsppssssYsssT",
+    "ssssssssssssssssssss",
+    "sss~ssssDDss~sss~sss",
+    "wwwwwwwwDDwwwwwwwwww",
+    "wwwwwwwwDDwwwwwwwwww",
+    "wwwwwwwwwwwwwwwwwwww"],
+    buildings: [{kind: "inn", x: 2, y: 2, to: "inn_coral", tx: 4, ty: 6}, {kind: "shop", x: 14, y: 3, to: "shop_coral", tx: 3, ty: 5},
+                {kind: "house", x: 3, y: 8, to: "house_coral1", tx: 3, ty: 5}, {kind: "house", x: 12, y: 8, to: "house_coral2", tx: 3, ty: 5},
+                {kind: "boat", x: 10, y: 15}],
+    warps: [{x: 9, y: 0, to: "route3", tx: 9, ty: 28, dir: "up"}, {x: 10, y: 0, to: "route3", tx: 10, ty: 28, dir: "up"}],
+    signs: [{x: 2, y: 12, text: "CORAL COVE\nThe last stop on the ferry line."}],
+    npcs: [{id: "brine", style: "sailor", x: 9, y: 16, dir: "up", talk: "ferry_back"},
+           {id: "cv_granny", style: "granny", x: 7, y: 8, dir: "down", wander: 1, talk: "cove_news"},
+           {id: "cv_kid", style: "kid", x: 11, y: 4, dir: "down", wander: 1,
+            text: ["TIDE CHARMS work three times better on tide kin!", "The CORAL MART sells them. I'm saving up."]},
+           {id: "cv_fisher", style: "angler", x: 16, y: 13, dir: "left",
+            text: ["See that shallow water on ROUTE 3? Wade right in!", "Kin that never come up on land live in the shallows. Little JELLUMES sting, though."]}]},
+  inn_coral: {name: "REEF INN", indoor: 1, music: "inn", rows: [
+    "###WW##WW#",
+    "X_______kX",
+    "X__cccc__X",
+    "X________X",
+    "XP______PX",
+    "X__rrrr__X",
+    "X________X",
+    "XXXXmmXXXX"],
+    warps: [{x: 4, y: 7, to: "coralcove", tx: 4, ty: 6, dir: "down"}, {x: 5, y: 7, to: "coralcove", tx: 4, ty: 6, dir: "down"}],
+    npcs: [{id: "innkeeper3", style: "keeper", x: 4, y: 1, dir: "down", talk: "inn"},
+           {id: "inn3_guest", style: "beachcomber", x: 7, y: 5, dir: "left", text: ["I came for the beaches.", "Then some fellas in black hoods chased me out of the SUNKEN GROTTO. Some holiday!"]}],
+    terminals: [{x: 8, y: 1}]},
+  shop_coral: {name: "CORAL MART", indoor: 1, music: "inn", rows: [
+    "##WW####",
+    "X_____bX",
+    "Xccc___X",
+    "X______X",
+    "X__tt__X",
+    "Xb____bX",
+    "XXXmmXXX"],
+    warps: [{x: 3, y: 6, to: "coralcove", tx: 15, ty: 6, dir: "down"}, {x: 4, y: 6, to: "coralcove", tx: 15, ty: 6, dir: "down"}],
+    npcs: [{id: "trader3", style: "trader", x: 2, y: 1, dir: "down", talk: "shop"}]},
+  house_coral1: {name: "HOUSE", indoor: 1, music: "home", rows: [
+    "##WW####",
+    "Xbb__B_X",
+    "X______X",
+    "X__tt__X",
+    "X______X",
+    "XP____PX",
+    "XXXmmXXX"],
+    warps: [{x: 3, y: 6, to: "coralcove", tx: 4, ty: 11, dir: "down"}, {x: 4, y: 6, to: "coralcove", tx: 4, ty: 11, dir: "down"}],
+    npcs: [{id: "tomas", style: "lamplighter", x: 2, y: 3, dir: "right", talk: "lamp_keeper"}]},
+  house_coral2: {name: "HOUSE", indoor: 1, music: "home", rows: [
+    "##WW####",
+    "Xbb__B_X",
+    "X______X",
+    "X__tt__X",
+    "X______X",
+    "XP____PX",
+    "XXXmmXXX"],
+    warps: [{x: 3, y: 6, to: "coralcove", tx: 13, ty: 11, dir: "down"}, {x: 4, y: 6, to: "coralcove", tx: 13, ty: 11, dir: "down"}],
+    npcs: [{id: "shelly", style: "researcher", x: 5, y: 3, dir: "left", talk: "coral_collect"}]},
+  route3: {name: "ROUTE 3", music: "reef", border: "T", borderN: "M", encounters: 1, water: 1, rows: [
+    "MMMMMMMMMEEMMMMMMMMM",
+    "TYssssssOOsOOs~~~www",
+    "Ts,,,,ssYsssss~~~www",
+    "Ts,,,,sssssss~~~~www",
+    "Ts,,,,sssssss~~~~www",
+    "TYsssssssssss~~~~www",
+    "TYssssYssssss~~~~www",
+    "Tsssssssssssss~~~www",
+    "TssssOssssssssssswww",
+    "TYYYYYYYYYssYYsSswww",
+    "Tsssssssssssssssswww",
+    "Ts,,,,,sssssssssswww",
+    "Ts,,,,,ssYss~~~~~www",
+    "Ts,,,,,sssss~~~~~www",
+    "TYsssssssss~~~~~~www",
+    "TYssss,,,,s~~~~~~www",
+    "TsssOs,,,,s~~~~~~www",
+    "Tsssss,,,,ss~~~~~www",
+    "Tsssssssssssssssswww",
+    "TYYssYYYYYYYYYssswww",
+    "Tsssssssssssssssswww",
+    "Ts,,,,Ysssssss~~~www",
+    "Ts,,,,sssssssY~~~www",
+    "Ts,,,,ssssssss~~~www",
+    "Tsssssss,,,,,s~~~www",
+    "Tsssssss,,,,Os~~~www",
+    "TssYssss,,,,,s~~~www",
+    "TYssssssssssss~~~www",
+    "Tsssssssssssssssswww",
+    "TTTTTTTTTssTTTTTTwww"],
+    warps: [{x: 10, y: 0, to: "grotto", tx: 10, ty: 20, dir: "up"},
+            {x: 9, y: 29, to: "coralcove", tx: 9, ty: 1, dir: "down"}, {x: 10, y: 29, to: "coralcove", tx: 10, ty: 1, dir: "down"}],
+    signs: [{x: 15, y: 9, text: "ROUTE 3\nSUNKEN GROTTO  north\nCORAL COVE  south"}],
+    npcs: [{id: "kai3", style: "rival", x: 10, y: 1, dir: "down", trainer: "rival3", sight: 3, won: "kai3_won", cond: function(){ return !beaten("rival3"); },
+            pre: ["KAI: Finally! I tracked the poachers here. They call themselves the DROWNED HAND.", "Their captain's got the TIDE WARDEN cornered somewhere inside this grotto.", "But first... let's see if you're strong enough to help. Battle me!"],
+            after: ["KAI: Go on. I'll keep watch out here."]},
+           {id: "t_tam", style: "beachcomber", x: 7, y: 27, dir: "right", trainer: "rt_tam", sight: 4,
+            pre: ["Ooh, a fresh face on the beach! Let's battle!"], after: ["PALMONKS throw coconuts at people. Mostly at me."]},
+           {id: "g_ruck", style: "grunt", x: 5, y: 20, dir: "left", trainer: "hg_ruck", sight: 3,
+            pre: ["Oi! The DROWNED HAND is busy here. Scram!"], after: ["The captain's in the grotto. Don't tell him I lost."]},
+           {id: "t_kiko", style: "swimmer", x: 13, y: 13, dir: "left", trainer: "rt_kiko", sight: 4,
+            pre: ["The water's lovely! Want to battle in it?"], after: ["BARBFINS puff up when you step near them. Ouch."]},
+           {id: "t_wade", style: "sailor", x: 12, y: 5, dir: "down", trainer: "rt_wade", sight: 3,
+            pre: ["Avast! No landlubber passes without a battle!"], after: ["Those hooded poachers sank my nets. Teach 'em a lesson for me."]}],
+    pickups: [{id: "r3_great", x: 2, y: 7}, {id: "r3_hyper", x: 16, y: 4}, {id: "r3_tide", x: 16, y: 26}]},
+  grotto: {name: "SUNKEN GROTTO", music: "cave", border: "K", cave: 1, water: 1, rows: [
+    "KKKKKKKKKKKKKKKKKKKK",
+    "KKKKgggggggggggggKKK",
+    "KKKKg~~~~ggggggggKKK",
+    "KKKKg~~~~ggggggggKKK",
+    "KKKKKKKKKKKKKggKKKKK",
+    "KKKgggggggggggggggKK",
+    "KKKggggwwwggggggggKK",
+    "KKKgoggwwwggggggggKK",
+    "KKKgggggggggggggggKK",
+    "KKKgKKKKKKKKKKKg~~KK",
+    "KKKggKKKKKKKKKKg~~KK",
+    "KKKgKKKKKKKKKKKg~~KK",
+    "KKKgKKKKKKKKKKKKKKKK",
+    "KKKggggggggggggogKKK",
+    "KKKgggggggg~~~~~gKKK",
+    "KKKgggggggg~~~~~gKKK",
+    "KKKgggggggg~~~~~gKKK",
+    "KKKggggggggggggggKKK",
+    "KKKKKKKKKggKKKKKKKKK",
+    "KKKKKKKKKggKKKKKKKKK",
+    "KKKKKKKKKggKKKKKKKKK",
+    "KKKKKKKKKeeKKKKKKKKK"],
+    warps: [{x: 9, y: 21, to: "route3", tx: 10, ty: 1, dir: "down"}, {x: 10, y: 21, to: "route3", tx: 10, ty: 1, dir: "down"}],
+    npcs: [{id: "g_nox", style: "grunt", x: 3, y: 15, dir: "right", trainer: "hg_nox", sight: 7,
+            pre: ["Intruder! The captain said nobody gets in!"], after: ["We were only borrowing those kin. Honest."]},
+           {id: "g_pike", style: "grunt", x: 4, y: 10, dir: "left", trainer: "hg_pike", sight: 1,
+            pre: ["Boo! Hah, got you. Now hand over your kin!"], after: ["This tunnel's too narrow for an ambush anyway."]},
+           {id: "g_sable", style: "grunt", x: 15, y: 7, dir: "left", trainer: "hg_sable", sight: 5,
+            pre: ["You got past Nox AND Pike? Then I'll stop you myself!"], after: ["The captain's just up ahead. He doesn't lose."]},
+           {id: "vex", style: "captain", x: 10, y: 2, dir: "right", trainer: "hand_vex", sight: 4, won: "vex_won", cond: function(){ return !beaten("hand_vex"); },
+            pre: ["CAPTAIN VEX: Well, well. A little tamer came to rescue the WARDEN?", "Her kin are already in my nets, and yours are next!", "The DROWNED HAND takes what it wants. Come on, then!"],
+            after: ["..."]},
+           {id: "g_neris", style: "tidewarden", x: 12, y: 1, dir: "left", talk: "neris_cave", cond: function(){ return !beaten("hand_vex"); }}],
+    pickups: [{id: "gr_revive", x: 3, y: 17}, {id: "gr_hyper", x: 17, y: 11}, {id: "gr_great", x: 16, y: 2}]}
 };
 (function prep(){
   Object.keys(MAPS).forEach(function(id){
@@ -717,9 +925,10 @@ var MAPS = {
     (M.buildings || []).forEach(function(b){
       var B = BUILDINGS[b.kind];
       for (var yy = 0; yy < B.h; yy++) for (var xx = 0; xx < B.w; xx++) M.solidX[(b.x + xx) + "," + (b.y + yy)] = 1;
+      if (B.deco) return;
       var dx = b.x + B.door, dy = b.y + B.h - 1;
-      if (B.locked) M.locked.push({x: dx, y: dy, kind: b.kind, note: b.note});
-      else { delete M.solidX[dx + "," + dy]; M.warps.push({x: dx, y: dy, to: b.to, tx: b.tx, ty: b.ty, dir: "up", door: 1}); }
+      if (B.locked) M.locked.push({x: dx, y: dy, kind: b.kind, note: b.note, unless: b.unlock});
+      if (!B.locked || b.unlock){ delete M.solidX[dx + "," + dy]; M.warps.push({x: dx, y: dy, to: b.to, tx: b.tx, ty: b.ty, dir: "up", door: 1, need: b.unlock}); }
     });
   });
 })();
@@ -732,6 +941,8 @@ function setFlag(k){ if (!SAVE) return; SAVE.flags[k] = true; localFlags[k] = tr
 function hasStarter(){ return SAVE && SAVE.party && SAVE.party.length > 0; }
 function beaten(t){ return SAVE && SAVE.beaten.indexOf(t) >= 0; }
 function picked(id){ return SAVE && SAVE.picked.indexOf(id) >= 0; }
+function isLocked(l){ return !(l.unless && beaten(l.unless)); }
+function warpOpen(w){ return !w.need || beaten(w.need); }
 function setBal(b){ if (b != null){ BAL = b; $("bal").textContent = Math.round(b).toLocaleString("en-US"); } }
 function applySave(s){ if (s){ for (var k in localFlags) s.flags[k] = true; SAVE = s; } }
 function call(action, body){
@@ -923,7 +1134,7 @@ function blocked(x, y, who){
   if (TILE_INFO[t] && TILE_INFO[t].solid) return true;
   if (M.solidX[x + "," + y]) return true;
   if (pickupAt(x, y)) return true;
-  if (M.locked.some(function(l){ return l.x === x && l.y === y; })) return true;
+  if (M.locked.some(function(l){ return l.x === x && l.y === y && isLocked(l); })) return true;
   var n = npcAt(x, y); if (n && n !== who) return true;
   if (who && W.x === x && W.y === y) return true;
   if (who && W.moving && W.tx === x && W.ty === y) return true;
@@ -947,11 +1158,11 @@ function drawWorld(){
   for (var ty = y0; ty <= y0 + 10; ty++) for (var tx = x0; tx <= x0 + 11; tx++){
     var t = tileAt(M, tx, ty);
     if (M.indoor && (tx < 0 || ty < 0 || tx >= M.w || ty >= M.h)) continue;
-    var key = "tile_" + ((t === "w" || t === "f") && frame2 ? t + "2" : t);
+    var key = "tile_" + ((t === "w" || t === "f" || t === "~") && frame2 ? t + "2" : t);
     var img = ART[key] || ART["tile_."];
     g.drawImage(img, Math.round(tx * 16 - cam.x), Math.round(ty * 16 - cam.y));
   }
-  (M.buildings || []).forEach(function(b){ g.drawImage(ART["bld_" + b.kind], Math.round(b.x * 16 - cam.x), Math.round(b.y * 16 - cam.y)); });
+  (M.buildings || []).forEach(function(b){ g.drawImage(ART["bld_" + (b.unlock && beaten(b.unlock) ? b.open : b.kind)], Math.round(b.x * 16 - cam.x), Math.round(b.y * 16 - cam.y)); });
   if (M.id === "hall"){   // the three charms on the table
     M.interacts.forEach(function(it){
       if (SAVE && (SAVE.flags.starter === it.sp || SAVE.flags.rival_sp === it.sp)) return;
@@ -1026,14 +1237,15 @@ var saveTimer = 0;
 function arrived(){
   W.steps++; W.sinceBattle++; saveTimer++;
   var M = W.map;
-  var wp = M.warps.filter(function(w){ return w.x === W.x && w.y === W.y; })[0];
+  var wp = M.warps.filter(function(w){ return w.x === W.x && w.y === W.y && warpOpen(w); })[0];
   if (wp){ runScript(function(){ return warp(wp); }); return; }
   var tr = M.triggers.filter(function(t){ return t.x === W.x && t.y === W.y; })[0];
   if (tr && SCRIPTS[tr.script]){ runScript(function(){ return SCRIPTS[tr.script](tr); }); return; }
   if (checkTrainers()) return;
-  var here = tileAt(M, W.x, W.y), wildHere = (here === "," && M.encounters) || (here === "g" && M.cave);
-  if (wildHere && hasStarter() && W.sinceBattle > 2 && Math.random() < (M.cave ? 1 / 11 : 1 / 9)){
-    runScript(function(){ return wildBattle(); }); return;
+  var here = tileAt(M, W.x, W.y), wade = here === "~" && M.water;
+  var wildHere = (here === "," && M.encounters) || (here === "g" && M.cave) || wade;
+  if (wildHere && hasStarter() && W.sinceBattle > 2 && Math.random() < (M.cave && !wade ? 1 / 11 : 1 / 9)){
+    runScript(function(){ return wildBattle(wade ? "water" : null); }); return;
   }
   if (saveTimer >= 25){ saveTimer = 0; savePos(); }
 }
@@ -1059,7 +1271,7 @@ function interact(){
   var s = M.signs.filter(function(s){ return s.x === f.x && s.y === f.y; })[0]; if (s){ runScript(function(){ return say(s.text); }); return; }
   var it = M.interacts.filter(function(s){ return s.x === f.x && s.y === f.y; })[0]; if (it && SCRIPTS[it.script]){ runScript(function(){ return SCRIPTS[it.script](it); }); return; }
   var tm = M.terminals.filter(function(s){ return s.x === f.x && s.y === f.y; })[0]; if (tm){ runScript(kinBox); return; }
-  var lk = M.locked.filter(function(s){ return s.x === f.x && s.y === f.y; })[0];
+  var lk = M.locked.filter(function(s){ return s.x === f.x && s.y === f.y && isLocked(s); })[0];
   if (lk){ runScript(function(){ return say(lk.note || "The door is locked."); }); return; }
   if (t === "b" && M.indoor){ runScript(function(){ return say(["Crammed full of books about kin.", "A book about the stars. The pages are dog-eared.", "A cookbook. Page 12 is just a stew recipe."][(f.x + f.y) % 3]); }); }
 }
@@ -1110,8 +1322,8 @@ function trainerBattle(n){
     .then(function(res){ if (!res.ok) return say(res.error || "They don't want to battle right now."); return runBattle(res); })
     .then(function(){ Music.play(W.map.music); if (d.won && beaten(d.trainer) && SCRIPTS[d.won]) return SCRIPTS[d.won](n); });
 }
-function wildBattle(){
-  return call("wild", {map: W.map.id, x: W.x, y: W.y, dir: W.dir}).then(function(res){
+function wildBattle(zone){
+  return call("wild", {map: W.map.id, x: W.x, y: W.y, dir: W.dir, zone: zone || ""}).then(function(res){
     if (!res.ok) return;
     if (res.resume) return resumeBattle();
     return runBattle(res);
@@ -1127,6 +1339,8 @@ function onEnter(){
     var k2 = W.npcs.filter(function(n){ return n.id === "kai2"; })[0];
     if (k2) return kaiAmbush(k2);
   }
+  if (M.id === "grotto" && !flag("c_grotto")){ setFlag("c_grotto");
+    return say("The air is cold and damp. Somewhere deeper in, water drips... and someone is shouting."); }
   if (M.id === "home" && !flag("c_intro")){ setFlag("c_intro"); var mom = W.npcs[0];
     return say("MOM: Oh, {NAME}, you're up!").then(function(){ return say("Elder Rowan was asking for you this morning."); })
       .then(function(){ return say("He's at the TAMER'S HALL in the middle of town. Go on, don't keep him waiting!"); })
@@ -1176,6 +1390,65 @@ var SCRIPTS = {
       .then(function(){ return say("WARDEN PETRA: Show the SIGIL to the guard at the north end of town."); });
   },
   kai2: function(n){ if (!beaten("rival2")) return kaiAmbush(n); return say("KAI: ..."); },
+  // ── Phase 3 ──
+  ferry: function(){
+    return ask("CAPTAIN: Ahoy, {NAME}! The ferry's sailing again. All aboard for the SEA ISLES?").then(function(yes){
+      if (!yes) return say("CAPTAIN: She'll be here when you're ready.");
+      return sail("coralcove", 8, 15, "CAPTAIN: Land ho! Welcome to CORAL COVE. I'll be at the dock whenever you want to head back.");
+    });
+  },
+  ferry_back: function(){
+    return ask("CAPTAIN: Heading back to SALTMERE?").then(function(yes){
+      if (!yes) return say("CAPTAIN: Enjoy the isles! Watch out for those hooded types.");
+      return sail("saltmere", 9, 15, "CAPTAIN: Here we are, SALTMERE. Mind the gulls!");
+    });
+  },
+  cove_news: function(){
+    if (beaten("hand_vex")) return say("You chased the DROWNED HAND out of the grotto? And NERIS is safe!").then(function(){ return say("She's gone home to open her ARENA in SALTMERE. Bless you, dear."); });
+    return say("Oh, a tamer! Have you come about the poachers?").then(function(){ return say("They call themselves the DROWNED HAND. They've taken over the SUNKEN GROTTO up north and they're netting kin to sell."); })
+      .then(function(){ return say("WARDEN NERIS went in after them three days ago. She hasn't come out."); });
+  },
+  tide_guide: function(){
+    var p = !picked("vex_loot") && beaten("hand_vex") ? say("NERIS asked me to hold these for you. She said you left the grotto in a hurry!").then(function(){ return pickUp({id: "vex_loot"}); }) : Promise.resolve();
+    return p.then(function(){ return say(beaten("warden2") ? "You beat NERIS! The whole harbor heard the splash." : "Welcome to the TIDE ARENA! NERIS uses tide kin. Plants and storms are the way to beat them."); });
+  },
+  neris_cave: function(){
+    return say("NERIS: You came all this way? Be careful. That's CAPTAIN VEX.").then(function(){ return say("His crew netted my kin while I slept. I can't fight him alone."); });
+  },
+  vex_won: function(n){
+    var neris = W.npcs.filter(function(x){ return x.id === "g_neris"; })[0];
+    return say("CAPTAIN VEX: Crew! We're done here. Abandon ship!").then(function(){ return stepAside(n, 2); })
+      .then(function(){ n.hidden = true; Snd.sfx("door"); if (neris) neris.dir = W.x < neris.x ? "left" : "right"; return say("NERIS: You did it! His nets are cut. My kin are free!"); })
+      .then(function(){ return say("NERIS: I owe you, {NAME}. The poachers dropped these. They're yours."); })
+      .then(function(){ return pickUp({id: "vex_loot"}); })
+      .then(function(){ return say("NERIS: I'm going home to SALTMERE to open my ARENA again. Come and challenge me. I won't go easy on you!"); })
+      .then(function(){ if (neris) neris.hidden = true; Snd.sfx("door"); savePos(); });
+  },
+  kai3_won: function(n){
+    return say("KAI: Fine, you win. You're the real deal.").then(function(){ return say("KAI: Go stop CAPTAIN VEX. I'll make sure none of his crew sneaks out behind you."); })
+      .then(function(){ return stepAside(n, 2); })
+      .then(function(){ n.hidden = true; Snd.sfx("door"); savePos(); });
+  },
+  neris_won: function(){
+    Snd.jingle("get");
+    return say("{NAME} received the TIDE SIGIL!").then(function(){ return say("WARDEN NERIS: Take these too. A tamer heading north will need them."); })
+      .then(function(){ return pickUp({id: "tide_gift"}); })
+      .then(function(){ return say("WARDEN NERIS: Storms are gathering over STORMCREST PEAK. The next WARDEN waits up there..."); })
+      .then(function(){ return say("...but the road north isn't open yet. Rest up. Your journey isn't over!"); });
+  },
+  lamp_keeper: function(){
+    if (beaten("warden2") && !picked("lamp_gift")) return say("TOMAS: Two SIGILS! I knew it the moment you stepped off that ferry.")
+      .then(function(){ return say("I kept these for the day a real tamer came along."); }).then(function(){ return pickUp({id: "lamp_gift"}); })
+      .then(function(){ return say("From my lighthouse I can see the storm clouds over STORMCREST PEAK. Something big is stirring up there. That road opens in a future update!"); });
+    if (beaten("warden2")) return say("TOMAS: Lightning over STORMCREST again last night. Mark my words, something's waking up.");
+    return say("TOMAS: I'm the lighthouse keeper. Forty years I've watched these waters.").then(function(){ return say("I've never seen trouble like these DROWNED HAND poachers. Somebody ought to send them packing."); });
+  },
+  coral_collect: function(){
+    var c = SAVE.caught.length;
+    if (picked("coral_collect")) return say("SHELLY: " + c + " kinds! The islands must have a few more you haven't found. Try wading in the shallows!");
+    if (c >= 20) return say("SHELLY: 20 kinds in your KINDEX?! You're a true collector!").then(function(){ return say("Take these TIDE CHARMS. They make catching sea kin a breeze."); }).then(function(){ return pickUp({id: "coral_collect"}); });
+    return say("SHELLY: I collect shells. And I study the kin that live in them!").then(function(){ return say("Show me a KINDEX with 20 kinds caught and I'll share my best finds. You have " + c + "."); });
+  },
   salt_research: function(){
     var c = SAVE.caught.length;
     if (picked("salt_research")) return say("IDA: How's the KINDEX coming? " + c + " kinds! Keep at it. The SEA ISLES will have even more.");
@@ -1264,6 +1537,22 @@ function elderGift(){
   return say("ELDER ROWAN: What a battle! Here, {NAME}, take these.").then(function(){ return pickUp({id: "elder_charms"}); })
     .then(function(){ return say("Throw a RUNE CHARM at a weakened wild kin to catch it. Sleepy or poisoned kin are easier still."); })
     .then(function(){ return say("Head north through ROUTE 1 to CRAGMOOR. The world is waiting for you!"); });
+}
+// walk an NPC a few steps away from the player, along whichever way is open, before it leaves the scene
+function stepAside(n, steps){
+  var order = ["right", "left", "up", "down"].sort(function(a, b){ return (a === DIRV_TO(n) ? 1 : 0) - (b === DIRV_TO(n) ? 1 : 0); });
+  var d = order.filter(function(k){ var v = DIRV[k]; return !blocked(n.x + v[0], n.y + v[1], n); })[0];
+  if (!d) return Promise.resolve();
+  var v = DIRV[d], k = 1;
+  while (k < steps && !blocked(n.x + v[0] * (k + 1), n.y + v[1] * (k + 1), n)) k++;
+  return walkNpc(n, d, k);
+}
+function DIRV_TO(n){ return W.x > n.x ? "right" : W.x < n.x ? "left" : W.y > n.y ? "down" : "up"; }   // the way toward the player
+function sail(to, x, y, line){
+  Music.stop(); Snd.jingle("heal");
+  return fade(true, 600).then(function(){ return sleep(1400); }).then(function(){
+    loadMap(to, x, y, "up"); W.sinceBattle = 3; return savePos();
+  }).then(function(){ return fade(false, 600); }).then(function(){ return say(line); });
 }
 function healParty(inn){
   return call("heal", {inn: inn}).then(function(d){
@@ -1584,6 +1873,151 @@ var MON_DRAW = {
       k.l(0, [14, 24, 4, 10], 1).l(0, [34, 24, 44, 10], 1).l(2, [20, 44, 16, 48], 2).l(2, [28, 44, 32, 48], 2);
       k.e(1, 24, 34, 12, 11).c(1, 24, 18, 8).p(2, [21, 11, 24, 0, 27, 11]);
     }
+  },
+  // ── Phase 3 ──────────────────────────────────────────────────────────────────
+  crabble: function(k, back){
+    if (!back){
+      k.l(2, [13, 34, 5, 39, 3, 44], 2).l(2, [15, 37, 9, 42, 8, 46], 2).l(2, [35, 34, 43, 39, 45, 44], 2).l(2, [33, 37, 39, 42, 40, 46], 2);
+      k.l(1, [12, 29, 7, 22], 3).e(1, 6, 16, 6, 7, -.3).l(3, [2, 13, 7, 17], 1);                                  // left claw
+      k.l(1, [36, 29, 41, 22], 3).e(1, 42, 17, 5, 6, .3).l(3, [45, 14, 41, 18], 1);                               // right claw
+      k.e(1, 24, 31, 15, 9).e(2, 24, 27, 12, 4).e(0, 23, 35, 8, 3.5);                                             // shell, rim, belly
+      k.l(1, [19, 25, 18, 16], 2).l(1, [29, 25, 30, 16], 2).eye(18, 15, 2.8).eye(30, 15, 2.8);
+      k.l(3, [20, 37, 23, 38, 28, 37], 1).c(0, 16, 29, 1.2).c(0, 32, 29, 1.2);
+    } else {
+      k.l(2, [10, 36, 2, 42], 2).l(2, [12, 39, 5, 46], 2).l(2, [38, 36, 46, 42], 2).l(2, [36, 39, 43, 46], 2);
+      k.l(1, [10, 30, 5, 20], 4).e(1, 5, 14, 6, 7, -.2).l(1, [38, 30, 43, 20], 4).e(1, 43, 14, 6, 7, .2);
+      k.e(1, 24, 33, 17, 12).e(2, 24, 29, 13, 6).e(1, 24, 27, 9, 3).l(1, [19, 22, 18, 13], 2).l(1, [29, 22, 30, 13], 2).c(1, 18, 12, 2.5).c(1, 30, 12, 2.5);
+    }
+  },
+  clawcrest: function(k, back){
+    if (!back){
+      k.l(2, [16, 38, 8, 43, 6, 47], 3).l(2, [34, 38, 42, 43, 44, 47], 3).l(2, [30, 40, 35, 46], 2);
+      k.p(2, [16, 22, 18, 12, 22, 20, 26, 9, 30, 20, 34, 13, 36, 23]);                                            // shell crest
+      k.e(1, 26, 31, 15, 11).e(2, 26, 26, 13, 4).e(0, 26, 36, 9, 4);
+      k.l(1, [38, 30, 42, 24], 4).e(1, 43, 20, 4, 5).l(3, [45, 17, 42, 21], 1);                                   // small claw
+      k.l(1, [15, 31, 11, 24], 6).e(1, 9, 20, 7, 6);                                                              // the big claw: wrist
+      k.p(1, [12, 16, 4, 4, 0, 6, 2, 14, 8, 19]).p(1, [10, 23, 2, 26, 0, 31, 6, 31, 13, 26]);                     // upper and lower jaw
+      k.l(3, [1, 17, 10, 21], 1).p(0, [3, 6, 5, 9, 2, 9]).c(0, 8, 18, 1.4);
+      k.l(1, [21, 25, 20, 18], 2).l(1, [31, 25, 32, 18], 2).eye(20, 17, 2.6).eye(32, 17, 2.6);
+      k.p(3, [22, 39, 30, 39, 26, 41]);
+    } else {
+      k.l(2, [12, 40, 4, 46], 3).l(2, [36, 40, 44, 46], 3);
+      k.p(1, [10, 18, 4, 4, 1, 8, 3, 16]).p(1, [10, 22, 2, 26, 1, 31, 8, 30]).e(1, 8, 21, 6, 6).l(1, [10, 30, 8, 24], 6).l(1, [38, 30, 42, 22], 4).e(1, 43, 18, 4, 6);
+      k.e(1, 25, 34, 17, 12).p(2, [12, 28, 15, 16, 20, 24, 25, 12, 30, 24, 35, 16, 38, 28]).e(2, 25, 33, 13, 5).l(1, [21, 22, 20, 14], 2).l(1, [29, 22, 30, 14], 2);
+    }
+  },
+  palmonk: function(k, back){
+    if (!back){
+      k.l(2, [34, 40, 42, 40, 45, 34, 42, 30, 39, 33], 2);                                                        // curly tail
+      k.e(1, 26, 34, 10, 9).e(0, 24, 36, 5, 6).l(1, [20, 42, 18, 47], 3).l(1, [30, 42, 32, 47], 3);
+      k.l(1, [33, 30, 39, 24], 3).c(2, 40, 21, 5).c(1, 39, 19, 1.5).c(3, 41, 22, 1);                                 // arm + coconut
+      k.l(1, [18, 31, 14, 36], 3);
+      k.p(2, [20, 10, 8, 2, 16, 10]).p(2, [22, 9, 22, 0, 26, 9]).p(2, [24, 10, 36, 2, 30, 11]).p(1, [18, 9, 13, 5, 19, 7]);   // palm tuft
+      k.c(1, 21, 19, 9).c(1, 12, 19, 3.5).c(0, 12, 19, 1.8).e(0, 20, 22, 6, 5);
+      k.eye(18, 17, 2.3).eye(24, 17, 2.3).l(3, [17, 24, 20, 25, 23, 24], 1).r(3, 19, 21, 2, 1);
+    } else {
+      k.l(2, [30, 42, 40, 44, 44, 38, 40, 34], 2);
+      k.e(1, 24, 35, 11, 10).l(1, [14, 32, 8, 26], 3).l(1, [34, 32, 40, 26], 3).l(1, [19, 43, 17, 47], 3).l(1, [29, 43, 31, 47], 3);
+      k.c(1, 24, 18, 10).c(1, 13, 18, 3.5).c(1, 35, 18, 3.5);
+      k.p(2, [22, 10, 8, 2, 18, 11]).p(2, [24, 9, 24, 0, 28, 9]).p(2, [26, 10, 40, 2, 30, 11]);
+    }
+  },
+  coralyx: function(k, back){
+    if (!back){
+      k.e(2, 24, 44, 15, 3);
+      k.l(1, [24, 38, 24, 14], 5).l(1, [24, 26, 14, 18, 12, 8], 4).l(1, [24, 24, 34, 16, 36, 6], 4).l(1, [14, 18, 8, 14], 3).l(1, [34, 16, 41, 13], 3).l(1, [24, 16, 20, 6], 3).l(1, [24, 16, 28, 4], 3);
+      k.c(0, 12, 8, 2).c(0, 36, 6, 2).c(0, 20, 6, 1.6).c(0, 28, 4, 1.6).c(0, 8, 14, 1.5).c(0, 41, 13, 1.5);
+      k.e(1, 24, 37, 12, 8).c(2, 15, 39, 2).c(2, 33, 38, 2).c(2, 28, 42, 1.5);                                     // rocky base
+      k.eye(20, 34, 2.4).eye(28, 34, 2.4).l(3, [22, 39, 26, 39], 1);
+    } else {
+      k.e(2, 24, 45, 16, 3).e(1, 24, 38, 14, 9);
+      k.l(1, [24, 32, 24, 12], 5).l(1, [24, 24, 12, 16, 10, 6], 4).l(1, [24, 22, 36, 14, 38, 4], 4).l(1, [24, 14, 19, 4], 3).l(1, [24, 14, 29, 2], 3);
+      k.c(0, 10, 6, 2).c(0, 38, 4, 2).c(0, 19, 4, 1.6).c(0, 29, 2, 1.6).c(2, 16, 40, 2).c(2, 31, 39, 2);
+    }
+  },
+  jellume: function(k, back){
+    var arms = [[14, 30, 12, 38, 15, 46], [19, 31, 18, 40, 20, 47], [24, 31, 25, 41, 23, 47], [29, 31, 30, 40, 28, 47], [34, 30, 36, 38, 33, 46]];
+    if (!back){
+      arms.forEach(function(a){ k.l(2, a, 2); });
+      k.l(0, [10, 34, 6, 40], 1).l(0, [38, 34, 42, 40], 1).l(0, [4, 24, 1, 26, 3, 28], 1).l(0, [44, 22, 47, 24, 45, 26], 1);   // sparks
+      k.e(1, 24, 20, 16, 13).p(1, [8, 22, 40, 22, 38, 31, 10, 31]).e(0, 19, 14, 6, 4);
+      k.c(2, 30, 13, 1.5).c(2, 34, 18, 1.2).c(2, 13, 20, 1.2);
+      k.eye(19, 23, 2.4).eye(28, 23, 2.4).e(3, 24, 28, 2, 1.2);
+      for (var i = 0; i < 6; i++) k.c(2, 11 + i * 5.2, 31, 1.6);
+    } else {
+      arms.forEach(function(a){ k.l(2, [a[0], a[1] + 2, a[2], a[3] + 1, a[4], a[5]], 2); });
+      k.e(1, 24, 20, 17, 14).p(1, [7, 22, 41, 22, 39, 32, 9, 32]).e(0, 18, 13, 6, 4).c(2, 31, 12, 1.5).c(2, 34, 19, 1.2);
+      for (var j = 0; j < 6; j++) k.c(2, 10 + j * 5.6, 32, 1.6);
+    }
+  },
+  sparkeel: function(k, back){
+    if (!back){
+      k.l(1, [42, 40, 34, 44, 26, 40, 20, 32, 22, 24, 30, 18], 6).l(0, [40, 41, 34, 43, 27, 39], 1);              // S-shaped body
+      k.p(2, [44, 36, 47, 33, 47, 44, 42, 42]);                                                                    // tail fin
+      k.p(2, [28, 31, 32, 26, 34, 32]).p(2, [21, 37, 24, 33, 27, 39]);                                             // back fins
+      k.e(1, 32, 14, 9, 7, -.3).e(1, 39, 18, 4, 3).p(2, [28, 7, 32, 2, 34, 9]);
+      k.eye(30, 12, 2.4, -1).l(3, [36, 19, 41, 19], 1).r(3, 41, 17, 1, 1);
+      k.l(0, [6, 10, 10, 13, 8, 15, 12, 18], 1).l(0, [12, 30, 15, 27, 14, 25], 1).l(2, [24, 30, 26, 27, 25, 25], 1);
+    } else {
+      k.l(1, [8, 42, 16, 46, 26, 42, 30, 34, 26, 24, 20, 18], 7).p(2, [4, 38, 1, 34, 1, 46, 6, 44]);
+      k.p(2, [28, 30, 34, 27, 32, 35]).e(1, 18, 14, 9, 8).p(2, [14, 8, 18, 1, 22, 8]);
+      k.l(2, [12, 42, 16, 44], 1).l(2, [24, 38, 27, 34], 1);
+    }
+  },
+  tempeel: function(k, back){
+    if (!back){
+      k.l(1, [44, 44, 34, 46, 22, 42, 16, 32, 20, 22, 28, 16], 8).l(0, [42, 45, 34, 45, 24, 41], 1.5);
+      k.p(2, [43, 40, 48, 34, 48, 48, 40, 46]);
+      k.p(2, [16, 28, 10, 22, 17, 24, 12, 16, 20, 20, 18, 12, 24, 18]);                                            // crest of fins down the back
+      k.e(1, 32, 12, 10, 8, -.25).e(1, 41, 15, 5, 4).p(2, [26, 6, 28, 0, 32, 5]).p(2, [31, 5, 36, 0, 37, 6]);
+      k.l(2, [40, 19, 46, 24, 47, 30], 1).l(2, [38, 19, 42, 26], 1);                                              // whiskers
+      k.eye(31, 10, 2.6, -1).l(3, [37, 16, 45, 16], 1).r(3, 44, 13, 1, 1);
+      k.l(0, [2, 6, 6, 9, 4, 11, 8, 14], 1).l(0, [6, 38, 9, 35, 8, 33, 11, 30], 1).l(2, [20, 36, 22, 32, 21, 28], 1).l(2, [28, 42, 31, 38], 1);
+    } else {
+      k.l(1, [6, 44, 18, 47, 28, 42, 32, 32, 28, 22, 22, 16], 9).p(2, [2, 40, 0, 32, 0, 48, 6, 46]);
+      k.p(2, [30, 28, 38, 24, 34, 30, 40, 18, 34, 20, 34, 12, 28, 18]);
+      k.e(1, 20, 12, 10, 8).p(2, [14, 6, 13, 0, 19, 4]).p(2, [22, 4, 27, 0, 28, 6]).l(2, [12, 16, 4, 22, 2, 28], 1);
+    }
+  },
+  barbfin: function(k, back){
+    if (!back){
+      for (var a = 0; a < 14; a++){ var t = a / 14 * Math.PI * 2, cx = 22 + Math.cos(t) * 14, cy = 25 + Math.sin(t) * 13;
+        k.p(2, [cx - Math.sin(t) * 2, cy + Math.cos(t) * 2, 22 + Math.cos(t) * 20, 25 + Math.sin(t) * 19, cx + Math.sin(t) * 2, cy - Math.cos(t) * 2]); }
+      k.p(2, [34, 25, 46, 17, 44, 25, 46, 33]);                                                                    // tail
+      k.c(1, 22, 25, 14).e(0, 19, 31, 9, 6).l(2, [14, 18, 22, 15, 30, 18], 1);
+      k.p(1, [26, 28, 33, 32, 27, 34]).eye(15, 21, 3).eye(24, 21, 3).e(3, 13, 30, 2.4, 1.8);
+    } else {
+      for (var b2 = 0; b2 < 14; b2++){ var u = b2 / 14 * Math.PI * 2, x2 = 24 + Math.cos(u) * 15, y2 = 26 + Math.sin(u) * 14;
+        k.p(2, [x2 - Math.sin(u) * 2, y2 + Math.cos(u) * 2, 24 + Math.cos(u) * 21, 26 + Math.sin(u) * 20, x2 + Math.sin(u) * 2, y2 - Math.cos(u) * 2]); }
+      k.c(1, 24, 26, 15).l(2, [12, 22, 24, 18, 36, 22], 1).l(2, [14, 30, 24, 27, 34, 30], 1).p(1, [8, 30, 2, 38, 10, 36]).p(1, [40, 30, 46, 38, 38, 36]);
+    }
+  },
+  lumistar: function(k, back){
+    var star = function(cx, cy, R, r, rot){ var pts = []; for (var i = 0; i < 10; i++){ var t = rot + i * Math.PI / 5, rr = i % 2 ? r : R; pts.push(cx + Math.cos(t) * rr, cy + Math.sin(t) * rr); } return pts; };
+    if (!back){
+      k.c(0, 6, 8, 1.5).c(0, 42, 6, 1.2).c(0, 44, 40, 1.5).c(0, 4, 38, 1).l(0, [40, 12, 40, 18], 1).l(0, [37, 15, 43, 15], 1);
+      k.p(1, star(24, 26, 21, 9, -Math.PI / 2)).p(0, star(24, 26, 12, 6, -Math.PI / 2));
+      for (var i = 0; i < 5; i++){ var t = -Math.PI / 2 + i * 2 * Math.PI / 5; k.c(2, 24 + Math.cos(t) * 15, 26 + Math.sin(t) * 15, 1.4); }
+      k.eye(20, 25, 2.4).eye(28, 25, 2.4).l(3, [22, 30, 24, 31, 26, 30], 1);
+    } else {
+      k.p(1, star(24, 26, 22, 10, -Math.PI / 2)).p(2, star(24, 26, 9, 5, -Math.PI / 2));
+      for (var j = 0; j < 5; j++){ var u = -Math.PI / 2 + j * 2 * Math.PI / 5; k.l(2, [24, 26, 24 + Math.cos(u) * 17, 26 + Math.sin(u) * 17], 1); }
+      k.c(0, 6, 6, 1.5).c(0, 42, 8, 1.2);
+    }
+  },
+  sandsnap: function(k, back){
+    if (!back){
+      k.e(1, 24, 41, 22, 7).c(2, 8, 41, 1.5).c(2, 38, 43, 1.5).c(2, 30, 39, 1.2).c(0, 16, 38, 1.5).c(0, 42, 38, 1);            // sand mound
+      k.e(2, 24, 30, 13, 10).p(2, [12, 24, 16, 12, 22, 20, 28, 10, 34, 20, 38, 14, 36, 28]);                      // armoured head
+      k.p(1, [12, 28, 2, 18, 4, 14, 10, 18, 16, 26]).p(1, [36, 28, 46, 18, 44, 14, 38, 18, 32, 26]);              // mandibles
+      k.p(0, [6, 18, 8, 22, 9, 19]).p(0, [42, 18, 40, 22, 39, 19]).l(3, [14, 24, 10, 20], 1).l(3, [34, 24, 38, 20], 1);
+      k.c(0, 19, 26, 3).c(0, 29, 26, 3).c(3, 19, 26, 1.8).c(3, 29, 26, 1.8).r(0, 18, 25, 1, 1).r(0, 28, 25, 1, 1);
+      k.p(3, [18, 33, 30, 33, 24, 37]).p(0, [20, 33, 22, 33, 21, 35]).p(0, [26, 33, 28, 33, 27, 35]);
+    } else {
+      k.e(1, 24, 41, 23, 7).c(2, 10, 40, 1.5).c(2, 36, 42, 1.5).c(0, 18, 39, 1.5);
+      k.e(2, 24, 30, 15, 11).p(2, [10, 26, 14, 10, 20, 18, 24, 6, 28, 18, 34, 10, 38, 26]).l(1, [16, 30, 24, 26, 32, 30], 1);
+      k.p(1, [10, 30, 0, 22, 2, 16, 12, 24]).p(1, [38, 30, 48, 22, 46, 16, 36, 24]);
+    }
   }
 };
 var monCache = {};
@@ -1754,7 +2188,15 @@ var TRACKS = {
   harbor: {bpm: 112, lead: "F5:4 A5:2 C6:2 A5:4 F5:4 G5:4 A5:2 G5:2 F5:4 D5:4 C5:4 F5:2 A5:2 G5:4 E5:4 F5:12 r:4 A5:4 C6:2 D6:2 C6:4 A5:4 A#5:4 A5:2 G5:2 F5:4 D5:4 C5:4 E5:2 G5:2 A#5:4 G5:4 F5:12 r:4",
     harm: "A4:8 C5:8 A#4:8 A4:8 A4:8 C5:8 A4:16 C5:8 F5:8 D5:8 A#4:8 A4:8 A#4:8 A4:16",
     bass: "F2:4 C3:4 F2:4 C3:4 A#2:4 F3:4 A#2:4 F3:4 C3:4 G3:4 C3:4 G3:4 F2:4 C3:4 F2:4 C3:4 F2:4 C3:4 F2:4 C3:4 A#2:4 F3:4 A#2:4 F3:4 C3:4 G3:4 C3:4 G3:4 F2:4 C3:4 F2:8",
-    drum: "k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4"}
+    drum: "k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4 k:4 h:4 s:4 h:4"},
+  isle: {bpm: 124, lead: "E5:3 G5:3 C6:2 B5:2 G5:2 E5:4 F5:3 A5:3 D6:2 C6:2 A5:2 F5:4 G5:3 B5:3 D6:2 C6:2 B5:2 G5:2 E5:2 D5:2 E5:2 F5:2 G5:2 C5:8 E5:3 G5:3 C6:2 D6:2 E6:2 C6:4 A5:3 C6:3 F6:2 E6:2 D6:2 C6:4 B5:3 G5:3 A5:2 B5:2 D6:2 B5:4 C6:6 G5:2 E5:4 r:4",
+    harm: "r:2 E4:2 r:2 G4:2 r:2 E4:2 r:2 G4:2 r:2 F4:2 r:2 A4:2 r:2 F4:2 r:2 A4:2 r:2 D4:2 r:2 G4:2 r:2 D4:2 r:2 G4:2 r:2 B3:2 r:2 F4:2 r:2 B3:2 r:2 F4:2 r:2 E4:2 r:2 G4:2 r:2 E4:2 r:2 G4:2 r:2 F4:2 r:2 A4:2 r:2 F4:2 r:2 A4:2 r:2 D4:2 r:2 G4:2 r:2 D4:2 r:2 G4:2 r:2 E4:2 r:2 G4:2 r:2 E4:2 r:2 G4:2",
+    bass: "C3:3 G2:3 C3:2 E3:3 G2:3 C3:2 F2:3 C3:3 F2:2 A2:3 C3:3 F2:2 G2:3 D3:3 G2:2 B2:3 D3:3 G2:2 G2:3 D3:3 G2:2 B2:3 D3:3 G2:2 C3:3 G2:3 C3:2 E3:3 G2:3 C3:2 F2:3 C3:3 F2:2 A2:3 C3:3 F2:2 G2:3 D3:3 G2:2 B2:3 D3:3 G2:2 C3:3 G2:3 C3:2 E3:3 G2:3 C3:2",
+    drum: "k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2 k:3 h:3 s:2"},
+  reef: {bpm: 136, lead: "D5:2 F#5:2 A5:2 D6:4 C#6:2 B5:2 A5:2 G5:2 B5:2 D6:2 G6:4 F#6:2 E6:2 D6:2 E6:4 D6:2 C#6:2 B5:4 A5:4 F#5:2 G5:2 A5:2 B5:2 C#6:4 A5:4 D6:2 C#6:2 B5:2 A5:2 F#5:4 D5:4 G5:2 A5:2 B5:2 D6:2 G6:4 E6:4 F#6:2 E6:2 D6:2 C#6:2 B5:2 A5:2 G5:2 E5:2 D5:8 r:8",
+    harm: "F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 G4:2 B4:2 G4:2 B4:2 G4:2 B4:2 G4:2 B4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 G4:2 B4:2 G4:2 B4:2 G4:2 B4:2 G4:2 B4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 E4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2 F#4:2 A4:2",
+    bass: "D3:4 A2:4 D3:4 A2:4 G2:4 D3:4 G2:4 D3:4 A2:4 E3:4 A2:4 E3:4 A2:4 E3:4 A2:4 E3:4 D3:4 A2:4 D3:4 A2:4 G2:4 D3:4 G2:4 D3:4 A2:4 E3:4 A2:4 E3:4 D3:4 A2:4 D3:4 A2:4",
+    drum: "k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2 k:2 h:2 s:2 h:2"}
 };
 var Music = (function(){
   var NAMES = {C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11};
@@ -2284,10 +2726,12 @@ function trainerCard(){
         txt("TAMER CARD", 40, 8, 3); drawTrainerPic("player", 104, 22);
         txt("NAME", 8, 22, 2); txt(SAVE.name.slice(0, 10), 8, 32, 3);
         txt("COINS", 8, 46, 2); txt(shortNum(BAL), 8, 56, 3);
-        txt("KINDEX/" + SAVE.caught.length + " OWN", 8, 74, 3); txt("SEEN/" + SAVE.seen.length, 8, 86, 3);
+        txt("OWN/" + SAVE.caught.length, 8, 74, 3); txt("SEEN/" + SAVE.seen.length, 8, 86, 3);
         txt("BEATEN/" + SAVE.beaten.length, 8, 98, 3);
         txt("PRIZES TODAY", 8, 114, 3); var t = (SAVE.today || 0) + "/" + (SAVE.daily_cap || 3000); txt(t, 152 - t.length * 8, 126, 3);
-        if (SAVE.beaten.indexOf("warden1") >= 0){ g.drawImage(ART.sigil_stone, 121, 76); txt("SIGIL", 108, 92, 2); }
+        var sig = [["warden1", "sigil_stone"], ["warden2", "sigil_tide"]].filter(function(x){ return SAVE.beaten.indexOf(x[0]) >= 0; });
+        sig.forEach(function(x, i){ g.drawImage(ART[x[1]], sig.length > 1 ? 112 + i * 22 : 121, 76); });
+        if (sig.length) txt(sig.length > 1 ? "SIGILS" : "SIGIL", 108, 92, 2);
       }};
     UI.push(L);
   });

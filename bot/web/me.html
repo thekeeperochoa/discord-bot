@@ -566,7 +566,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
      played: function(s){ return s && s.played; }},
     {id: "wildkin", href: "/games/wildkin", name: "Wildkin", emoji: "🌿", acc: "#88C070", acc2: "#E0F8D0", badge: "UPDATED",
      cats: ["story", "strategy", "free"], tags: ["story", "rpg", "adventure"],
-     blurb: "A pocket creature-catching adventure. Phase 2 is out: the Stone Arena, Granite Pass and the sea town of Saltmere.",
+     blurb: "A pocket creature-catching adventure. Phase 3 is out: sail to the Sea Isles, wade the shallows and take down the Drowned Hand.",
      stat: function(s){ return s && s.started ? "<b>" + n(s.caught) + " of " + n(s.total) + "</b> kin caught" + (s.lead ? " · " + esc(s.lead.name) + " Lv" + s.lead.lvl : "") + " · " + plural(s.beaten, "trainer") + " beaten" : "Pick a starter and head into the tall grass."; },
      played: function(s){ return s && s.started; }},
     {id: "nightrun", href: "/games/nightrun", name: "Night Run", emoji: "🌙", acc: "#8B5CFF", acc2: "#FF3D9A",
@@ -611,7 +611,7 @@ code{font-family:inherit;color:var(--gold-ink);background:rgba(184,146,58,.12);p
   ];
   var SPOTLIGHT = [
     {id: "paintball", kicker: "New · Multiplayer", title: "PAINTBALL", text: "Hide, aim, splat. Play the bot or put coins on a duel with a friend: winner takes the pot.", cta: "Play now", alt: ["Challenge a friend", "/games/paintball"]},
-    {id: "wildkin", kicker: "Phase 2 is live", title: "WILDKIN", text: "Earn the Stone Sigil, cross Granite Pass and reach the sea town of Saltmere.", cta: "Continue the adventure"},
+    {id: "wildkin", kicker: "Phase 3 is live", title: "WILDKIN", text: "Take the ferry to the Sea Isles, wade the shallows for ten new kin and win the Tide Sigil.", cta: "Set sail"},
     {id: "reels", kicker: "Casino", title: "WOLF'S FORTUNE", text: "Wild wolves, tripled free spins and a full-moon jackpot. Feeling lucky?", cta: "Spin the reels"}
   ];
 
