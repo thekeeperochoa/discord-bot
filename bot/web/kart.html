@@ -1480,222 +1480,507 @@ UI.how = function(){
   $("back").onclick = function(){ UI.home(); };
 };
 
-// ── the racers: cel-shaded, big-headed cartoon animals in suits ─────────────
-// Toon materials with a three-step ramp plus inked outlines (back-face shells) give
-// the chunky, readable look; every racer has its own silhouette, face and accessories.
-var CHAR_STYLE = {
-  //        fur        light fur   suit       shirt      tie
-  wolf:     ["#8E96A6", "#EEF1F6", "#22305A", "#F7F7F7", "#D23A32"],
-  bull:     ["#8B5228", "#F0C79A", "#2E2E38", "#F7F7F7", "#2F6FD6"],
-  bear:     ["#7B5232", "#E3BC8A", "#5A3E28", "#F4EEDC", "#2E8B57"],
-  pig:      ["#F7A8C0", "#FFD0DE", "#6A3FA0", "#FFFFFF", "#FF5C8A"],
-  fox:      ["#F07A24", "#FFF6EA", "#24573A", "#F7F7F7", "#F2C230"],
-  owl:      ["#9B7A50", "#F0DFBF", "#8C7A55", "#F7F7F7", "#3B3B9A"],
-  ape:      ["#3F3E4A", "#D7B392", "#141418", "#F7F7F7", "#7FE3F2"],
-  shark:    ["#6F8DAA", "#F2F6FA", "#3E4654", "#F7F7F7", "#C0132E"],
-  whale:    ["#4A82CF", "#E3F1FC", "#F1F4F8", "#DCE6F2", "#E8443A"],
-  goldbull: ["#D9A21E", "#FFE08A", "#141414", "#F7F7F7", "#D9A21E"]
-};
-var TOON_RAMP = null, INK = null;
+// ── the racers: cel-shaded cartoon animals in suits ─────────────────────────────
+// Toon materials (three-step ramp) with inked outlines (back-face shells) give the chunky
+// cartoon look. Face parts are pinned onto the head's surface so nothing floats or pokes
+// through, every racer has details that read from the chase camera (tails, fins, hats,
+// capes), and each driver is baked into a handful of merged meshes so eight stay cheap.
+var TOON_RAMP = null, INK = null, MATS = {}, TEXS = {}, GEO = {};
 function toonRamp(){
   if (TOON_RAMP) return TOON_RAMP;
-  TOON_RAMP = new THREE.DataTexture(new Uint8Array([84, 84, 84, 158, 158, 158, 218, 218, 218]), 3, 1, THREE.RGBFormat);
+  TOON_RAMP = new THREE.DataTexture(new Uint8Array([120, 120, 120, 190, 190, 190, 255, 255, 255]), 3, 1, THREE.RGBFormat);
   TOON_RAMP.minFilter = TOON_RAMP.magFilter = THREE.NearestFilter; TOON_RAMP.generateMipmaps = false; TOON_RAMP.needsUpdate = true;
   return TOON_RAMP;
 }
-function toon(color, o){ return new THREE.MeshToonMaterial(Object.assign({color: color, gradientMap: toonRamp()}, o || {})); }
-function ink(){ return INK || (INK = new THREE.MeshBasicMaterial({color: "#1B1226", side: THREE.BackSide})); }
+// colours are written in sRGB; the renderer outputs sRGB, so convert them to linear first
+function lin(c){ return new THREE.Color(c).convertSRGBToLinear(); }
+function shade(hex, k){ var c = new THREE.Color(hex); c.r *= k; c.g *= k; c.b *= k; return "#" + c.getHexString(); }
+function stripeTex(hex){
+  if (TEXS[hex]) return TEXS[hex];
+  var c = cnv(64, 64, function(g, w, h){ g.fillStyle = hex; g.fillRect(0, 0, w, h); g.fillStyle = "rgba(255,255,255,.22)"; for (var x = 0; x < w; x += 8) g.fillRect(x, 0, 2, h); });
+  var t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(4, 1);
+  return (TEXS[hex] = t);
+}
+// o: em (emissive), op (opacity), off (pull toward the camera so stacked face parts never z-fight), ds (double sided), tex (pinstripes in this colour)
+function toon(color, o){
+  o = o || {}; var key = "t" + color + "|" + (o.em || "") + "|" + (o.op || "") + "|" + (o.off || "") + "|" + (o.ds ? 1 : "") + "|" + (o.tex || "");
+  if (MATS[key]) return MATS[key];
+  var p = {color: o.tex ? new THREE.Color(1, 1, 1) : lin(color), gradientMap: toonRamp()};
+  if (o.tex) p.map = stripeTex(o.tex);
+  if (o.em) p.emissive = lin(o.em);
+  if (o.op){ p.transparent = true; p.opacity = o.op; p.depthWrite = false; }
+  if (o.off){ p.polygonOffset = true; p.polygonOffsetFactor = -o.off; p.polygonOffsetUnits = -o.off * 4; }
+  if (o.ds) p.side = THREE.DoubleSide;
+  return (MATS[key] = new THREE.MeshToonMaterial(p));
+}
+function flat(color, off){ var key = "f" + color + (off || 0); return MATS[key] || (MATS[key] = new THREE.MeshBasicMaterial({color: lin(color), polygonOffset: !!off, polygonOffsetFactor: -(off || 0), polygonOffsetUnits: -(off || 0) * 4})); }
+function gem(){ return MATS.gem || (MATS.gem = new THREE.MeshPhongMaterial({color: lin("#B8F7FF"), shininess: 160, specular: new THREE.Color(1, 1, 1), emissive: lin("#2A8A98")})); }
+function ink(){ return INK || (INK = new THREE.MeshBasicMaterial({color: lin("#1B1226"), side: THREE.BackSide})); }
 // a shape, optionally with an ink outline shell around it
 function S(parent, geo, mat, p, s, r, outline){
+  if (s){ var big = Math.max(s[0], s[1], s[2]); if (geo === GEO.sph && big < .1) geo = big < .045 ? GEO.tiny : GEO.lo; else if (geo === GEO.lo && big < .045) geo = GEO.tiny; if (geo === GEO.cone && big < .1) geo = GEO.cone8; }
+  if (outline && s && Math.max(s[0], s[1], s[2]) < .025) outline = 0;
   var m = new THREE.Mesh(geo, mat);
   m.position.set(p[0], p[1], p[2]); if (s) m.scale.set(s[0], s[1], s[2]); if (r) m.rotation.set(r[0], r[1], r[2]);
   m.castShadow = !LOW; parent.add(m);
   if (outline){ var o = new THREE.Mesh(geo, ink()); o.scale.setScalar(1 + outline); m.add(o); }
   return m;
 }
-var GEO = {};
+// a mesh whose local y axis runs from `a` along direction `d` (unit) for `len`
+function along(parent, geo, mat, a, d, t0, len, rad, outline){
+  var m = S(parent, geo, mat, [a[0] + d[0] * (t0 + len / 2), a[1] + d[1] * (t0 + len / 2), a[2] + d[2] * (t0 + len / 2)], [rad, len, rad], null, outline);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(d[0], d[1], d[2]).normalize()); return m;
+}
+// point an object's local x and y axes along two world directions
+function orient(m, X, Y){
+  var x = new THREE.Vector3(X[0], X[1], X[2]).normalize(), y = new THREE.Vector3(Y[0], Y[1], Y[2]).normalize(), z = new THREE.Vector3().crossVectors(x, y).normalize();
+  y.crossVectors(z, x); m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z)); return m;
+}
+// a tube along a curve, with its own (properly offset) outline tube
+function tube(parent, pts, r, mat, ol){
+  var c = new THREE.CatmullRomCurve3(pts.map(function(p){ return new THREE.Vector3(p[0], p[1], p[2]); }));
+  var m = new THREE.Mesh(new THREE.TubeGeometry(c, 14, r, 7), mat); m.castShadow = !LOW; parent.add(m);
+  if (ol) parent.add(new THREE.Mesh(new THREE.TubeGeometry(c, 14, r + ol, 7), ink()));
+  return m;
+}
+function finGeo(){
+  var s = new THREE.Shape(); s.moveTo(-.5, 0); s.quadraticCurveTo(-.15, .35, .3, 1); s.quadraticCurveTo(.22, .45, .5, 0); s.lineTo(-.5, 0);
+  var g = new THREE.ExtrudeGeometry(s, {depth: .1, bevelEnabled: true, bevelThickness: .06, bevelSize: .05, bevelSegments: 2, curveSegments: 10}); g.translate(0, 0, -.05); return g;
+}
 function G_(){
   if (GEO.sph) return GEO;
-  GEO.sph = new THREE.SphereGeometry(1, 28, 20); GEO.lo = new THREE.SphereGeometry(1, 14, 10);
-  GEO.cone = new THREE.ConeGeometry(1, 1, 18); GEO.cyl = new THREE.CylinderGeometry(1, 1, 1, 20);
-  GEO.box = new THREE.BoxGeometry(1, 1, 1); GEO.smile = new THREE.TorusGeometry(1, .16, 8, 20, Math.PI);
-  GEO.ring = new THREE.TorusGeometry(1, .12, 8, 28); GEO.oct = new THREE.OctahedronGeometry(1);
+  GEO.sph = new THREE.SphereGeometry(1, 22, 15); GEO.lo = new THREE.SphereGeometry(1, 12, 8); GEO.tiny = new THREE.SphereGeometry(1, 8, 6); GEO.cone8 = new THREE.ConeGeometry(1, 1, 8);
+  GEO.hemi = new THREE.SphereGeometry(1, 28, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+  GEO.cone = new THREE.ConeGeometry(1, 1, 14); GEO.cone3 = new THREE.ConeGeometry(1, 1, 3); GEO.cyl = new THREE.CylinderGeometry(1, 1, 1, 20);
+  GEO.taper = new THREE.CylinderGeometry(1.08, 1, 1, 24); GEO.halfdisc = new THREE.CylinderGeometry(1, 1, 1, 20, 1, false, -Math.PI / 2, Math.PI);
+  GEO.box = new THREE.BoxGeometry(1, 1, 1); GEO.arc = new THREE.TorusGeometry(1, .16, 6, 14, Math.PI); GEO.halfring = new THREE.TorusGeometry(1, .22, 6, 16, Math.PI);
+  GEO.ring = new THREE.TorusGeometry(1, .12, 6, 22); GEO.oct = new THREE.OctahedronGeometry(1); GEO.fin = finGeo();
   return GEO;
 }
-// a big expressive cartoon eye looking forward; returns the group (used for blinking)
-function eye(H, x, y, z, w, h, opts){
-  opts = opts || {};
-  var g = new THREE.Group(); g.position.set(x, y, z); g.rotation.y = x * .9; H.add(g);
-  S(g, GEO.sph, toon("#FFFFFF"), [0, 0, 0], [w, h, w * .55], null, .08);
-  S(g, GEO.sph, toon(opts.iris || "#2A1A12"), [x > 0 ? -w * .12 : w * .12, -h * .08, w * .38], [w * .58, h * .62, w * .25]);
-  S(g, GEO.sph, new THREE.MeshBasicMaterial({color: "#0A0A10"}), [x > 0 ? -w * .14 : w * .14, -h * .1, w * .5], [w * .32, h * .36, w * .16]);
-  S(g, GEO.lo, new THREE.MeshBasicMaterial({color: "#FFFFFF"}), [x > 0 ? -w * .02 : w * .26, h * .22, w * .58], [w * .14, w * .14, w * .06]);
-  if (opts.lid){ S(g, GEO.sph, toon(opts.lid), [0, h * .42, w * .08], [w * 1.08, h * .62, w * .62], null, .06); }
-  if (opts.lashes) [-1, 0, 1].forEach(function(i){ S(g, GEO.box, toon("#1B1226"), [(x > 0 ? 1 : -1) * w * (.55 + i * .2), h * (.82 - Math.abs(i) * .12), w * .3], [.012, .07, .01], [0, 0, (x > 0 ? -1 : 1) * (.6 + i * .35)]); });
-  return g;
+// ── placing things on a surface ──
+// R = [rx, ry, rz, cx, cy, cz]: an ellipsoid. (u, v) = yaw from the front (+ toward +x) and pitch up.
+// Returns a group sitting on the surface with +z along the normal and +y pointing "up the surface".
+var _UP = new THREE.Vector3(0, 1, 0);
+function pin(par, R, u, v, out){
+  var cv = Math.cos(v), p = new THREE.Vector3(R[0] * Math.sin(u) * cv, R[1] * Math.sin(v), R[2] * Math.cos(u) * cv);
+  var n = new THREE.Vector3(p.x / (R[0] * R[0]), p.y / (R[1] * R[1]), p.z / (R[2] * R[2])).normalize();
+  var x = new THREE.Vector3().crossVectors(_UP, n); if (x.lengthSq() < 1e-6) x.set(1, 0, 0); x.normalize();
+  var y = new THREE.Vector3().crossVectors(n, x).normalize();
+  var g = new THREE.Group(); g.position.set(p.x + (R[3] || 0), p.y + (R[4] || 0), p.z + (R[5] || 0)).addScaledVector(n, out || 0);
+  g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, n)); par.add(g); return g;
 }
-function brow(H, x, y, z, ang, w, color){ return S(H, GEO.box, toon(color || "#2A1A12"), [x, y, z], [w || .12, .028, .03], [0, x * .9, ang], .1); }
-function mouth(H, y, z, w, color, frown){ var m = S(H, GEO.smile, toon(color || "#3A1420"), [0, y, z], [w, w, w], [0, 0, frown ? 0 : Math.PI]); return m; }
+// the outermost point among several ellipsoids along a ray from the head centre (for faces built from parts)
+function hitE(R, d){
+  var ox = -(R[3] || 0) / R[0], oy = -(R[4] || 0) / R[1], oz = -(R[5] || 0) / R[2], dx = d.x / R[0], dy = d.y / R[1], dz = d.z / R[2];
+  var a = dx * dx + dy * dy + dz * dz, b = 2 * (ox * dx + oy * dy + oz * dz), c = ox * ox + oy * oy + oz * oz - 1, q = b * b - 4 * a * c;
+  return q < 0 ? -1 : (-b + Math.sqrt(q)) / (2 * a);
+}
+function spt(shapes, u, v){
+  var cv = Math.cos(v), d = new THREE.Vector3(Math.sin(u) * cv, Math.sin(v), Math.cos(u) * cv), best = -1, bR = null;
+  shapes.forEach(function(R){ var t = hitE(R, d); if (t > best){ best = t; bR = R; } });
+  var p = d.multiplyScalar(best), n = new THREE.Vector3((p.x - (bR[3] || 0)) / (bR[0] * bR[0]), (p.y - (bR[4] || 0)) / (bR[1] * bR[1]), (p.z - (bR[5] || 0)) / (bR[2] * bR[2])).normalize();
+  return {p: p, n: n};
+}
+function pinS(par, shapes, u, v, out){
+  var q = spt(shapes, u, v), x = new THREE.Vector3().crossVectors(_UP, q.n); if (x.lengthSq() < 1e-6) x.set(1, 0, 0); x.normalize();
+  var y = new THREE.Vector3().crossVectors(q.n, x).normalize(), g = new THREE.Group();
+  g.position.copy(q.p).addScaledVector(q.n, out || 0); g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, q.n)); par.add(g); return g;
+}
+// a line drawn along the surface (mouths), v given as a function of u
+function surfLine(par, shapes, u0, u1, vf, out, r, mat, ol){
+  var pts = [];
+  for (var i = 0; i <= 14; i++){ var u = u0 + (u1 - u0) * i / 14, q = spt(shapes, u, vf(u)); q.p.addScaledVector(q.n, out); pts.push([q.p.x, q.p.y, q.p.z]); }
+  return tube(par, pts, r, mat, ol);
+}
+// a tuft / spike growing out of the surface; tilt = [toward -y, toward +x]
+function spike(par, R, u, v, len, rad, mat, tilt, ol){
+  var p = pin(par, R, u, v, 0); if (tilt){ p.rotateX(tilt[0] || 0); p.rotateY(tilt[1] || 0); }
+  return S(p, GEO.cone, mat, [0, 0, len * .3], [rad, len, rad * .8], [Math.PI / 2, 0, 0], ol == null ? .08 : ol);
+}
+// a pair of big cartoon eyes (open set + a closed "blink" set)
+function eyes(H, R, u, v, w, h, o){
+  o = o || {};
+  [-1, 1].forEach(function(s){
+    var e = pin(H.userData.open, R, s * u, v, -w * .1);
+    S(e, GEO.sph, toon("#FFFFFF"), [0, 0, 0], [w, h, w * .5], null, .09);
+    S(e, GEO.sph, toon(o.iris || "#3A2414", {off: 1}), [-s * w * .14, -h * .1, w * .36], [w * .6, h * .64, w * .2]);
+    S(e, GEO.sph, flat("#0A0A12", 2), [-s * w * .17, -h * .14, w * .47], [w * .34, h * .38, w * .12]);
+    S(e, GEO.lo, flat("#FFFFFF", 3), [-s * w * .17 + w * .14, h * .14, w * .56], [w * .15, w * .15, w * .05]);
+    S(e, GEO.lo, flat("#FFFFFF", 3), [-s * w * .17 - w * .1, -h * .32, w * .55], [w * .07, w * .07, w * .04]);
+    if (o.lid) S(e, GEO.sph, toon(o.lid, {off: 1}), [0, h * .5, w * .1], [w * 1.12, h * .62, w * .58], [0, 0, s * (o.tilt || 0)], .07);
+    if (o.lashes) [-1, 0, 1].forEach(function(i){ S(e, GEO.box, toon("#1B1226"), [s * w * (.62 + i * .2), h * (.84 - Math.abs(i) * .14), w * .2], [.014, .075, .012], [0, 0, -s * (.65 + i * .35)]); });
+    var c = pin(H.userData.shut, R, s * u, v, 0);
+    S(c, GEO.arc, toon("#1B1226"), [0, h * .1, .005], [w * .85, w * .7, w * .5], [0, 0, Math.PI]);
+  });
+}
+function brows(H, R, u, v, w, ang, color, thick){
+  [-1, 1].forEach(function(s){ var b = pin(H, R, s * u, v, .008); S(b, GEO.box, toon(color || "#2A1A12"), [0, 0, 0], [w, thick || .03, .03], [0, 0, s * ang], .12); });
+}
+function smile(H, R, u, v, w, color, rot){ var m = pin(H, R, u, v, .004); S(m, GEO.arc, toon(color || "#3A1420"), [0, 0, 0], [w, w * .9, w * .6], [0, 0, Math.PI + (rot || 0)]); return m; }
+function blush(H, R, u, v, color){ [-1, 1].forEach(function(s){ var b = pin(H, R, s * u, v, .002); S(b, GEO.lo, toon(color || "#FF8FA6", {op: .7}), [0, 0, 0], [.07, .045, .015]); }); }
+// pointed ear: outer cone, coloured inside, optional dark tip
+function pointyEar(H, s, x, y, z, w, h, tilt, outer, inner, tip){
+  var e = new THREE.Group(); e.position.set(s * x, y, z); e.rotation.set(-.12, s * .3, -s * tilt); H.add(e);
+  S(e, GEO.cone, outer, [0, h / 2, 0], [w, h, w * .55], null, .07);
+  S(e, GEO.cone, inner, [0, h * .42, w * .42], [w * .55, h * .7, w * .2]);
+  if (tip) S(e, GEO.cone, tip, [0, h * .85, 0], [w * .33, h * .3, w * .2], null, .1);
+  return e;
+}
+function roundEar(H, s, p, r, outer, inner, rz){
+  var e = new THREE.Group(); e.position.set(s * p[0], p[1], p[2]); e.rotation.z = -s * (rz || 0); H.add(e);
+  S(e, GEO.sph, outer, [0, 0, 0], [r, r, r * .6], null, .08); S(e, GEO.sph, inner, [0, 0, r * .3], [r * .6, r * .6, r * .4]);
+}
+// a swinging tail behind the seat (wagged in animateDriver)
+function tailGroup(g, H, p, rx, axis){
+  var t = new THREE.Group(); t.position.set(p[0], p[1], p[2]); t.rotation.x = rx; t.userData.live = true; g.add(t);
+  H.userData.tail = t; H.userData.wag = axis || "z"; H.userData.tailBase = 0; return t;
+}
+
+// ── shared body: jacket, shirt, neckwear, arms on the wheel, back details ──
+function torso(g, o){
+  var suit = o.stripe ? toon("", {tex: o.suit}) : toon(o.suit), lapel = toon(o.lapel || o.suit), shirt = toon(o.shirt || "#F4F4F4"), tie = toon(o.tieC || "#D23A32"),
+      glove = toon("#FFFFFF"), gold = toon("#F5C431", {em: "#4A3000"}), dark = toon(shade(o.suit, .62));
+  var TR = [.36, .34, .27, 0, 0, -.02];
+  S(g, GEO.sph, suit, [0, 0, -.02], [.36, .34, .27], null, .05);
+  S(g, GEO.cone, shirt, [0, .1, .2], [.13, .3, .05], [Math.PI, 0, 0]);
+  [-1, 1].forEach(function(s){ S(g, GEO.box, lapel, [s * .1, .12, .23], [.09, .3, .03], [0, 0, s * .35]); });
+  // buttons (two rows on a double-breasted jacket)
+  (o.double ? [-.1, .1] : [0]).forEach(function(u){ [-.1, -.2].forEach(function(y){ var b = pin(g, TR, u, Math.asin(y / .34), 0); S(b, GEO.lo, o.double ? gold : toon("#141418"), [0, 0, 0], [.024, .024, .012]); }); });
+  if (o.square){ var q = pin(g, TR, .62, .32, 0); S(q, GEO.box, dark, [0, -.012, .002], [.075, .008, .01]); S(q, GEO.cone3, toon(o.square), [0, .018, 0], [.035, .05, .012]); }
+  if (o.tie === "tie"){ S(g, GEO.lo, tie, [0, .22, .25], [.045, .04, .03]); S(g, GEO.cone, tie, [0, .08, .26], [.055, .24, .02], [Math.PI, 0, 0]); S(g, GEO.box, gold, [0, .06, .277], [.05, .008, .006]); }
+  else if (o.tie === "bow"){ [-1, 1].forEach(function(s){ S(g, GEO.cone, tie, [s * .07, .22, .26], [.06, .09, .04], [0, 0, s * Math.PI / 2], .1); }); S(g, GEO.lo, tie, [0, .22, .27], [.035, .035, .03]); }
+  else if (o.tie === "ascot"){ S(g, GEO.sph, tie, [0, .16, .235], [.075, .1, .05], null, .08); [[.025, .2], [-.03, .15], [.02, .11]].forEach(function(d){ S(g, GEO.lo, toon(shade(o.tieC, .7), {off: 1}), [d[0], d[1], .283], [.012, .012, .006]); }); }
+  else if (o.tie === "kerchief"){ S(g, GEO.cone3, tie, [0, .12, .25], [.12, .2, .03], [Math.PI, 0, 0], .08); S(g, GEO.lo, tie, [0, .22, .26], [.045, .04, .035], null, .1); }
+  // collar at the back of the neck and the jacket's back seam (seen from the chase camera)
+  S(g, GEO.halfring, lapel, [0, .26, -.02], [.17, .17, .17], [-Math.PI / 2, 0, 0], .06);
+  var seam = pin(g, TR, Math.PI, -.25, 0); S(seam, GEO.box, dark, [0, 0, 0], [.012, .2, .01]);
+  [-1, 1].forEach(function(s){ var p = pin(g, TR, Math.PI + s * .5, -.55, 0); S(p, GEO.box, dark, [0, 0, 0], [.09, .01, .01], [0, 0, s * .15]); });
+  if (o.epaulettes) [-1, 1].forEach(function(s){
+    var e = new THREE.Group(); e.position.set(s * .27, .23, -.03); e.rotation.z = -s * .55; g.add(e);
+    S(e, GEO.cyl, gold, [0, 0, 0], [.1, .03, .1], null, .1);
+    for (var i = 0; i < 6; i++){ var a = (i / 5 - .5) * 2.4; S(e, GEO.cyl, gold, [s * Math.cos(a) * .085 + s * .01, -.04, Math.sin(a) * .085], [.012, .06, .012]); }
+  });
+  if (o.cape){
+    S(g, new THREE.CylinderGeometry(.3, .45, .58, 22, 1, true, Math.PI / 2, Math.PI), toon(o.cape, {ds: true}), [0, -.07, -.04], null, null, .03);
+    var er = toon("#FFFFFF"); S(g, new THREE.TorusGeometry(.2, .065, 10, 24), er, [0, .24, -.01], null, [Math.PI / 2, 0, 0], .06);
+    for (var k = 0; k < 8; k++){ var a2 = k / 8 * Math.PI * 2; S(g, GEO.lo, toon("#141414", {off: 1}), [Math.sin(a2) * .2, .29, -.01 + Math.cos(a2) * .2], [.015, .02, .015]); }
+  }
+  if (o.chain){
+    var ch = new THREE.Mesh(new THREE.TorusGeometry(.17, .018, 6, 28, Math.PI), gold); ch.position.set(0, .29, .1); ch.rotation.set(-1.15, 0, Math.PI); g.add(ch);
+    if (o.chain === "gem") S(g, GEO.oct, gem(), [0, .1, .27], [.065, .095, .045], null, .1);
+    else { S(g, GEO.cyl, gold, [0, .1, .27], [.065, .02, .065], [Math.PI / 2, 0, 0], .1); S(g, GEO.oct, toon("#1FAF5A", {em: "#0A3A1A", off: 1}), [0, .1, .285], [.028, .036, .012]); }
+  }
+  if (o.pearls) for (var p2 = 0; p2 < 11; p2++){ var t = (p2 / 10 - .5) * 2.4; S(g, GEO.lo, toon("#FFFFFF", {em: "#3A3440"}), [Math.sin(t) * .19, .3 - Math.cos(t) * .045, .13 + Math.cos(t) * .11], [.03, .03, .03], null, .12); }
+  // arms reaching forward to the wheel (hands on its rim), shirt cuffs, optional watch and rings
+  [-1, 1].forEach(function(s){
+    var a = [s * .3, .13, .02], d = [-s * .224, -.28, .933];
+    along(g, GEO.cyl, suit, a, d, 0, .48, .075, .08);
+    along(g, GEO.cyl, shirt, a, d, .44, .05, .062);
+    if (o.watch && s > 0) along(g, GEO.cyl, gold, a, d, .4, .03, .068);
+    var hp = [a[0] + d[0] * .55, a[1] + d[1] * .55, a[2] + d[2] * .55];
+    S(g, GEO.sph, glove, hp, [.085, .08, .09], null, .1);
+    S(g, GEO.box, toon("#D8D8E2"), [hp[0], hp[1] + .03, hp[2] - .02], [.06, .006, .05], [0, 0, 0]);
+    if (o.rings) S(g, GEO.oct, gem(), [hp[0] - s * .05, hp[1] + .05, hp[2] + .03], [.03, .04, .03], null, .12);
+  });
+}
+
+// ── the ten racers ──
+var KIT = {
+  wolf: {body: {suit: "#22306A", stripe: true, shirt: "#F4F4F4", tie: "tie", tieC: "#D7263D", watch: true, square: "#FFFFFF"}, head: function(H, g){
+    var fur = toon("#8C97AB"), light = toon("#EEF1F6"), dark = toon("#1B1226"), R = [.38, .35, .36];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    var MZ = [.19, .14, .2, 0, -.1, .25];
+    S(H, GEO.sph, light, [0, -.1, .25], [.19, .14, .2], null, .06);
+    [-1, 1].forEach(function(s){ S(H, GEO.sph, light, [s * .15, -.15, .19], [.13, .11, .13]); });
+    S(H, GEO.sph, dark, [0, -.035, .44], [.072, .052, .05], null, .1); S(H, GEO.lo, flat("#FFFFFF", 1), [-.022, -.015, .484], [.02, .013, .01]);
+    var sm = smile(H, MZ, .1, -.55, .055, "#3A1420", .3); S(sm, GEO.cone, toon("#FFFFFF"), [.035, -.035, .008], [.012, .03, .01], [0, 0, Math.PI]);
+    [-1, 1].forEach(function(s){
+      pointyEar(H, s, .2, .24, -.06, .13, .34, .34, fur, toon("#F2A3B3"));
+      spike(H, R, s * 1.38, -.32, .12, .06, fur, [.3, 0]); spike(H, R, s * 1.5, -.52, .1, .05, fur, [.3, 0]);
+    });
+    // swept-back hair on top, tufts at the nape
+    spike(H, R, 0, 1.0, .26, .075, fur, [-1.0, 0]); spike(H, R, -.3, .95, .22, .06, fur, [-.9, 0]); spike(H, R, .3, .95, .22, .06, fur, [-.9, 0]);
+    [-.35, 0, .35].forEach(function(u){ spike(H, R, Math.PI + u, -.35, .16, .08, fur, [1.1, 0]); });
+    eyes(H, R, .35, .2, .085, .1, {iris: "#F2B21F", lid: "#8C97AB", tilt: .18});
+    brows(H, R, .35, .47, .12, .3, "#3A3E4E", .032);
+    // aviator shades pushed up on the forehead
+    [-1, 1].forEach(function(s){ var l = pin(H, R, s * .3, .66, .01); S(l, GEO.sph, toon("#1E3C6E", {em: "#0A1A3A"}), [0, 0, 0], [.09, .06, .025], null, .12); S(l, GEO.lo, flat("#9FD8FF", 1), [s * .02 - .02, .02, .022], [.025, .012, .006]); });
+    var br = pin(H, R, 0, .7, .015); S(br, GEO.box, toon("#C9CED8"), [0, 0, 0], [.08, .012, .012]);
+    var tl = tailGroup(g, H, [.1, .0, -.3], -.6);
+    S(tl, GEO.sph, fur, [0, .13, 0], [.1, .17, .1], null, .07); S(tl, GEO.sph, fur, [0, .33, -.02], [.14, .18, .14], null, .06); S(tl, GEO.sph, light, [0, .5, -.03], [.11, .11, .11], null, .07);
+  }},
+  bull: {body: {suit: "#2E2E38", stripe: true, shirt: "#F4F4F4", tie: "tie", tieC: "#2B6CD4", watch: true, square: "#2B6CD4"}, head: function(H, g){ bullHead(H, g, false); }},
+  goldbull: {body: {suit: "#141414", shirt: "#F4F4F4", tie: "bow", tieC: "#F5C431", cape: "#B0172E", chain: "medal"}, head: function(H, g){ bullHead(H, g, true); }},
+  bear: {body: {suit: "#6B4A2E", shirt: "#F2EAD6", tie: "none", square: "#C8102E"}, head: function(H, g){
+    var fur = toon("#7E522F"), light = toon("#E2B887"), dark = toon("#2A1810"), R = [.41, .38, .38];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    [-1, 1].forEach(function(s){ roundEar(H, s, [.29, .3, -.04], .13, fur, light); });
+    var MZ = [.19, .14, .15, 0, -.1, .3];
+    S(H, GEO.sph, light, [0, -.1, .3], [.19, .14, .15], null, .06);
+    S(H, GEO.sph, dark, [0, -.035, .43], [.078, .056, .046], null, .1); S(H, GEO.lo, flat("#FFFFFF", 1), [-.025, -.015, .472], [.022, .013, .01]);
+    var nl = pin(H, MZ, 0, -.05, 0); S(nl, GEO.box, dark, [0, -.03, 0], [.008, .05, .01]);
+    smile(H, MZ, -.045, -.55, .035, "#3A1420"); smile(H, MZ, .045, -.55, .035, "#3A1420");
+    eyes(H, R, .36, .2, .072, .088, {iris: "#4A2A14"});
+    brows(H, R, .36, .45, .1, -.22, "#3A2414");
+    blush(H, R, .66, -.12);
+    // a striped knitted scarf with its ends hanging down the back
+    var cols = ["#C8102E", "#F2EAD6"];
+    for (var i = 0; i < 10; i++) S(g, new THREE.TorusGeometry(.2, .065, 8, 6, Math.PI / 5), toon(cols[i % 2]), [0, .25, -.01], null, [Math.PI / 2, 0, i * Math.PI / 5], i % 2 ? null : .05);
+    [-1, 1].forEach(function(s){ for (var j = 0; j < 3; j++){ var sp = pin(g, [.36, .34, .27, 0, 0, -.02], Math.PI + s * .2, Math.asin((.15 - j * .085) / .34), .02); S(sp, GEO.box, toon(cols[j % 2]), [0, 0, 0], [.085, .085, .03], [0, 0, s * .12], .08); } });
+    var tl = tailGroup(g, H, [0, -.12, -.27], -.4); S(tl, GEO.sph, fur, [0, .05, 0], [.075, .075, .075], null, .1);
+  }},
+  pig: {body: {suit: "#8457C9", shirt: "#FFE3EC", tie: "none", pearls: true, square: "#FF5C8A"}, head: function(H, g){
+    var fur = toon("#F6A1BC"), light = toon("#FFC8D8"), deep = toon("#D9668A"), R = [.4, .37, .36];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    S(H, GEO.cyl, light, [0, -.07, .36], [.13, .1, .1], [Math.PI / 2, 0, 0], .08);
+    [-1, 1].forEach(function(s){
+      S(H, GEO.sph, toon("#A8486A", {off: 1}), [s * .045, -.07, .411], [.025, .036, .008]);
+      var e = new THREE.Group(); e.position.set(s * .25, .27, .04); e.rotation.set(.55, -s * .2, -s * .55); H.add(e);
+      S(e, GEO.sph, fur, [0, .1, 0], [.1, .14, .035], null, .08); S(e, GEO.sph, deep, [0, .095, .02], [.065, .1, .02]);
+      S(e, GEO.cone, fur, [0, .2, .03], [.06, .1, .03], [.7, 0, 0], .08);
+      S(H, GEO.lo, toon("#FFFFFF", {em: "#3A3440"}), [s * .37, -.2, .02], [.028, .028, .028], null, .12);
+    });
+    eyes(H, R, .35, .2, .08, .095, {iris: "#3A7AE0", lashes: true});
+    brows(H, R, .35, .47, .08, -.15, "#A8486A", .022);
+    smile(H, R, 0, -.5, .055, "#D0306A");
+    blush(H, R, .66, -.15, "#FF6F96");
+    var bow = new THREE.Group(); bow.position.set(.2, .32, .1); bow.rotation.z = -.4; H.add(bow);
+    [-1, 1].forEach(function(s){ S(bow, GEO.cone, toon("#FF3D7F"), [s * .08, 0, 0], [.07, .12, .05], [0, 0, s * Math.PI / 2], .1); });
+    S(bow, GEO.lo, toon("#FF3D7F"), [0, 0, 0], [.04, .04, .04], null, .1);
+    [0, 1, 2].forEach(function(i){ S(bow, GEO.lo, toon("#FFFFFF", {off: 1}), [i - 1 ? (i - 1) * .1 : .0, (i % 2) * .03 - .01, .045], [.01, .01, .006]); });
+    var curl = pin(H, R, -.12, .95, 0); S(curl, GEO.ring, fur, [0, 0, .02], [.05, .05, .05], [0, .6, 0], .1);
+    // a curly tail
+    var tl = tailGroup(g, H, [0, -.08, -.28], -.3, "y"), pts = [];
+    for (var k = 0; k <= 24; k++){ var a = k / 24 * Math.PI * 3.2; pts.push([Math.cos(a) * .07, .03 + k * .009, -Math.sin(a) * .07 - k * .004]); }
+    tube(tl, pts, .022, fur, .012);
+  }},
+  fox: {body: {suit: "#1E6B45", shirt: "#F7F7F7", tie: "ascot", tieC: "#F2C230", square: "#F2C230"}, head: function(H, g){
+    var fur = toon("#EE6E1C"), light = toon("#FFF4E6"), dark = toon("#2A1A14"), R = [.37, .34, .34];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    [-1, 1].forEach(function(s){ S(H, GEO.sph, light, [s * .15, -.12, .2], [.15, .12, .14]); });
+    S(H, GEO.cone, light, [0, -.1, .34], [.15, .3, .12], [Math.PI / 2, 0, 0], .07);
+    S(H, GEO.sph, dark, [0, -.1, .5], [.05, .04, .035], null, .12); S(H, GEO.lo, flat("#FFFFFF", 1), [-.015, -.088, .53], [.014, .009, .006]);
+    var fm = smile(H, R, .1, -.6, .04, "#3A1420", .35);
+    [-1, 1].forEach(function(s){
+      pointyEar(H, s, .2, .24, -.05, .14, .42, .24, fur, light, dark);
+      spike(H, R, s * 1.3, -.4, .11, .06, light, [.35, 0]);
+    });
+    spike(H, R, 0, .95, .16, .05, fur, [-.9, 0]); spike(H, R, .22, .9, .13, .045, fur, [-.8, 0]);
+    eyes(H, R, .34, .17, .08, .086, {iris: "#2F9A42", lid: "#EE6E1C", tilt: .1});
+    var bl = pin(H, R, -.34, .43, .008); S(bl, GEO.box, toon("#3A1A0A"), [0, 0, 0], [.1, .028, .03], [0, 0, -.15], .12);
+    var bR = pin(H, R, .34, .47, .008); S(bR, GEO.box, toon("#3A1A0A"), [0, 0, 0], [.1, .028, .03], [0, 0, .4], .12);
+    // a gold monocle on a chain
+    var mo = pin(H, R, .34, .17, .03); S(mo, GEO.ring, toon("#F5C431", {em: "#4A3000"}), [0, 0, 0], [.1, .1, .1], null, .1);
+    S(mo, GEO.cyl, toon("#BFEAFF", {op: .35}), [0, 0, 0], [.095, .004, .095], [Math.PI / 2, 0, 0]);
+    tube(H, [[.17, -.02, .37], [.24, -.2, .34], [.2, -.36, .26], [.14, -.43, .23]], .006, toon("#F5C431", {em: "#4A3000"}));
+    // the big bushy tail with a white tip
+    var tl = tailGroup(g, H, [.14, -.02, -.3], -.45);
+    tl.rotation.set(-.45, .3, -.35); H.userData.tailBase = -.35;
+    S(tl, GEO.sph, fur, [0, .16, -.03], [.15, .26, .15], null, .06); S(tl, GEO.sph, fur, [0, .42, -.07], [.19, .22, .19], null, .06); S(tl, GEO.sph, light, [0, .63, -.09], [.14, .14, .14], null, .06);
+  }},
+  owl: {body: {suit: "#7C6A4A", stripe: true, shirt: "#F2E2C2", tie: "bow", tieC: "#4146B8", square: "#4146B8"}, head: function(H, g){
+    var fur = toon("#946F45"), light = toon("#F2E2C2"), deep = toon("#6E4F2C"), R = [.42, .4, .37, 0, -.02, 0];
+    S(H, GEO.sph, fur, [0, -.02, 0], [.42, .4, .37], null, .04);
+    var D = [];
+    [-1, 1].forEach(function(s){ D.push([.17, .19, .13, s * .14, .03, .24]); S(H, GEO.sph, light, [s * .14, .03, .24], [.17, .19, .13], null, .05); });
+    [-1, 1].forEach(function(s, i){
+      var e = pin(H.userData.open, D[i], 0, 0, -.012);
+      S(e, GEO.sph, toon("#FFFFFF"), [0, 0, 0], [.105, .105, .05], null, .08);
+      S(e, GEO.sph, toon("#F2A31F", {off: 1}), [-s * .012, -.006, .036], [.075, .075, .02]);
+      S(e, GEO.sph, flat("#0A0A12", 2), [-s * .016, -.01, .048], [.042, .045, .012]);
+      S(e, GEO.lo, flat("#FFFFFF", 3), [-s * .016 + .02, .022, .058], [.017, .017, .005]);
+      var c = pin(H.userData.shut, D[i], 0, 0, 0); S(c, GEO.arc, toon("#1B1226"), [0, .01, .005], [.08, .065, .04], [0, 0, Math.PI]);
+      // glasses: rim around the eye, arms back to the head
+      var gl = pin(H, D[i], 0, 0, .02); S(gl, GEO.ring, toon("#2A2A33"), [0, 0, 0], [.125, .125, .125], null);
+      var a0 = [s * .27, .05, .3], a1 = [s * .4, .06, .04], dd = [a1[0] - a0[0], a1[1] - a0[1], a1[2] - a0[2]], L = Math.hypot(dd[0], dd[1], dd[2]);
+      along(H, GEO.box, toon("#2A2A33"), a0, [dd[0] / L, dd[1] / L, dd[2] / L], 0, L, .012);
+      S(H, GEO.cone, fur, [s * .27, .36, -.02], [.08, .22, .05], [0, 0, -s * .5], .08); S(H, GEO.cone, deep, [s * .2, .36, .02], [.06, .16, .04], [0, 0, -s * .25], .08);
+      var b = pin(H, D[i], 0, .95, .005); S(b, GEO.box, toon("#5A3F22"), [0, 0, 0], [.13, .03, .03], [0, 0, s * .15], .12);
+    });
+    S(H, GEO.box, toon("#2A2A33"), [0, .05, .385], [.05, .014, .014]);
+    S(H, GEO.cone, toon("#F2A92B"), [0, -.11, .385], [.055, .14, .045], [Math.PI - .45, 0, 0], .1);
+    // feather scallops over the back of the head
+    var fd = toon("#84603A");
+    [[.45, 4], [.1, 5], [-.25, 4]].forEach(function(row){
+      for (var k = 0; k < row[1]; k++){ var u = Math.PI + (k - (row[1] - 1) / 2) * .36, p = pin(H, R, u, row[0], -.004); S(p, GEO.cone3, fd, [0, 0, 0], [.07, .1, .02], [0, 0, Math.PI]); }
+    });
+    // a pencil tucked by the right ear tuft
+    var pc = new THREE.Group(); pc.position.set(.33, .2, -.06); pc.rotation.set(.3, 0, -1.0); H.add(pc);
+    S(pc, GEO.cyl, toon("#F5C431"), [0, 0, 0], [.018, .22, .018], null, .12); S(pc, GEO.cyl, toon("#FF8FA6"), [0, .12, 0], [.019, .03, .019]);
+    S(pc, GEO.cone, toon("#F2D9B0"), [0, -.13, 0], [.018, .04, .018]);
+    var tl = tailGroup(g, H, [0, -.1, -.29], -1.1, "z");
+    [-1, 0, 1].forEach(function(i){ S(tl, GEO.sph, i ? fur : deep, [i * .06, .14, 0], [.05, .16, .02], [0, 0, -i * .35], .1); });
+  }},
+  ape: {body: {suit: "#16161C", shirt: "#F4F4F4", tie: "none", chain: "gem", rings: true}, head: function(H, g){
+    var fur = toon("#45434F"), light = toon("#D3A988"), deep = toon("#2C2A33"), R = [.4, .37, .36];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    var M = [];
+    [-1, 1].forEach(function(s){ M.push([.15, .15, .15, s * .11, .05, .22]); S(H, GEO.sph, light, [s * .11, .05, .22], [.15, .15, .15], null, .05); roundEar(H, s, [.4, 0, -.02], .1, light, toon("#B08468")); });
+    var MZ = [.24, .17, .17, 0, -.12, .25];
+    S(H, GEO.sph, light, [0, -.12, .25], [.24, .17, .17], null, .05);
+    S(H, GEO.sph, fur, [0, .15, .3], [.24, .05, .08], null, .06);
+    [-1, 1].forEach(function(s, i){
+      var e = pin(H.userData.open, M[i], 0, -.05, -.008);
+      S(e, GEO.sph, toon("#FFFFFF"), [0, 0, 0], [.065, .07, .033], null, .09);
+      S(e, GEO.sph, toon("#5A3212", {off: 1}), [-s * .008, -.008, .024], [.042, .046, .012]);
+      S(e, GEO.sph, flat("#0A0A12", 2), [-s * .01, -.01, .031], [.024, .027, .008]);
+      S(e, GEO.lo, flat("#FFFFFF", 3), [-s * .01 + .012, .014, .037], [.01, .01, .004]);
+      var c = pin(H.userData.shut, M[i], 0, -.05, 0); S(c, GEO.arc, toon("#1B1226"), [0, .005, .005], [.05, .04, .03], [0, 0, Math.PI]);
+      var n = pin(H, MZ, s * .16, .35, 0); S(n, GEO.sph, toon("#5A3A2A", {off: 1}), [0, 0, 0], [.026, .018, .008]);
+    });
+    // a big grin with a gold tooth
+    var m = pin(H, MZ, 0, -.3, -.01);
+    S(m, GEO.sph, toon("#5A1A22"), [0, 0, 0], [.12, .045, .03]);
+    S(m, GEO.box, toon("#FFFFFF", {off: 1}), [0, .016, .022], [.16, .024, .01]);
+    S(m, GEO.box, toon("#F5C431", {em: "#4A3000", off: 2}), [.035, .016, .024], [.024, .024, .01]);
+    // backwards snapback cap
+    var cap = new THREE.Group(); cap.position.set(0, .1, -.02); cap.rotation.x = -.35; H.add(cap);
+    var capC = toon("#18B5A8");
+    S(cap, GEO.hemi, capC, [0, 0, 0], [.41, .3, .38], null, .04);
+    S(cap, GEO.halfdisc, capC, [0, .005, -.33], [.24, .02, .26], [0, Math.PI, 0], .1);
+    S(cap, GEO.lo, capC, [0, .3, 0], [.04, .025, .04], null, .1);
+    var badge = pin(cap, [.41, .3, .38], Math.PI, .45, 0); S(badge, GEO.cyl, toon("#F5C431", {em: "#4A3000"}), [0, 0, 0], [.06, .012, .06], [Math.PI / 2, 0, 0], .12);
+    var strap = pin(cap, [.41, .3, .38], 0, .12, 0); S(strap, GEO.box, toon("#12938A"), [0, 0, 0], [.1, .025, .01]);
+  }},
+  shark: {body: {suit: "#3B4250", stripe: true, shirt: "#F4F4F4", tie: "tie", tieC: "#C8102E", square: "#C8102E", watch: true}, head: function(H, g){
+    var fur = toon("#6487AC"), light = toon("#EEF3F8"), R = [.36, .33, .44, 0, .02, .06];
+    S(H, GEO.sph, fur, [0, .02, .06], [.36, .33, .44], null, .04);
+    var BR = [.3, .17, .38, 0, -.12, .12], SH = [R, BR];
+    S(H, GEO.sph, light, [0, -.12, .12], [.3, .17, .38]);
+    var fin = S(H, GEO.fin, fur, [0, .28, -.02], [.38, .36, .9], [0, Math.PI / 2, 0], .06);
+    var nick = S(H, GEO.box, toon("#EEF3F8"), [0, .55, -.08], [.05, .03, .04], [0, 0, .5]);
+    // the grin: dark mouth tucked into the snout, teeth pinned along both lips
+    var mv = function(u){ return -.26 + .14 * (u / .5) * (u / .5); };
+    surfLine(H, SH, -.52, .52, mv, .004, .026, toon("#5A1424"), .01);
+    for (var i = 0; i < 9; i++){ var u = (i - 4) * .1, t = pinS(H, SH, u, mv(u) + .03, .034); S(t, GEO.cone, toon("#FFFFFF"), [0, -.018, 0], [.017, .042, .01], [0, 0, Math.PI], .14); }
+    // gills along the sides
+    [-1, 1].forEach(function(s){ for (var k = 0; k < 3; k++){ var gp = pin(H, R, s * (1.5 + k * .16), -.08, .002); S(gp, GEO.arc, toon("#3E5E80"), [0, 0, 0], [.065, .065, .035], [0, 0, s * Math.PI / 2]); } });
+    eyes(H, R, .42, .2, .068, .072, {iris: "#14141E", lid: "#6487AC", tilt: .3});
+    brows(H, R, .42, .43, .1, .45, "#2E3E52", .03);
+    var sc = pin(H, R, .5, .3, .006); S(sc, GEO.box, toon("#F2B8C0"), [0, 0, 0], [.012, .12, .008], [0, 0, .6]); [-1, 0, 1].forEach(function(q){ S(sc, GEO.box, toon("#F2B8C0"), [q * .02 * .8, q * .035, 0], [.04, .008, .008], [0, 0, .6]); });
+    // pectoral fins at the shoulders, tail fin behind the seat
+    [-1, 1].forEach(function(s){ var pf = S(g, GEO.fin, fur, [s * .32, -.02, -.08], [.2, .24, .35], null, .06); orient(pf, [0, 0, -1], [s, -.35, 0]); });
+    var tl = tailGroup(g, H, [0, .02, -.3], 0, "y");
+    var stalk = S(tl, GEO.cone, fur, [0, 0, -.1], [.09, .26, .07], [-Math.PI / 2, 0, 0], .07);
+    var up = S(tl, GEO.fin, fur, [0, .0, -.18], [.24, .36, .45], null, .06); orient(up, [0, 0, -1], [0, 1, -.25]);
+    var lo = S(tl, GEO.fin, fur, [0, -.02, -.18], [.18, .22, .45], null, .06); orient(lo, [0, 0, -1], [0, -1, -.35]);
+  }},
+  whale: {body: {suit: "#F3F5F8", shirt: "#DCEBFA", tie: "kerchief", tieC: "#E8443A", double: true, epaulettes: true}, head: function(H, g){
+    var fur = toon("#3F7FD6"), light = toon("#E4F1FB"), R = [.46, .4, .4];
+    S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+    var BR = [.38, .22, .3, 0, -.14, .14];
+    S(H, GEO.sph, light, [0, -.14, .14], [.38, .22, .3], null, .03);
+    [-.3, -.48, -.66].forEach(function(v){ var gr = pin(H, BR, 0, v, .002); S(gr, GEO.box, toon("#B8CEE6", {off: 1}), [0, 0, 0], [.24 + v * .2, .008, .006]); });
+    surfLine(H, [R, BR], -.42, .42, function(u){ return -.08 - .1 * (1 - (u / .42) * (u / .42)); }, .004, .012, toon("#22305A"));
+    eyes(H, R, .6, .05, .066, .076, {iris: "#22305A"});
+    brows(H, R, .6, .3, .07, -.2, "#22305A", .022);
+    blush(H, R, .78, -.12);
+    [-1, 1].forEach(function(s){ [[.95, -.02], [1.02, -.08], [.9, -.1]].forEach(function(f){ var d = pin(H, R, s * f[0], f[1], .002); S(d, GEO.lo, toon("#2F64AE", {off: 1}), [0, 0, 0], [.012, .012, .006]); }); });
+    // captain's hat
+    var hat = new THREE.Group(); hat.position.set(0, .3, -.01); hat.rotation.x = -.12; H.add(hat);
+    S(hat, GEO.taper, toon("#FFFFFF"), [0, .085, 0], [.21, .13, .21], null, .05);
+    S(hat, GEO.cyl, toon("#1B1B2A"), [0, .025, 0], [.215, .035, .215]);
+    S(hat, GEO.halfdisc, toon("#1B1B2A"), [0, .012, .1], [.2, .018, .24], [-.18, 0, 0], .08);
+    var badge = new THREE.Group(); badge.position.set(0, .075, .215); hat.add(badge);
+    S(badge, GEO.ring, toon("#F5C431", {em: "#4A3000"}), [0, 0, 0], [.03, .03, .03]); S(badge, GEO.box, toon("#F5C431", {em: "#4A3000"}), [0, -.01, 0], [.008, .05, .008]);
+    S(badge, GEO.box, toon("#F5C431", {em: "#4A3000"}), [0, -.03, 0], [.04, .008, .008]);
+    // blowhole and a spout of water (animated)
+    var bh = pin(H, R, Math.PI, .78, 0); S(bh, GEO.sph, toon("#22305A"), [0, 0, 0], [.035, .02, .01]);
+    var sp = new THREE.Group(); sp.position.copy(bh.position); sp.userData.live = true; sp.name = "spout"; H.add(sp); H.userData.spout = sp;
+    var water = toon("#8FD8FF", {op: .85}), foam = toon("#E6F8FF", {op: .9});
+    S(sp, GEO.cone, water, [0, .2, 0], [.07, .4, .07], [Math.PI, 0, 0]);
+    for (var k = 0; k < 8; k++){ var a = k / 8 * Math.PI * 2; S(sp, GEO.lo, k % 2 ? foam : water, [Math.cos(a) * .1, .38 + (k % 2) * .04 - (k % 4 === 1 ? .08 : 0), Math.sin(a) * .1], [.045, .055, .045]); }
+    S(sp, GEO.lo, foam, [0, .44, 0], [.07, .07, .07]);
+    // tail fluke behind the seat
+    var tl = tailGroup(g, H, [0, -.05, -.3], -.35, "x");
+    S(tl, GEO.cone, fur, [0, .0, -.12], [.08, .28, .06], [-Math.PI / 2, 0, 0], .07);
+    [-1, 1].forEach(function(s){ var f = S(tl, GEO.fin, fur, [0, 0, -.24], [.2, .3, .35], null, .06); orient(f, [0, 0, -1], [s, 0, -.3]); });
+  }}
+};
+function bullHead(H, g, gold){
+  var fur = gold ? toon("#E3AA20", {em: "#3A2400"}) : toon("#8E4C22"), light = toon(gold ? "#FFE7A3" : "#EEC392"), horn = toon(gold ? "#FFF4CC" : "#F1E6CC"),
+      dark = toon(gold ? "#9A6A0A" : "#4A2410"), R = [.41, .37, .37];
+  S(H, GEO.sph, fur, [0, 0, 0], R, null, .04);
+  var MZ = [.27, .18, .2, 0, -.14, .25];
+  S(H, GEO.sph, light, [0, -.14, .25], [.27, .18, .2], null, .05);
+  [-1, 1].forEach(function(s){
+    var n = pin(H, MZ, s * .3, .2, -.004); S(n, GEO.sph, toon(gold ? "#8A5A10" : "#5A2A1A", {off: 1}), [0, 0, 0], [.038, .048, .012]);
+    tube(H, [[s * .3, .2, 0], [s * .48, .25, .02], [s * .58, .42, .06]], .05, horn, .012);
+    S(H, GEO.cone, horn, [s * .59, .5, .07], [.05, .14, .05], [.1, 0, -s * .15], .12);
+    var ear = new THREE.Group(); ear.position.set(s * .42, .04, -.03); ear.rotation.set(.2, -s * .5, s * .3); H.add(ear);
+    S(ear, GEO.sph, fur, [0, 0, 0], [.13, .055, .08], null, .08); S(ear, GEO.sph, toon("#F2A3A0"), [0, .005, .03], [.09, .03, .05]);
+  });
+  // nose ring through the septum
+  var nr = pin(H, MZ, 0, -.02, 0); S(nr, GEO.ring, toon("#F5C431", {em: "#4A3000"}), [0, -.05, .025], [.055, .055, .08], [-.45, 0, 0], .12);
+  [-1, 0, 1].forEach(function(i){ spike(H, R, i * .2, 1.25 - Math.abs(i) * .05, .15, .05, dark, [.5, i * .3]); });
+  eyes(H, R, .37, .2, .085, .095, {iris: gold ? "#5A2A00" : "#3A1A0A", lid: gold ? "#E3AA20" : "#8E4C22", tilt: .25});
+  brows(H, R, .37, .45, .13, .42, gold ? "#7A4A00" : "#3A1A0A", .036);
+  if (gold){
+    var crown = new THREE.Group(); crown.position.set(0, .34, -.02); crown.rotation.z = .12; H.add(crown);
+    var cg = toon("#FFD84A", {em: "#6A4000"});
+    S(crown, new THREE.CylinderGeometry(.17, .19, .1, 24, 1, true), toon("#FFD84A", {em: "#6A4000", ds: true}), [0, 0, 0], null, null);
+    for (var c = 0; c < 7; c++){ var a = c / 7 * Math.PI * 2; S(crown, GEO.cone, cg, [Math.sin(a) * .175, .1, Math.cos(a) * .175], [.045, .11, .045], null, .12); S(crown, GEO.lo, toon("#FFFFFF", {em: "#555"}), [Math.sin(a) * .175, .165, Math.cos(a) * .175], [.018, .018, .018]); }
+    [[0, "#FF3D6A"], [Math.PI / 2, "#3D8BFF"], [-Math.PI / 2, "#1FCF6A"], [Math.PI, "#FF3D6A"]].forEach(function(j){ S(crown, GEO.oct, toon(j[1], {em: shade(j[1], .3)}), [Math.sin(j[0]) * .19, .0, Math.cos(j[0]) * .19], [.03, .04, .02], [0, j[0], 0]); });
+    S(crown, GEO.cyl, toon("#B0172E"), [0, .02, 0], [.165, .1, .165]);
+  } else {
+    // a cigar with a glowing tip
+    var cg2 = pin(H, MZ, .55, -.4, -.01); cg2.rotateY(.5); cg2.rotateX(.25);
+    S(cg2, GEO.cyl, toon("#6A3A1A"), [0, 0, .08], [.02, .16, .02], [Math.PI / 2, 0, 0], .15);
+    S(cg2, GEO.cyl, toon("#F5C431", {em: "#4A3000"}), [0, 0, .04], [.022, .02, .022], [Math.PI / 2, 0, 0]);
+    S(cg2, GEO.cyl, toon("#FF5A1F", {em: "#FF3A00"}), [0, 0, .163], [.019, .01, .019], [Math.PI / 2, 0, 0]);
+    S(cg2, GEO.cyl, toon("#B8B0A8"), [0, 0, .155], [.0205, .014, .0205], [Math.PI / 2, 0, 0]);
+  }
+  var tl = tailGroup(g, H, [0, -.05, -.29], -.7);
+  S(tl, GEO.cyl, fur, [0, .17, 0], [.022, .34, .022], null, .15);
+  [-1, 0, 1].forEach(function(i){ S(tl, GEO.cone, dark, [i * .02, .37, 0], [.04, .12, .04], [0, 0, -i * .4], .1); });
+}
+
+// merge every static mesh under `root` (skipping live groups) into one mesh per material
+function bake(root){
+  root.updateMatrixWorld(true);
+  var inv = new THREE.Matrix4().copy(root.matrixWorld).invert(), list = [], buckets = {}, order = [];
+  (function walk(o){ o.children.forEach(function(c){ if (c.userData.live) return; if (c.isMesh) list.push(c); walk(c); }); })(root);
+  list.forEach(function(c){
+    var mat = c.material, b = buckets[mat.uuid];
+    if (!b){ b = buckets[mat.uuid] = {mat: mat, geos: [], shadow: false}; order.push(mat.uuid); }
+    b.shadow = b.shadow || c.castShadow;
+    var gg = c.geometry.index ? c.geometry.toNonIndexed() : c.geometry.clone();
+    gg.applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, c.matrixWorld)); b.geos.push(gg);
+  });
+  list.forEach(function(c){ if (c.parent) c.parent.remove(c); });
+  order.forEach(function(k){
+    var b = buckets[k], n = 0; b.geos.forEach(function(gg){ n += gg.attributes.position.count; });
+    var pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), uv = new Float32Array(n * 2), i = 0;
+    b.geos.forEach(function(gg){ var c = gg.attributes.position.count; pos.set(gg.attributes.position.array, i * 3); nor.set(gg.attributes.normal.array, i * 3); if (gg.attributes.uv) uv.set(gg.attributes.uv.array, i * 2); i += c; gg.dispose(); });
+    var geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.BufferAttribute(pos, 3)); geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3)); geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+    geo.computeBoundingSphere();
+    var mesh = new THREE.Mesh(geo, b.mat); mesh.castShadow = b.shadow && b.mat !== INK; root.add(mesh);
+  });
+}
 // the driver, sitting at the origin of `g`, facing +z. Returns the head group (for steering lean and blinking).
 function buildDriver(g, cid){
   G_();
-  var C = CHAR_STYLE[cid] || CHAR_STYLE.wolf, gold = cid === "goldbull";
-  var fur = gold ? new THREE.MeshToonMaterial({color: "#D9A21E", gradientMap: toonRamp(), emissive: "#2A1A00"}) : toon(C[0]);
-  var light = toon(C[1]), suit = toon(C[2]), shirt = toon(C[3]), tie = toon(C[4]), dark = toon("#1B1226"), glove = toon("#FFFFFF");
-  // body: rounded jacket, lapels, shirt and tie, arms reaching to the wheel
-  S(g, GEO.sph, suit, [0, 0, -.02], [.36, .34, .27], null, .05);
-  S(g, GEO.cone, shirt, [0, .1, .2], [.13, .3, .05], [Math.PI, 0, 0]);
-  [-1, 1].forEach(function(s){ S(g, GEO.box, suit, [s * .1, .12, .23], [.09, .3, .03], [0, 0, s * .35]); });
-  if (cid === "bear" || cid === "owl"){            // bow ties
-    [-1, 1].forEach(function(s){ S(g, GEO.cone, tie, [s * .07, .22, .26], [.06, .09, .04], [0, 0, s * Math.PI / 2], .1); });
-    S(g, GEO.lo, tie, [0, .22, .27], [.035, .035, .03]);
-  } else {
-    S(g, GEO.lo, tie, [0, .22, .25], [.045, .04, .03]);
-    S(g, GEO.cone, tie, [0, .08, .26], [.055, .24, .02], [Math.PI, 0, 0]);
-  }
-  var arms = [];
-  [-1, 1].forEach(function(s){
-    var a = new THREE.Group(); a.position.set(s * .3, .13, .02); g.add(a); arms.push(a);
-    S(a, GEO.cyl, suit, [0, -.05, .15], [.075, .32, .075], [1.25, 0, s * .2], .08);
-    S(a, GEO.sph, glove, [s * -.08, -.12, .36], [.085, .08, .09], null, .1);
-  });
-  // head
-  var H = new THREE.Group(); H.position.set(0, .62, .04); g.add(H);
-  var eyes = [];
-  if (cid === "wolf"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.4, .36, .37], null, .04);
-    S(H, GEO.sph, light, [0, -.1, .28], [.2, .14, .24], null, .06);
-    S(H, GEO.sph, dark, [0, -.03, .5], [.065, .05, .045]);
-    [-1, 1].forEach(function(s){
-      S(H, GEO.cone, fur, [s * .22, .36, -.06], [.13, .34, .09], [0, 0, s * -.32], .07);
-      S(H, GEO.cone, toon("#F2A3B3"), [s * .215, .33, -.015], [.07, .22, .03], [0, 0, s * -.32]);
-      S(H, GEO.cone, light, [s * .37, -.12, .1], [.07, .18, .05], [0, 0, s * 2.1]);     // cheek fluff
-    });
-    S(H, GEO.cone, fur, [0, .35, .12], [.07, .2, .06], [.6, 0, 0]);                   // quiff
-    eyes.push(eye(H, -.14, .07, .29, .085, .1, {iris: "#E8B53A", lid: C[0]}), eye(H, .14, .07, .29, .085, .1, {iris: "#E8B53A", lid: C[0]}));
-    brow(H, -.14, .19, .33, -.28); brow(H, .14, .19, .33, .28);
-    var sm = mouth(H, -.2, .37, .055); sm.rotation.z = Math.PI + .3; sm.position.x = .03;
-    [-1, 1].forEach(function(s){ S(H, GEO.sph, toon("#141420"), [s * .11, .27, .25], [.085, .05, .03], [-.5, 0, 0], .08); });     // shades up on the forehead
-    S(H, GEO.box, toon("#141420"), [0, .28, .27], [.06, .015, .015]);
-  } else if (cid === "bull" || cid === "goldbull"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.41, .37, .37], null, .04);
-    S(H, GEO.sph, light, [0, -.15, .27], [.27, .17, .19], null, .05);
-    [-1, 1].forEach(function(s){
-      S(H, GEO.sph, toon("#5A2A1A"), [s * .08, -.12, .44], [.035, .045, .02]);
-      var curve = new THREE.CatmullRomCurve3([new THREE.Vector3(s * .3, .2, 0), new THREE.Vector3(s * .5, .26, .02), new THREE.Vector3(s * .58, .44, .06)]);
-      S(H, new THREE.TubeGeometry(curve, 12, .05, 10), toon(gold ? "#FFF2C0" : "#F4EBD6"), [0, 0, 0], null, null, .12);
-      S(H, GEO.cone, toon(gold ? "#FFF2C0" : "#F4EBD6"), [s * .585, .5, .07], [.05, .12, .05], [0, 0, s * -.15]);
-      S(H, GEO.sph, fur, [s * .43, .06, -.04], [.12, .05, .08], [0, 0, s * .3], .08);
-    });
-    S(H, new THREE.TorusGeometry(.08, .016, 8, 20), toon("#F2C230", {emissive: "#3A2A00"}), [0, -.24, .43], null, [.2, 0, 0]);
-    [0, 1, 2].forEach(function(i){ S(H, GEO.cone, toon(gold ? "#C9952A" : "#5A3418"), [-.06 + i * .06, .36, .1], [.05, .14, .05], [.4, 0, (i - 1) * .4]); });
-    eyes.push(eye(H, -.15, .07, .28, .085, .095, {lid: gold ? "#F2C14A" : C[0]}), eye(H, .15, .07, .28, .085, .095, {lid: gold ? "#F2C14A" : C[0]}));
-    brow(H, -.15, .18, .33, -.4, .13); brow(H, .15, .18, .33, .4, .13);
-    if (gold){
-      var crown = new THREE.Group(); crown.position.set(0, .38, -.02); H.add(crown);
-      S(crown, new THREE.CylinderGeometry(.16, .18, .1, 20, 1, true), toon("#FFD84A", {side: THREE.DoubleSide, emissive: "#5A3A00"}), [0, 0, 0]);
-      for (var c = 0; c < 6; c++){ var a = c / 6 * Math.PI * 2; S(crown, GEO.cone, toon("#FFD84A", {emissive: "#5A3A00"}), [Math.sin(a) * .16, .09, Math.cos(a) * .16], [.04, .1, .04]); }
-      S(crown, GEO.oct, toon("#FF3D6A", {emissive: "#400010"}), [0, .02, .18], [.035, .045, .02]);
-    }
-  } else if (cid === "bear"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.41, .38, .38], null, .04);
-    [-1, 1].forEach(function(s){ S(H, GEO.sph, fur, [s * .29, .3, -.03], [.13, .13, .08], null, .08); S(H, GEO.sph, light, [s * .29, .3, .02], [.075, .075, .04]);
-      S(H, GEO.lo, toon("#F2A3A0", {transparent: true, opacity: .7}), [s * .25, -.08, .3], [.07, .045, .02], [0, s * .6, 0]); });
-    S(H, GEO.sph, light, [0, -.1, .3], [.19, .14, .14], null, .06);
-    S(H, GEO.sph, dark, [0, -.03, .43], [.075, .055, .045]);
-    eyes.push(eye(H, -.15, .08, .3, .07, .085), eye(H, .15, .08, .3, .07, .085));
-    brow(H, -.15, .19, .34, .15, .09); brow(H, .15, .19, .34, -.15, .09);
-    mouth(H, -.18, .405, .055);
-  } else if (cid === "pig"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.4, .37, .36], null, .04);
-    S(H, GEO.cyl, light, [0, -.07, .37], [.13, .1, .1], [Math.PI / 2, 0, 0], .08);
-    [-1, 1].forEach(function(s){
-      S(H, GEO.sph, toon("#B85C78"), [s * .045, -.07, .425], [.025, .035, .01]);
-      S(H, GEO.cone, fur, [s * .24, .3, .08], [.12, .2, .05], [.9, 0, s * -.5], .08);
-      S(H, GEO.lo, toon("#FF7FA6", {transparent: true, opacity: .65}), [s * .25, -.1, .29], [.07, .045, .02], [0, s * .6, 0]);
-    });
-    eyes.push(eye(H, -.14, .08, .29, .08, .095, {iris: "#3A6AC8", lashes: true}), eye(H, .14, .08, .29, .08, .095, {iris: "#3A6AC8", lashes: true}));
-    mouth(H, -.2, .31, .055, "#B0305A");
-    var bow = new THREE.Group(); bow.position.set(.2, .32, .1); bow.rotation.z = -.4; H.add(bow);
-    [-1, 1].forEach(function(s){ S(bow, GEO.cone, toon("#FF3D7F"), [s * .08, 0, 0], [.07, .12, .05], [0, 0, s * Math.PI / 2], .1); });
-    S(bow, GEO.lo, toon("#FF3D7F"), [0, 0, 0], [.04, .04, .04]);
-    for (var p = 0; p < 9; p++){ var t = (p / 8 - .5) * 2.2; S(g, GEO.lo, toon("#FFFFFF", {emissive: "#333"}), [Math.sin(t) * .19, .3 - Math.cos(t) * .04, .14 + Math.cos(t) * .1], [.028, .028, .028]); }
-  } else if (cid === "fox"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.38, .34, .34], null, .04);
-    S(H, GEO.cone, light, [0, -.1, .36], [.15, .3, .12], [Math.PI / 2, 0, 0], .07);
-    S(H, GEO.sph, dark, [0, -.1, .52], [.05, .04, .035]);
-    [-1, 1].forEach(function(s){
-      S(H, GEO.cone, fur, [s * .2, .38, -.04], [.13, .4, .07], [0, 0, s * -.22], .07);
-      S(H, GEO.cone, light, [s * .195, .35, .0], [.07, .26, .02], [0, 0, s * -.22]);
-      S(H, GEO.cone, dark, [s * .24, .55, -.04], [.055, .1, .05], [0, 0, s * -.22]);
-      S(H, GEO.cone, light, [s * .33, -.12, .12], [.1, .22, .06], [0, 0, s * 2.0]);
-    });
-    eyes.push(eye(H, -.14, .06, .27, .08, .085, {iris: "#2F8A3A", lid: C[0]}), eye(H, .14, .06, .27, .08, .085, {iris: "#2F8A3A", lid: C[0]}));
-    brow(H, -.14, .16, .3, -.15, .1); brow(H, .14, .16, .3, .35, .1);
-    var fm = mouth(H, -.19, .42, .04); fm.rotation.z = Math.PI + .3;
-    // the big bushy tail behind the seat
-    var tail = new THREE.Group(); tail.position.set(.18, -.05, -.32); tail.rotation.set(-.5, .3, -.4); g.add(tail);
-    S(tail, GEO.sph, fur, [0, .12, -.05], [.14, .26, .14], null, .06); S(tail, GEO.sph, fur, [0, .38, -.12], [.16, .2, .16], null, .06); S(tail, GEO.sph, light, [0, .56, -.16], [.12, .12, .12], null, .06);
-  } else if (cid === "owl"){
-    S(H, GEO.sph, fur, [0, -.02, 0], [.42, .4, .37], null, .04);
-    S(H, GEO.sph, light, [0, -.04, .15], [.33, .3, .24]);
-    [-1, 1].forEach(function(s){
-      eyes.push(eye(H, s * .14, .04, .32, .11, .11, {iris: "#F2A31F"}));
-      S(H, GEO.ring, toon("#2A2A33"), [s * .14, .04, .37], [.135, .135, .135], null);
-      S(H, GEO.cone, fur, [s * .27, .38, -.02], [.08, .22, .05], [0, 0, s * -.5], .08);
-      S(H, GEO.cone, fur, [s * .2, .38, .02], [.06, .16, .04], [0, 0, s * -.25]);
-    });
-    S(H, GEO.box, toon("#2A2A33"), [0, .05, .38], [.06, .02, .02]);
-    S(H, GEO.cone, toon("#F2B33A"), [0, -.12, .38], [.06, .14, .05], [Math.PI, 0, 0], .1);
-    brow(H, -.14, .2, .37, -.15, .12, "#5A3F22"); brow(H, .14, .2, .37, .15, .12, "#5A3F22");
-  } else if (cid === "ape"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.4, .37, .36], null, .04);
-    S(H, GEO.sph, light, [0, -.06, .2], [.29, .27, .2], null, .05);
-    S(H, GEO.sph, fur, [0, .13, .27], [.21, .045, .07], null, .06);
-    [-1, 1].forEach(function(s){ S(H, GEO.sph, light, [s * .4, .0, -.02], [.09, .11, .05], null, .08); S(H, GEO.sph, toon("#8A6A50"), [s * .04, -.1, .4], [.025, .02, .01]); });
-    eyes.push(eye(H, -.11, .06, .32, .07, .075, {iris: "#4A2A12"}), eye(H, .11, .06, .32, .07, .075, {iris: "#4A2A12"}));
-    S(H, GEO.box, toon("#FFFFFF"), [0, -.2, .36], [.16, .05, .04], null, .12);
-    S(H, GEO.box, toon("#5A2A2A"), [0, -.2, .355], [.18, .07, .03]);
-    var chain = new THREE.Mesh(new THREE.TorusGeometry(.19, .012, 6, 28, Math.PI), toon("#F2C230", {emissive: "#3A2A00"})); chain.position.set(0, .3, .12); chain.rotation.set(-1.2, 0, Math.PI); g.add(chain);
-    S(g, GEO.oct, new THREE.MeshPhongMaterial({color: "#A8F5FF", shininess: 160, specular: "#FFFFFF", emissive: "#1A6A78"}), [0, .1, .28], [.07, .1, .05], null, .1);
-    arms.forEach(function(a, i){ S(a, GEO.oct, new THREE.MeshPhongMaterial({color: "#A8F5FF", shininess: 160, specular: "#FFFFFF", emissive: "#1A6A78"}), [(i ? -1 : 1) * .08, -.05, .4], [.035, .045, .035]); });
-  } else if (cid === "shark"){
-    S(H, GEO.sph, fur, [0, .02, .04], [.36, .33, .46], null, .04);
-    S(H, GEO.sph, light, [0, -.14, .1], [.3, .17, .4]);
-    S(H, GEO.cone, fur, [0, .38, -.12], [.07, .36, .2], [-.5, 0, 0], .07);
-    // a wide toothy grin across the snout
-    var grin = new THREE.Group(); grin.position.set(0, -.08, .46); grin.rotation.x = -.35; H.add(grin);
-    S(grin, new THREE.TorusGeometry(.14, .03, 8, 24, Math.PI * .86), toon("#5A1424"), [0, .03, 0], null, [0, 0, Math.PI + .22]);
-    for (var i = 0; i < 9; i++){ var a2 = Math.PI + .38 + i * (Math.PI - .76) / 8; S(grin, GEO.cone, toon("#FFFFFF"), [Math.cos(a2) * .13, .045 + Math.sin(a2) * .12, .02], [.02, .045, .015], [0, 0, Math.PI]); }
-    [-1, 1].forEach(function(s){ for (var k = 0; k < 3; k++) S(H, GEO.box, toon("#43607A"), [s * .34, -.04, .02 - k * .07], [.012, .1, .025], [0, s * .3, 0]); });
-    eyes.push(eye(H, -.17, .1, .41, .07, .075, {iris: "#1A1A2A", lid: C[0]}), eye(H, .17, .1, .41, .07, .075, {iris: "#1A1A2A", lid: C[0]}));
-    brow(H, -.17, .2, .43, -.45, .11); brow(H, .17, .2, .43, .45, .11);
-  } else if (cid === "whale"){
-    S(H, GEO.sph, fur, [0, 0, 0], [.46, .4, .4], null, .04);
-    S(H, GEO.sph, light, [0, -.14, .14], [.38, .22, .3]);
-    for (var r = 0; r < 4; r++) S(H, GEO.box, toon("#B8CEE6"), [0, -.24 + r * .045, .4 - r * .015], [.24 - r * .04, .008, .02]);
-    [-1, 1].forEach(function(s){ S(H, GEO.lo, toon("#FF8FA6", {transparent: true, opacity: .65}), [s * .3, -.05, .29], [.07, .045, .02], [0, s * .7, 0]); });
-    eyes.push(eye(H, -.2, .06, .32, .065, .075), eye(H, .2, .06, .32, .065, .075));
-    mouth(H, -.12, .4, .09);
-    var hat = new THREE.Group(); hat.position.set(0, .36, -.02); hat.rotation.x = -.15; H.add(hat);
-    S(hat, GEO.cyl, toon("#FFFFFF"), [0, .07, 0], [.2, .12, .2], null, .06); S(hat, GEO.cyl, toon("#1B1B2A"), [0, 0, .04], [.22, .02, .24], null, .1);
-    S(hat, GEO.box, toon("#F2C230"), [0, .06, .2], [.08, .05, .01]);
-    var spout = new THREE.Group(); spout.position.set(0, .56, -.12); H.add(spout); spout.name = "spout";
-    [[0, .05], [-.07, .14], [.07, .14], [0, .2]].forEach(function(d){ S(spout, GEO.lo, toon("#9FE0FF", {transparent: true, opacity: .85}), [d[0], d[1], 0], [.04, .05, .04]); });
-  }
-  H.userData.eyes = eyes; H.userData.arms = arms;
+  var K = KIT[cid] || KIT.wolf;
+  var H = new THREE.Group(); H.position.set(0, .62, .04); H.userData.live = true; g.add(H);
+  var open = new THREE.Group(), shut = new THREE.Group(); open.userData.live = shut.userData.live = true; shut.visible = false; H.add(open); H.add(shut);
+  H.userData.open = open; H.userData.shut = shut; H.userData.ph = Math.random() * 6;
+  torso(g, K.body); K.head(H, g);
+  bake(g); bake(H); bake(open); bake(shut);
+  if (H.userData.tail) bake(H.userData.tail);
+  if (H.userData.spout) bake(H.userData.spout);
   return H;
 }
-// blink now and then, and lean the head into turns (called every frame for visible karts)
+// blink now and then, lean the head into turns, wag the tail (called every frame for visible karts)
 function animateDriver(H, dt, steer, t){
   if (!H) return;
   var u = H.userData; u.blink = (u.blink == null ? 1 + Math.random() * 3 : u.blink) - dt;
   var closed = u.blink < 0;
-  if (u.blink < -.12) u.blink = 2 + Math.random() * 3.5;
-  (u.eyes || []).forEach(function(e){ e.scale.y = closed ? .12 : 1; });
+  if (u.blink < -.13) u.blink = 2 + Math.random() * 3.5;
+  if (u.open){ u.open.visible = !closed; u.shut.visible = closed; }
   H.rotation.z += ((-(steer || 0) * .16) - H.rotation.z) * Math.min(1, dt * 6);
   H.rotation.y += ((-(steer || 0) * .22) - H.rotation.y) * Math.min(1, dt * 6);
-  var sp = H.getObjectByName("spout"); if (sp){ sp.position.y = .56 + Math.abs(Math.sin(t * 3)) * .08; sp.scale.setScalar(.8 + Math.abs(Math.sin(t * 3)) * .4); }
+  if (u.tail){ var w = Math.sin(t * 7 + u.ph) * .22 - (steer || 0) * .25; if (u.wag === "x") u.tail.rotation.x = -.35 + w * .7; else if (u.wag === "y") u.tail.rotation.y = w; else u.tail.rotation.z = u.tailBase + w; }
+  if (u.spout){ var k = Math.abs(Math.sin(t * 3)); u.spout.scale.set(.85 + k * .25, .75 + k * .45, .85 + k * .25); }
 }
 
 // ── racers & karts: procedural models built from a "look" {c, b, w, p, d} ──────
@@ -1979,7 +2264,7 @@ api("info", {}).then(function(d){
   else UI.home();
 }).catch(function(e){ if (e && e.message === "login") return; show(topBar() + '<p class="err" style="text-align:center;margin-top:30vh">Couldn\'t reach the server. Refresh to try again.</p>'); });
 document.addEventListener("visibilitychange", function(){ if (document.hidden && G.mode === "solo" && G.status === "race" && !G.paused){ G.paused = true; UI.pauseMenu(); } });
-window.__kart = {G: G, R: R, UI: UI, TRACKS: TRACKS, startSolo: startSolo, useItem: useItem, standings: standings, thumb: thumb, setAuto: function(v){ G.autopilot = !!v; }};
+window.__kart = {G: G, R: R, UI: UI, TRACKS: TRACKS, startSolo: startSolo, useItem: useItem, standings: standings, thumb: thumb, buildKart: buildKart, GR: GR, grShow: grShow, animateDriver: animateDriver, setAuto: function(v){ G.autopilot = !!v; }};
 })();
 </script>
 </body>
