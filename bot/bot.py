@@ -29571,6 +29571,48 @@ KART_INVITES = 12
 KART_COLORS = ["#E8443A", "#3A7BE8", "#F2C230", "#33C46B", "#B04CE0", "#F2862E", "#2EC6D6", "#F25AA8"]
 KART_BOTS = ["Donnie", "Brad", "Naomi", "Mark Hanna", "Agent Denham", "Aunt Emma", "Chester", "Rugrat", "Max", "Captain Ted"]
 KART_EVENTS = {"banana", "shot", "gone", "spin", "shield"}
+# ── the garage: racers and kart parts. stats/mods are [speed, accel, handling, weight];
+# "need" says how it unlocks (None = from the start, "price" = buy it with coins, the rest are earned)
+KART_CHARS = {
+    "wolf":     {"name": "Wolf",          "cls": "Medium", "st": [3, 3, 3, 3], "need": None},
+    "bull":     {"name": "Bull",          "cls": "Medium", "st": [4, 2, 3, 4], "need": None},
+    "bear":     {"name": "Bear",          "cls": "Heavy",  "st": [5, 1, 2, 5], "need": None},
+    "pig":      {"name": "Penny",         "cls": "Light",  "st": [2, 5, 4, 1], "need": None},
+    "fox":      {"name": "Fox",           "cls": "Light",  "st": [2, 4, 5, 2], "need": {"races": 5}},
+    "owl":      {"name": "The Analyst",   "cls": "Medium", "st": [3, 4, 4, 2], "need": {"wins": 3}},
+    "ape":      {"name": "Diamond Hands", "cls": "Medium", "st": [4, 3, 2, 4], "need": {"mp_wins": 1}},
+    "shark":    {"name": "Loan Shark",    "cls": "Heavy",  "st": [5, 2, 3, 4], "need": {"podium_all": 1}},
+    "whale":    {"name": "The Whale",     "cls": "Heavy",  "st": [5, 2, 1, 5], "need": {"price": 25_000}},
+    "goldbull": {"name": "Golden Bull",   "cls": "Heavy",  "st": [4, 3, 3, 4], "need": {"wins": 25}},
+}
+KART_BODIES = {
+    "standard":  {"name": "Standard",  "mod": [0, 0, 0, 0],   "need": None},
+    "speedster": {"name": "Speedster", "mod": [1, 0, -1, -1], "need": {"races": 10}},
+    "muscle":    {"name": "Muscle",    "mod": [1, -1, -1, 1], "need": {"price": 10_000}},
+    "briefcase": {"name": "Briefcase", "mod": [-1, 1, 1, 0],  "need": {"track_win": "wallst"}},
+}
+KART_WHEELS = {
+    "standard": {"name": "Standard", "mod": [0, 0, 0, 0],    "need": None},
+    "rollers":  {"name": "Rollers",  "mod": [-1, 1, 1, -1],  "need": None},
+    "slicks":   {"name": "Slicks",   "mod": [1, 0, -1, 0],   "need": {"podiums": 3}},
+    "monster":  {"name": "Monster",  "mod": [0, -1, 0, 1],   "need": {"price": 5_000}, "offroad": True},
+}
+KART_PAINTS = {
+    "red": {"name": "Red", "hex": "#E8443A", "need": None}, "blue": {"name": "Blue", "hex": "#3A7BE8", "need": None},
+    "yellow": {"name": "Yellow", "hex": "#F2C230", "need": None}, "green": {"name": "Green", "hex": "#33C46B", "need": None},
+    "purple": {"name": "Purple", "hex": "#B04CE0", "need": None}, "orange": {"name": "Orange", "hex": "#F2862E", "need": None},
+    "teal": {"name": "Teal", "hex": "#2EC6D6", "need": None}, "pink": {"name": "Pink", "hex": "#F25AA8", "need": None},
+    "black": {"name": "Midnight", "hex": "#2A2A35", "need": {"races": 3}},
+    "gold": {"name": "Gold", "hex": "#E2B33C", "need": {"wins": 10}, "metal": True},
+    "chrome": {"name": "Chrome", "hex": "#C9D2DC", "need": {"price": 15_000}, "metal": True},
+}
+KART_DECALS = {
+    "none": {"name": "None", "need": None}, "stripes": {"name": "Racing stripes", "need": None},
+    "flames": {"name": "Flames", "need": {"podiums": 5}}, "checker": {"name": "Checkered", "need": {"races": 20}},
+    "dollars": {"name": "Money", "need": {"price": 2_500}},
+}
+KART_CATS = {"c": KART_CHARS, "b": KART_BODIES, "w": KART_WHEELS, "p": KART_PAINTS, "d": KART_DECALS}
+KART_DEFAULT_LOOK = {"c": "wolf", "b": "standard", "w": "standard", "p": "red", "d": "stripes"}
 _kart_lock = _kart_threading.Lock()
 _kart_races: dict[str, dict] = {}     # live lobbies and races, in memory only
 _kart_solo: dict[str, dict] = {}      # uid -> the solo race they started
@@ -29616,12 +29658,12 @@ def _kart_geo(tid: str) -> dict:
 def _kart_static() -> dict:
     return {"tracks": {k: {"name": v["name"], "width": v["width"], "laps": v["laps"], "L": round(_kart_geo(k)["L"], 2),
                            "pts": _kart_geo(k)["pts"]} for k, v in KART_TRACKS.items()},
-            "colors": KART_COLORS}
+            "colors": KART_COLORS, "garage": KART_CATS, "garage_order": {c: list(v) for c, v in KART_CATS.items()}}
 
 
 def _kart_load() -> dict:
     d = _load_json_file(KART_FILE, {})
-    for k in ("stats", "daily", "escrow", "best"):
+    for k in ("stats", "daily", "escrow", "best", "garage"):
         d.setdefault(k, {})
     return d
 
@@ -29652,7 +29694,68 @@ def _kart_stats(d: dict, uid_s: str) -> dict:
     st = d["stats"].setdefault(uid_s, {})
     for k in ("races", "wins", "podiums", "mp_races", "mp_wins", "won"):
         st.setdefault(k, 0)
+    st.setdefault("track_wins", {})
+    st.setdefault("track_podiums", {})
     return st
+
+
+def _kart_count_finish(st: dict, tid: str, place: int, finished: bool = True):
+    """Record a race for the garage unlocks: wins and podiums, overall and per track."""
+    st["races"] += 1
+    if finished and place == 1:
+        st["wins"] += 1
+        st["track_wins"][tid] = int(st["track_wins"].get(tid, 0)) + 1
+    if finished and place <= 3:
+        st["podiums"] += 1
+        st["track_podiums"][tid] = int(st["track_podiums"].get(tid, 0)) + 1
+
+
+def _kart_need_met(st: dict, need: dict) -> bool:
+    for k, v in need.items():
+        if k == "price":
+            continue
+        if k == "podium_all":
+            if not all(int(st.get("track_podiums", {}).get(t, 0)) > 0 for t in KART_TRACKS):
+                return False
+        elif k == "track_win":
+            if int(st.get("track_wins", {}).get(v, 0)) < 1:
+                return False
+        elif int(st.get(k, 0)) < int(v):
+            return False
+    return True
+
+
+def _kart_unlocked(d: dict, uid_s: str) -> dict:
+    """Every garage item this member can use, per category."""
+    st = d["stats"].get(uid_s) or {}
+    owned = set((d.get("garage", {}).get(uid_s) or {}).get("owned", []))
+    out = {}
+    for cat, items in KART_CATS.items():
+        out[cat] = [i for i, it in items.items()
+                    if it["need"] is None or f"{cat}:{i}" in owned or ("price" not in it["need"] and _kart_need_met(st, it["need"]))]
+    return out
+
+
+def _kart_look(d: dict, uid_s: str) -> dict:
+    sel = dict(KART_DEFAULT_LOOK, **((d.get("garage", {}).get(uid_s) or {}).get("sel") or {}))
+    un = _kart_unlocked(d, uid_s)
+    return {cat: (sel.get(cat) if sel.get(cat) in un[cat] else KART_DEFAULT_LOOK[cat]) for cat in KART_CATS}
+
+
+def _kart_random_look() -> dict:
+    return {"c": random.choice(list(KART_CHARS)), "b": random.choice(list(KART_BODIES)), "w": random.choice(list(KART_WHEELS)),
+            "p": random.choice([k for k, v in KART_PAINTS.items() if not v.get("metal")]), "d": random.choice(list(KART_DECALS))}
+
+
+def _kart_new_unlocks(before: dict, after: dict) -> list:
+    return [{"cat": cat, "id": i, "name": KART_CATS[cat][i]["name"]} for cat in KART_CATS for i in after[cat] if i not in before[cat]]
+
+
+def _kart_garage_view(d: dict, uid_s: str) -> dict:
+    st = d["stats"].get(uid_s) or {}
+    return {"sel": _kart_look(d, uid_s), "unlocked": _kart_unlocked(d, uid_s),
+            "progress": {"races": int(st.get("races", 0)), "wins": int(st.get("wins", 0)), "podiums": int(st.get("podiums", 0)),
+                         "mp_wins": int(st.get("mp_wins", 0)), "track_wins": st.get("track_wins", {}), "track_podiums": st.get("track_podiums", {})}}
 
 
 def _kart_public_stats(uid_s: str) -> dict:
@@ -29705,10 +29808,10 @@ def _kart_new_race(host: str, tid: str, laps: int, fee: int, bots: bool, now: fl
     return r
 
 
-def _kart_add_player(r: dict, uid_s: str, now: float):
-    used = {p["color"] for p in r["players"].values() if not p.get("left")}
-    color = next((c for c in KART_COLORS if c not in used), KART_COLORS[len(r["players"]) % len(KART_COLORS)])
-    r["players"][uid_s] = {"name": _dash_name(uid_s)[:16], "color": color, "joined": now, "seen": now,
+def _kart_add_player(r: dict, uid_s: str, now: float, look: dict | None = None):
+    look = look or dict(KART_DEFAULT_LOOK)
+    color = KART_PAINTS[look["p"]]["hex"]
+    r["players"][uid_s] = {"name": _dash_name(uid_s)[:16], "color": color, "look": look, "joined": now, "seen": now,
                            "st": None, "s": 0.0, "fin": None, "dnf": None, "flags": 0, "laps": [], "last": 0.0}
 
 
@@ -29719,13 +29822,13 @@ def _kart_grid_slots(n: int) -> list:
 
 def _kart_lobby_view(r: dict, uid_s: str, now: float) -> dict:
     base = _dash_public_url() or ""
-    players = [{"id": u, "name": p["name"], "color": p["color"], "host": u == r["host"],
+    players = [{"id": u, "name": p["name"], "color": p["color"], "look": p.get("look"), "host": u == r["host"],
                 "here": now - p["seen"] <= KART_PRESENT, "you": u == uid_s}
                for u, p in sorted(r["players"].items(), key=lambda kv: kv[1]["joined"]) if not p.get("left")]
     return {"id": r["id"], "status": r["status"], "host": r["host"] == uid_s, "track": r["track"], "laps": r["laps"],
             "fee": r["fee"], "bots": r["bots"], "players": players, "max": KART_MAX_PLAYERS,
             "pot": sum(int(v) for v in r["escrow"].values()), "start_at": r["start_at"], "now": now,
-            "botlist": [{k: b[k] for k in ("id", "name", "color", "skill")} for b in r["botlist"]], "grid": r.get("grid"),
+            "botlist": [{k: b.get(k) for k in ("id", "name", "color", "skill", "look")} for b in r["botlist"]], "grid": r.get("grid"),
             "driver": r["driver"], "results": r["results"], "next": r["next"], "reason": r["reason"],
             "invited": [_dash_name(u) for u in r["invited"]][-4:],
             "link": f"{base}/games/kart?join={r['id']}" if base else f"/games/kart?join={r['id']}"}
@@ -29858,10 +29961,10 @@ def _kart_order(r: dict) -> list:
     for u, p in r["players"].items():
         if p.get("left") and p["fin"] is None and not p["dnf"]:
             continue
-        rows.append({"id": u, "name": p["name"], "color": p["color"], "bot": False, "ms": p["fin"],
+        rows.append({"id": u, "name": p["name"], "color": p["color"], "look": p.get("look"), "bot": False, "ms": p["fin"],
                      "dnf": None if p["fin"] is not None else (p["dnf"] or "dnf"), "s": p["s"], "laps": p["laps"]})
     for b in r["botlist"]:
-        rows.append({"id": b["id"], "name": b["name"], "color": b["color"], "bot": True, "ms": b["fin"],
+        rows.append({"id": b["id"], "name": b["name"], "color": b["color"], "look": b.get("look"), "bot": True, "ms": b["fin"],
                      "dnf": None if b["fin"] is not None else "dnf", "s": (b["st"] or [0] * 6)[5], "laps": []})
     rows.sort(key=lambda w: (0, w["ms"]) if w["ms"] is not None else (1, -w["s"]))
     for i, w in enumerate(rows):
@@ -29904,15 +30007,14 @@ def _kart_settle(d: dict, r: dict, now: float):
                 paid[w["id"]] = got
     for i, w in enumerate(humans):
         st = _kart_stats(d, w["id"])
-        st["races"] += 1
+        before = _kart_unlocked(d, w["id"])
+        _kart_count_finish(st, r["track"], w["place"], w["ms"] is not None)
         st["mp_races"] += 1
         if w["ms"] is not None and i == 0:
-            st["wins"] += 1
             st["mp_wins"] += 1
-        if w["ms"] is not None and w["place"] <= 3:
-            st["podiums"] += 1
         st["won"] += max(0, paid.get(w["id"], 0) - r["fee"])
         _kart_record_lap(d, w["id"], r["track"], w["laps"])
+        w["unlocks"] = _kart_new_unlocks(before, _kart_unlocked(d, w["id"]))
     for w in order:
         w["paid"] = paid.get(w["id"], 0)
     d["escrow"].pop(r["id"], None)
@@ -29982,7 +30084,7 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
     def get_race():
         return _kart_races.get(str(payload.get("id", "")).upper().strip())
 
-    if action in ("create", "join", "start", "leave", "config", "invite", "again", "solo_start", "solo_finish"):
+    if action in ("create", "join", "start", "leave", "config", "invite", "again", "solo_start", "solo_finish", "equip", "buy"):
         if now - _kart_last.get(uid, 0) < 0.25:
             return {"ok": False, "error": "Easy there.", "retry": True}
         _kart_last[uid] = now
@@ -29999,7 +30101,7 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
                     "boards": {t: _kart_board(d, t, uid_s) for t in KART_TRACKS},
                     "solo_today": _kart_today(d, uid_s), "daily_cap": KART_DAILY_CAP, "max_fee": KART_MAX_FEE,
                     "prizes": {"solo": list(KART_SOLO_PRIZE) + [KART_SOLO_REST], "free": list(KART_FREE_PRIZE) + [KART_FREE_REST]},
-                    "bot_names": KART_BOTS, "now": now, "name": _dash_name(uid_s)[:16]})
+                    "bot_names": KART_BOTS, "now": now, "name": _dash_name(uid_s)[:16], "garage": _kart_garage_view(d, uid_s)})
 
     if action == "solo_start":
         tid = str(payload.get("track", ""))
@@ -30024,14 +30126,12 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
         prize = KART_SOLO_PRIZE[place - 1] if place <= len(KART_SOLO_PRIZE) else KART_SOLO_REST
         paid = _kart_pay_capped(d, uid_s, prize, f"placed {place} vs the bots")
         st = _kart_stats(d, uid_s)
-        st["races"] += 1
-        if place == 1:
-            st["wins"] += 1
-        if place <= 3:
-            st["podiums"] += 1
+        before = _kart_unlocked(d, uid_s)
+        _kart_count_finish(st, rec["track"], place)
         best = _kart_record_lap(d, uid_s, rec["track"], payload.get("laps"))
         dirty = True
-        return out({"paid": paid, "best": best, "today": _kart_today(d, uid_s), "board": _kart_board(d, rec["track"], uid_s)})
+        return out({"paid": paid, "best": best, "today": _kart_today(d, uid_s), "board": _kart_board(d, rec["track"], uid_s),
+                    "unlocks": _kart_new_unlocks(before, _kart_unlocked(d, uid_s)), "garage": _kart_garage_view(d, uid_s)})
 
     if action == "create":
         tid = str(payload.get("track", "wallst"))
@@ -30050,7 +30150,7 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
             if cur:
                 _kart_leave(d, cur, uid_s, now)
             r = _kart_new_race(uid_s, tid, laps, fee, bool(payload.get("bots", True)), now)
-            _kart_add_player(r, uid_s, now)
+            _kart_add_player(r, uid_s, now, _kart_look(d, uid_s))
             if fee:
                 economy.add(uid, -fee, "degen kart entry fee (held until the race ends)")
                 r["escrow"][uid_s] = fee
@@ -30091,7 +30191,7 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
             if cur:
                 _kart_leave(d, cur, uid_s, now)
             r["players"].pop(uid_s, None)
-            _kart_add_player(r, uid_s, now)
+            _kart_add_player(r, uid_s, now, _kart_look(d, uid_s))
             if r["fee"]:
                 economy.add(uid, -r["fee"], "degen kart entry fee (held until the race ends)")
                 r["escrow"][uid_s] = r["fee"]
@@ -30142,8 +30242,11 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
             names = random.sample(KART_BOTS, k=min(nbots, len(KART_BOTS)))
             used = {r["players"][u]["color"] for u in racers}
             spare = [c for c in KART_COLORS if c not in used] or KART_COLORS
-            r["botlist"] = [{"id": f"bot{i}", "name": names[i], "color": spare[i % len(spare)], "st": None, "fin": None,
-                             "skill": round(random.uniform(.86, .97), 3)} for i in range(nbots)]
+            r["botlist"] = []
+            for i in range(nbots):
+                look = _kart_random_look()
+                r["botlist"].append({"id": f"bot{i}", "name": names[i], "color": KART_PAINTS[look["p"]]["hex"], "look": look, "st": None,
+                                     "fin": None, "skill": round(random.uniform(.86, .97), 3)})
             order = racers[:]
             random.shuffle(order)
             r["grid"] = order + [b["id"] for b in r["botlist"]]
@@ -30175,7 +30278,7 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
             if r["fee"] and economy.balance(uid) < r["fee"]:
                 return {"ok": False, "error": f"You need {r['fee']:,} coins for the entry fee."}
             n = _kart_new_race(uid_s, r["track"], r["laps"], r["fee"], r["bots"], now)
-            _kart_add_player(n, uid_s, now)
+            _kart_add_player(n, uid_s, now, _kart_look(d, uid_s))
             if n["fee"]:
                 economy.add(uid, -n["fee"], "degen kart entry fee (held until the race ends)")
                 n["escrow"][uid_s] = n["fee"]
@@ -30183,6 +30286,41 @@ async def _kart_dispatch(uid: int, action: str, payload: dict) -> dict:
             r["next"] = n["id"]
         dirty = True
         return out({"next": n["id"]})
+
+    if action == "equip":
+        un = _kart_unlocked(d, uid_s)
+        g = d["garage"].setdefault(uid_s, {"owned": [], "sel": dict(KART_DEFAULT_LOOK)})
+        sel = dict(KART_DEFAULT_LOOK, **(g.get("sel") or {}))
+        for cat in KART_CATS:
+            v = payload.get(cat)
+            if v is None:
+                continue
+            if v not in un[cat]:
+                return {"ok": False, "error": "You haven't unlocked that yet."}
+            sel[cat] = v
+        g["sel"] = sel
+        with _kart_lock:          # a lobby you're waiting in shows your new look straight away
+            r = _kart_active(uid_s)
+            if r and r["status"] == "lobby":
+                r["players"][uid_s]["look"] = dict(sel)
+                r["players"][uid_s]["color"] = KART_PAINTS[sel["p"]]["hex"]
+        dirty = True
+        return out({"garage": _kart_garage_view(d, uid_s)})
+
+    if action == "buy":
+        cat, iid = str(payload.get("cat", "")), str(payload.get("id", ""))
+        it = KART_CATS.get(cat, {}).get(iid)
+        if not it or not it["need"] or "price" not in it["need"]:
+            return {"ok": False, "error": "That isn't for sale."}
+        if iid in _kart_unlocked(d, uid_s)[cat]:
+            return {"ok": False, "error": "You already have that."}
+        price = int(it["need"]["price"])
+        if economy.balance(uid) < price:
+            return {"ok": False, "error": f"You need {price:,} coins."}
+        economy.add(uid, -price, f"degen kart garage: {it['name']}")
+        d["garage"].setdefault(uid_s, {"owned": [], "sel": dict(KART_DEFAULT_LOOK)})["owned"].append(f"{cat}:{iid}")
+        dirty = True
+        return out({"garage": _kart_garage_view(d, uid_s), "bought": {"cat": cat, "id": iid, "name": it["name"], "price": price}})
 
     if action == "members":
         return out({"members": _pb_member_search(str(payload.get("q", ""))[:32], uid_s)})
@@ -30306,7 +30444,7 @@ async def _handle_kart(message: discord.Message, rest: str):
         if cur:
             _kart_leave(d, cur, uid_s, now)
         r = _kart_new_race(uid_s, "wallst", KART_TRACKS["wallst"]["laps"], fee, True, now)
-        _kart_add_player(r, uid_s, now)
+        _kart_add_player(r, uid_s, now, _kart_look(d, uid_s))
         if fee:
             economy.add(uid, -fee, "degen kart entry fee (held until the race ends)")
             r["escrow"][uid_s] = fee

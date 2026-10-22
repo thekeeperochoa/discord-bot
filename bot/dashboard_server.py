@@ -110,7 +110,7 @@ _GAME_ACTIONS = {"getaway": {"info": "GET", "start": "POST", "finish": "POST"},
                                "invite": "POST"},
                  "kart": {"info": "POST", "solo_start": "POST", "solo_finish": "POST", "create": "POST", "peek": "POST",
                           "join": "POST", "state": "POST", "config": "POST", "start": "POST", "leave": "POST", "again": "POST",
-                          "members": "POST", "invite": "POST", "tick": "POST"}}
+                          "members": "POST", "invite": "POST", "tick": "POST", "equip": "POST", "buy": "POST"}}
 # Actions answered straight from the web thread (no bot-loop hop): the kart racing heartbeat.
 _FAST_PROVIDER = None
 _FAST_ACTIONS = {("kart", "tick")}
