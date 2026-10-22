@@ -106,7 +106,7 @@ body.touch .speed{display:none}
   filter:drop-shadow(0 4px 0 #5A2A00) drop-shadow(0 0 26px rgba(255,170,40,.45));transform:skewX(-8deg)}
 .logo p{margin:8px 0 0;color:var(--muted);font-size:15px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:26px 0 18px}
-.mbtn{position:relative;overflow:hidden;text-align:left;border:0;cursor:pointer;border-radius:18px;padding:18px 18px 16px;min-height:118px;
+.mbtn{position:relative;overflow:hidden;text-align:left;border:0;cursor:pointer;border-radius:18px;padding:18px 18px 16px;min-height:118px;display:flex;flex-direction:column;justify-content:flex-start;align-items:stretch;
   background:linear-gradient(160deg,rgba(255,255,255,.10),rgba(255,255,255,.03));box-shadow:inset 0 0 0 1px rgba(255,255,255,.12),0 14px 34px rgba(0,0,0,.4);
   transition:transform .18s,box-shadow .18s;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 .mbtn:hover{transform:translateY(-3px);box-shadow:inset 0 0 0 1px rgba(255,210,63,.6),0 18px 40px rgba(0,0,0,.5)}
@@ -202,8 +202,9 @@ body.touch .speed{display:none}
 .gcard em{font-style:normal;font-size:11px;color:var(--gold);line-height:1.25;margin-top:2px}
 .gcard.locked img{filter:brightness(0) drop-shadow(0 0 1px rgba(255,255,255,.5));opacity:.75}
 .gcard.locked .sw{filter:grayscale(.6) brightness(.5)}
-.garage-card{padding-right:120px}
-.garage-card img{position:absolute;right:-6px;bottom:-10px;width:140px;height:140px;object-fit:contain;filter:drop-shadow(0 8px 12px rgba(0,0,0,.5))}
+/* the kart sits in the top-right corner beside the icon, clear of the title and text */
+.garage-card img{position:absolute;top:4px;right:6px;width:80px;height:80px;object-fit:contain;filter:drop-shadow(0 6px 10px rgba(0,0,0,.5));pointer-events:none}
+@media (max-width:520px){ .garage-card img{width:104px;height:104px;top:6px} .garage-card p{padding-right:96px} }
 .emo{width:20px;text-align:center}
 .board em{font-style:normal;font-size:12px}
 .unlocks{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
@@ -2169,8 +2170,10 @@ function grShow(look, mode){
   else { GR.cam.position.set(4.2, 2.6, 5.4); GR.cam.lookAt(0, .55, 0); }
 }
 function thumb(look, mode, size){
-  var key = JSON.stringify(look) + mode; if (GR.thumbs[key]) return GR.thumbs[key];
+  var key = JSON.stringify(look) + mode + (size || 128); if (GR.thumbs[key]) return GR.thumbs[key];
   grShow(look, mode);
+  // kart thumbnails: just the kart on a transparent background (the round platform got clipped into a hard-edged box)
+  if (mode !== "head"){ GR.plat.forEach(function(p){ p.visible = false; }); GR.cam.position.set(3.7, 2.3, 4.8); GR.cam.lookAt(0, .7, 0); }
   GR.r.setSize(size || 128, size || 128, false); GR.cam.aspect = 1; GR.cam.updateProjectionMatrix();
   if (mode !== "head") GR.model.g.rotation.y = -.6; else GR.model.g.rotation.y = 0;
   GR.r.setClearColor(0x000000, 0); GR.r.render(GR.scene, GR.cam);
