@@ -55,10 +55,29 @@ button,input,select{font:inherit;color:inherit}
 .speed small{display:block;font:600 11px/1 "IBM Plex Sans",sans-serif;letter-spacing:.1em;color:var(--muted)}
 .drift-meter{position:absolute;left:50%;bottom:calc(26px + var(--safe-b));transform:translateX(-50%);width:180px;height:8px;border-radius:5px;background:rgba(255,255,255,.12);overflow:hidden;opacity:0;transition:opacity .2s}
 .drift-meter.on{opacity:1}
-.drift-meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3DE0FF,#FFB21F 70%,#FF4D6D)}
+/* colours sit at the real charge points: building (grey), blue, orange, then the whole bar goes purple */
+.drift-meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#9AA0B4 0 30%,#3DE0FF 30% 62.5%,#FFB21F 62.5%) 0 0/180px 100% no-repeat;transition:width .05s}
+.drift-meter[data-tier="3"] i{background:#C86BFF}
+.drift-meter[data-tier="1"]{box-shadow:0 0 12px #3DE0FF} .drift-meter[data-tier="2"]{box-shadow:0 0 14px #FFB21F} .drift-meter[data-tier="3"]{box-shadow:0 0 18px #C86BFF}
+.hint{margin-top:10px;font:600 13px/1.3 "IBM Plex Sans",sans-serif;color:#fff;text-shadow:0 1px 3px #000;opacity:.9}
+.pop{margin-top:8px;font-size:26px;color:#fff;text-shadow:0 3px 0 rgba(0,0,0,.45);animation:pop 1.6s ease-out both}
+.pop.good{color:var(--gold);font-size:32px}
+.split{display:inline-block;margin-top:8px;padding:6px 14px;border-radius:12px;background:rgba(7,6,15,.6);font:600 16px/1 var(--mono);color:#fff;animation:pop 2.4s ease-out both}
+.split b{color:var(--green);font-family:var(--disp);font-weight:400;margin-left:6px}
+.pdelta{font-size:20px;line-height:1;opacity:0;transform:translateY(6px);text-shadow:0 2px 0 rgba(0,0,0,.5);height:0;overflow:visible}
+.pdelta.up{color:var(--green)} .pdelta.down{color:var(--red)}
+.pdelta.show{animation:delta 1.4s ease-out both}
+@keyframes delta{15%{opacity:1;transform:translateY(-4px)}75%{opacity:1}100%{opacity:0;transform:translateY(-14px)}}
+.place.bumpup{animation:bump .35s ease-out} .place.bumpdown{animation:bump .35s ease-out}
+@keyframes bump{40%{transform:scale(1.18)}}
+#speedfx{position:fixed;inset:-10%;pointer-events:none;opacity:0;z-index:1;
+  background:repeating-conic-gradient(from 0deg at 50% 46%,rgba(255,255,255,0) 0 2.6deg,rgba(255,255,255,.55) 2.6deg 3deg,rgba(255,255,255,0) 3deg 7deg);
+  -webkit-mask:radial-gradient(ellipse at 50% 46%,transparent 0 30%,#000 75%);mask:radial-gradient(ellipse at 50% 46%,transparent 0 30%,#000 75%);animation:sfx .16s steps(3) infinite}
+@keyframes sfx{33%{transform:rotate(1.2deg) scale(1.02)}66%{transform:rotate(-1deg) scale(1.01)}}
+@media (prefers-reduced-motion:reduce){#speedfx{display:none}}
 .center{position:absolute;left:0;right:0;top:34%;text-align:center;pointer-events:none}
 .count{font-size:120px;line-height:1;color:#fff;text-shadow:0 6px 0 rgba(0,0,0,.4),0 0 40px rgba(255,210,63,.6);animation:pop .9s ease-out both}
-.count.go{color:var(--green)}
+.count.gocount{color:var(--green)}
 @keyframes pop{0%{transform:scale(2.2);opacity:0}25%{transform:scale(1);opacity:1}80%{opacity:1}100%{transform:scale(.8);opacity:0}}
 .banner{display:inline-block;font-size:30px;padding:10px 22px;border-radius:14px;background:rgba(7,6,15,.65);box-shadow:0 0 0 2px rgba(255,210,63,.6);animation:pop 2.4s ease-out both}
 .warn{color:var(--red)}
@@ -349,9 +368,10 @@ window.BOOT = (function(){
 })();
 </script>
 <canvas id="gl" aria-label="Race view"></canvas>
+<div id="speedfx" aria-hidden="true"></div>
 <div id="hud" hidden>
   <div class="hud-tl">
-    <div class="place" id="hPlace">1<sup>st</sup></div>
+    <div class="place" id="hPlace">1<sup>st</sup></div><div class="pdelta" id="hDelta"></div>
     <div class="lap" id="hLap">LAP 1/3</div>
     <div class="timer" id="hTime">0:00.00</div>
     <div class="board" id="hBoard"></div>
@@ -500,24 +520,31 @@ function newKart(o){
           drift: 0, driftT: 0, boostT: 0, spinT: 0, shieldT: 0, item: null, rollT: 0, useT: 0, lane: (Math.random() - .5) * 6, laneT: 0,
           lapT: [], lapStart: 0, fin: null, wrong: 0, bump: 0, hop: 0, aiT: 0, finPlace: 0, hitBy: null, vis: {roll: 0, pitch: 0, wheel: 0, spin: 0}};
 }
-function kartFlags(k){ return (k.drift ? 1 : 0) | (k.boostT > 0 ? 2 : 0) | (k.shieldT > 0 ? 4 : 0) | (k.spinT > 0 ? 8 : 0) | (k.driftT > 1.8 ? 32 : k.driftT > .9 ? 16 : 0); }
+// drift charge tiers: blue, orange, purple sparks, each a longer mini-turbo
+var DRIFT_T = [.6, 1.25, 2.0], DRIFT_BOOST = [.7, 1.1, 1.6];
+function driftTier(t){ return t > DRIFT_T[2] ? 3 : t > DRIFT_T[1] ? 2 : t > DRIFT_T[0] ? 1 : 0; }
+function kartFlags(k){ var tr = driftTier(k.driftT); return (k.drift ? 1 : 0) | (k.boostT > 0 ? 2 : 0) | (k.shieldT > 0 ? 4 : 0) | (k.spinT > 0 ? 8 : 0) | (tr === 3 ? 64 : tr === 2 ? 32 : tr === 1 ? 16 : 0); }
 function kartState(k){ return [+k.x.toFixed(2), +k.h.toFixed(2), +k.z.toFixed(2), +k.yaw.toFixed(3), +k.v.toFixed(2), +k.sT.toFixed(1), kartFlags(k)]; }
 
 // One physics step for a kart we control (ours, or a bot we drive). `inp`: thr -1..1, steer -1..1, drift bool.
 function stepKart(k, inp, dt, T, others, fx){
   var spinning = k.spinT > 0;
   if (spinning){ k.spinT -= dt; inp = {thr: 0, steer: 0, drift: false}; k.drift = 0; k.driftT = 0; }
-  k.boostT = Math.max(0, k.boostT - dt); k.shieldT = Math.max(0, k.shieldT - dt); k.bump = Math.max(0, k.bump - dt); k.hop = Math.max(0, k.hop - dt);
+  k.boostT = Math.max(0, k.boostT - dt); k.shieldT = Math.max(0, k.shieldT - dt); k.bump = Math.max(0, k.bump - dt); k.hop = Math.max(0, k.hop - dt); k.wallT = Math.max(0, (k.wallT || 0) - dt);
   var loc = T.locate(k.x, k.z, k.idx); k.idx = loc.i; k.lat = loc.lat;
-  k.off = Math.abs(loc.lat) > T.W / 2 + .3;
+  k.off = Math.abs(loc.lat) > T.W / 2 + .3; k.offT = k.off ? (k.offT || 0) + dt : 0;
   var P = k.P || BASE_P;
-  var vmax = k.boostT > 0 ? VBOOST + P.boost : k.off ? P.voff : P.vmax;
+  // hills: the road's slope along your heading lowers top speed climbing and raises it coming down
+  var ah = T.at(loc.s + 1.5), bh = T.at(loc.s - 1.5), slope = (ah.h - bh.h) / 3 * Math.cos(k.yaw - Math.atan2(ah.tx, ah.tz));
+  var vmax = (k.boostT > 0 ? VBOOST + P.boost : k.off ? P.voff : P.vmax) * clamp(1 - slope * 1.4, .86, 1.12);
   if (k.bot) vmax *= k.skill;
   // throttle / brake
   if (inp.thr > 0){ if (k.v < vmax) k.v += P.acc * inp.thr * (1 - Math.max(0, k.v) / vmax * .55) * dt; }
   else if (inp.thr < 0){ k.v -= (k.v > 0 ? BRAKE : 12) * -inp.thr * dt; k.v = Math.max(VREV, k.v); }
   else k.v -= Math.sign(k.v) * Math.min(Math.abs(k.v), COAST * dt);
-  if (k.v > vmax) k.v = Math.max(vmax, k.v - (k.off ? 34 : 14) * dt);
+  if (k.v > vmax) k.v = Math.max(vmax, k.v - (k.off ? 24 : 14) * dt);
+  if (slope) k.v -= 9.8 * slope * .75 * dt;                         // and gravity tugs on you either way
+  k.v = Math.min(k.v, VBOOST + P.boost + 1.5);                       // never faster than the server allows
   if (k.boostT > 0 && inp.thr >= 0) k.v = Math.min(VBOOST + P.boost, k.v + 30 * dt);
   // steering
   k.steer += (inp.steer - k.steer) * Math.min(1, dt * 10);
@@ -525,20 +552,21 @@ function stepKart(k, inp, dt, T, others, fx){
   var rate = 2.2 * grip * P.turn * (k.v < 0 ? -1 : 1);
   if (inp.drift && !k.drift && sp > 11 && Math.abs(inp.steer) > .25 && !k.off){ k.drift = inp.steer > 0 ? 1 : -1; k.driftT = 0; k.hop = .18; fx && fx("hop", k); }
   if (k.drift){
-    if (!inp.drift || sp < 8 || k.off){
-      if (k.driftT > .9 && !k.off){ k.boostT = Math.max(k.boostT, k.driftT > 1.8 ? 1.5 : .8); fx && fx("turbo", k, k.driftT > 1.8 ? 2 : 1); }
+    if (!inp.drift || sp < 8 || k.offT > .35){        // a brush with the grass is forgiven; staying on it ends the drift
+      var tier = driftTier(k.driftT);
+      if (tier && !k.off){ k.boostT = Math.max(k.boostT, DRIFT_BOOST[tier - 1]); fx && fx("turbo", k, tier); }
       k.drift = 0; k.driftT = 0;
     } else {
-      k.driftT += dt * (.75 + .5 * Math.abs(inp.steer));
-      // drifting: always turn into the drift, tighter or wider with the stick
-      var amt = .72 + .5 * (inp.steer * k.drift);
+      if (!k.off) k.driftT += dt * (.8 + .6 * Math.abs(inp.steer));      // charge only builds on the road (faster leaning in hard)
+      // drifting: always turn into the drift, tighter or wider with the stick (never so wide you fly off)
+      var amt = .75 + .55 * (inp.steer * k.drift);         // from a wide sweep (.2) to a hairpin (1.3)
       k.yaw -= k.drift * rate * amt * 1.18 * dt;
     }
   }
   if (!k.drift) k.yaw -= k.steer * rate * dt;
   k.yaw = wrapAng(k.yaw);
   // move: heading plus a little outward slide while drifting
-  var fxv = Math.sin(k.yaw), fzv = Math.cos(k.yaw), slide = k.drift ? k.drift * sp * .16 : 0;
+  var fxv = Math.sin(k.yaw), fzv = Math.cos(k.yaw), slide = k.drift ? k.drift * sp * .1 : 0;
   // right of heading (screen right) is (-cos, sin)... we slide outward, i.e. against the turn
   k.x += (fxv * k.v + (-fzv) * -slide) * dt;
   k.z += (fzv * k.v + fxv * -slide) * dt;
@@ -549,10 +577,15 @@ function stepKart(k, inp, dt, T, others, fx){
   if (Math.abs(loc.lat) > lim){
     var push = Math.abs(loc.lat) - lim, sg = Math.sign(loc.lat), p = T.pts[loc.i];
     k.x -= p.nx * sg * (push + .05); k.z -= p.nz * sg * (push + .05);
-    var head = Math.atan2(p.tx, p.tz), rel = wrapAng(k.yaw - head);
-    if (Math.abs(rel) < Math.PI / 2){ k.yaw = wrapAng(head + rel * .55); } else { k.yaw = wrapAng(head + Math.PI + wrapAng(rel - Math.PI) * .55); }
-    if (k.bump <= 0 && Math.abs(k.v) > 6){ fx && fx("wall", k); k.bump = .35; }
-    k.v *= .82; k.drift = 0; k.driftT = 0;
+    var head = Math.atan2(p.tx, p.tz), rel = wrapAng(k.yaw - head), into = Math.abs(Math.sin(rel));
+    if (Math.abs(rel) < Math.PI / 2){ k.yaw = wrapAng(head + rel * .5); } else { k.yaw = wrapAng(head + Math.PI + wrapAng(rel - Math.PI) * .5); }
+    if (k.wallT <= 0){
+      // a fresh hit: lose speed by how square it was (a glancing touch barely slows you)
+      k.v *= 1 - (.08 + .5 * into);
+      if (Math.abs(k.v) > 5 && into > .12){ fx && fx("wall", k, into); }
+      if (into > .3){ k.drift = 0; k.driftT = 0; }
+    } else k.v -= Math.sign(k.v) * Math.min(Math.abs(k.v), 4 * dt);     // still scraping: light friction
+    k.wallT = .25;
   }
   // other karts
   for (var j = 0; j < others.length; j++){
@@ -586,13 +619,18 @@ function botInput(k, T, karts, race){
   var look = 8 + Math.max(0, k.v) * .55, tg = T.at(s + look), tx = tg.x + tg.nx * k.lane, tz = tg.z + tg.nz * k.lane;
   var want = Math.atan2(tx - k.x, tz - k.z), diff = wrapAng(want - k.yaw);
   var steer = clamp(-diff * 2.6, -1, 1);
-  var c = Math.max(T.curvAt(s + 6), T.curvAt(s + 18) * .9);
-  var target = (k.P || BASE_P).vmax * k.skill * (1 - clamp(c * .62, 0, .52));
+  var c = Math.max(T.curvAt(s + 6), T.curvAt(s + 18) * .9), P = k.P || BASE_P;
+  var target = P.vmax * k.skill, R = 28 / Math.max(.05, c);
+  for (var v = target; v > 9; v -= .5){ var grip = Math.min(1, v / 7) * (1 - .32 * Math.min(1, v / 32)); if (v / R <= 2.2 * grip * P.turn * .82) break; }
+  target = Math.min(target, v);
   // gentle rubber band so races stay close
   var lead = race && race.leadS != null ? race.leadS - k.sT : 0;
   if (lead > 60) target *= 1.05; else if (lead < -40) target *= .96;
   var thr = k.v < target ? 1 : k.v > target + 2.5 ? -.7 : 0;
-  var drift = k.drift ? c > .28 : (c > .55 && k.v > 17 && Math.abs(steer) > .35);
+  // drift only into the bend (never against it), and only on bends long enough to charge a boost
+  var h0 = T.at(s), h1 = T.at(s + 22), turn = wrapAng(Math.atan2(h1.tx, h1.tz) - Math.atan2(h0.tx, h0.tz)), bendSteer = turn > 0 ? -1 : 1;
+  // ...and let go as the road straightens (or once it's fighting the drift), cashing in whatever boost it built
+  var drift = k.drift ? (c > .3 && k.drift === bendSteer && steer * k.drift > -.55 && Math.abs(k.lat) < T.W / 2 - 1) : (c > .55 && Math.abs(turn) > .45 && k.v > 17 && steer * bendSteer > .3 && Math.abs(k.lat) < T.W / 2 - 2);
   return {thr: thr, steer: steer, drift: drift};
 }
 // what a bot does with its item
@@ -900,9 +938,9 @@ function poseKart(m, k, dt){
   m.wheels.forEach(function(w){ w.tyre.rotation.x = k.vis.wheel; if (w.front) w.piv.rotation.y = -(k.steer || 0) * .45; });
   var boosting = k.boostT > 0 || (k.fl & 2);
   m.flames.forEach(function(f){ f.visible = boosting; if (boosting){ var fl = .7 + Math.random() * .6; f.scale.set(.85 + fl * .15, .85 + fl * .15, fl); } });
-  var tier = k.driftT > 1.8 || (k.fl & 32) ? 2 : k.driftT > .9 || (k.fl & 16) ? 1 : 0;
-  m.sparks.forEach(function(s){ s.visible = !!drifting && tier > 0; s.scale.setScalar(.6 + Math.random() * .6); });
-  m.sparkMat.color.set(tier === 2 ? "#FF8A1F" : "#3DE0FF");
+  var tier = k.fl & 64 ? 3 : k.fl & 32 ? 2 : k.fl & 16 ? 1 : driftTier(k.driftT);
+  m.sparks.forEach(function(s){ s.visible = !!drifting && tier > 0; s.scale.setScalar((tier === 3 ? .9 : .6) + Math.random() * .6); });
+  m.sparkMat.color.set(tier === 3 ? "#C86BFF" : tier === 2 ? "#FF8A1F" : "#3DE0FF");
   m.shield.visible = k.shieldT > 0 || !!(k.fl & 4);
   if (m.shield.visible) m.shield.scale.setScalar(1 + Math.sin(R.t * 6) * .04);
 }
@@ -1019,7 +1057,7 @@ var AU = (function(){
     }
   };
 })();
-addEventListener("pointerdown", function(){ AU.unlock(); }, {passive: true});
+addEventListener("pointerdown", function(){ AU.unlock(); if (IS_TOUCH && G.status === "count" && !G.revAt) G.revAt = raceNow(); }, {passive: true});
 
 // ── race state ────────────────────────────────────────────────────────────────
 var G = {status: "menu", mode: null, T: null, karts: [], me: null, startAt: 0, laps: 3, hazards: {}, shots: {}, outbox: [], mine: {}, seq: 0,
@@ -1053,7 +1091,7 @@ function startRace(opts){
   G.me = G.karts.filter(function(k){ return k.isMe; })[0];
   T.boxes.forEach(function(b){ b.hide = 0; });
   G.startAt = opts.startAt; G.status = "count"; G.clock = nowS(); G.revAt = 0; G.soloDoneAt = 0;
-  G.camIntro = 0; R.camPos = null;
+  G.camIntro = 0; R.camPos = null; R.camYaw = null; G.lastPlace = 0; G.placeAt = 0; SPEEDFX.v = 0;
   $("menu").hidden = true; $("hud").hidden = false; $("touch").hidden = !IS_TOUCH; document.body.classList.toggle("touch", IS_TOUCH);
   drawMiniBase(T);
   hudBoard(true);
@@ -1137,11 +1175,13 @@ function stepItems(dt){
 // ── the frame loop ────────────────────────────────────────────────────────────
 var lastT = performance.now(), hudT = 0, camShake = 0;
 function shake(a){ camShake = Math.max(camShake, a); }
+// a short buzz on phones that support it
+function buzz(ms){ if (IS_TOUCH && navigator.vibrate) try { navigator.vibrate(ms); } catch (e) {} }
 function fxHook(name, k, x){
   if (!k.isMe && dist(k, G.me) > 45) return;
-  if (name === "wall"){ AU.sfx("wall"); if (k.isMe) shake(.25); }
-  else if (name === "bump") AU.sfx("bump");
-  else if (name === "turbo"){ AU.sfx("turbo", x); }
+  if (name === "wall"){ AU.sfx("wall"); if (k.isMe){ shake(.12 + .3 * (x || .5)); buzz(Math.round(12 + 30 * (x || .5))); } }
+  else if (name === "bump"){ AU.sfx("bump"); if (k.isMe) buzz(10); }
+  else if (name === "turbo"){ AU.sfx("turbo", Math.min(2, x)); if (k.isMe){ buzz(8 + 8 * x); if (x === 3) shake(.1); } }
   else if (name === "hop" && k.isMe) AU.sfx("hop");
 }
 function frame(now){
@@ -1170,12 +1210,17 @@ function raceFrame(dt){
   // countdown lights
   if (G.status === "count"){
     var c = Math.ceil(-rt);
-    if (c !== G.lastCount && c <= 3 && c >= 1){ G.lastCount = c; hudCenter('<div class="lights">' + [3, 2, 1].map(function(n){ return '<i class="' + (c <= n ? "r" : "") + '"></i>'; }).join("") + '</div><div class="count">' + c + "</div>"); AU.sfx("beep"); }
+    if (c !== G.lastCount && c <= 3 && c >= 1){ G.lastCount = c; hudCenter('<div class="lights">' + [3, 2, 1].map(function(n){ return '<i class="' + (c <= n ? "r" : "") + '"></i>'; }).join("") + '</div><div class="count">' + c + "</div>" +
+      '<div class="hint">' + (IS_TOUCH ? "Tap the screen" : "Hit the gas") + " as the last light comes on for a rocket start</div>"); AU.sfx("beep"); }
     R.lightsOn.forEach(function(bl, i){ bl.material.color.set(rt > -3 + i * .6 ? "#FF3B30" : "#331010"); });
-    if (rt >= 0){ G.status = "race"; G.lastCount = 0; hudCenter('<div class="lights gone"><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="count go">GO!</div>'); AU.sfx("go");
+    if (rt >= 0){
+      G.status = "race"; G.lastCount = 0; AU.sfx("go");
       R.lightsOn.forEach(function(bl){ bl.material.color.set("#39E58C"); });
-      // a well-timed throttle at GO gives a rocket start
-      if (me && (KEYS.up || IS_TOUCH) && G.revAt && G.revAt > G.startAt - 1.2) me.boostT = .9;
+      // a well-timed throttle (or tap, on a phone) as the last light comes on gives a rocket start
+      var rocket = me && (KEYS.up || IS_TOUCH) && G.revAt && G.revAt > G.startAt - 1.2, early = G.revAt && !rocket;
+      if (rocket){ me.boostT = 1.2; buzz(30); }
+      hudCenter('<div class="lights gone"><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="count gocount">GO!</div>' +
+        (rocket ? '<div class="pop good">ROCKET START!</div>' : early ? '<div class="pop">Too early</div>' : ""));
     }
     if (KEYS.up && !G.revAt) G.revAt = t;
   }
@@ -1194,7 +1239,11 @@ function raceFrame(dt){
         var lapMs = Math.round((t - G.startAt) * 1000) - k.lapT.reduce(function(a, b){ return a + b; }, 0);
         if (lap <= G.laps && lap >= 1) k.lapT.push(lapMs);
         if (lap >= G.laps){ k.fin = Math.round((t - G.startAt) * 1000); onFinish(k); }
-        else if (k.isMe){ if (lap === G.laps - 1){ AU.sfx("final"); hudCenter('<div class="banner">FINAL LAP</div>'); } else AU.sfx("lap"); }
+        else if (k.isMe){
+          var best = k.lapT.length > 1 && lapMs <= Math.min.apply(null, k.lapT.slice(0, -1));
+          var split = '<div class="split">Lap ' + lap + " " + fmtT(lapMs) + (best ? ' <b>BEST</b>' : "") + "</div>";
+          if (lap === G.laps - 1){ AU.sfx("final"); hudCenter('<div class="banner">FINAL LAP</div>' + split); } else { AU.sfx("lap"); hudCenter(split); }
+        }
       }
     });
   }
@@ -1219,6 +1268,8 @@ function raceFrame(dt){
   });
   camera(dt);
   hideOccluders();
+  speedFx(dt, me);
+  if (me && racing && me.fin == null && !G.paused) recover(me, dt, T);
   AU.engine(me ? me.v : 0, me && me.boostT > 0, true); AU.drift(!!(me && me.drift));
   hudT += dt; if (hudT > .066){ hudT = 0; hud(rt); }
   if (G.mode === "mp" && performance.now() - G.lastNet > 95) netTick();
@@ -1226,7 +1277,9 @@ function raceFrame(dt){
 }
 function camera(dt){
   var me = G.me; if (!me) return;
-  var fx = Math.sin(me.yaw + me.vis.spin * .15), fz = Math.cos(me.yaw + me.vis.spin * .15);
+  if (R.camYaw == null) R.camYaw = me.yaw;
+  R.camYaw = wrapAng(R.camYaw + wrapAng(me.yaw - R.camYaw) * (1 - Math.exp(-dt * (me.spinT > 0 ? 2 : 7))));
+  var fx = Math.sin(R.camYaw), fz = Math.cos(R.camYaw);
   var back = G.status === "count" ? lerp(14, 6.6, clamp(raceNow() - G.startAt + 3, 0, 3) / 3) : 6.6;
   var want = new THREE.Vector3(me.x - fx * back, me.h + 2.75 + (G.status === "count" ? back * .25 : 0), me.z - fz * back);
   if (!R.camPos){ R.camPos = want.clone(); }
@@ -1250,6 +1303,22 @@ function hideOccluders(){
     m.g.visible = !near && !block;
   });
 }
+// speed lines round the edge of the screen when boosting or flat out
+var SPEEDFX = {v: 0, el: null};
+function speedFx(dt, me){
+  var el = SPEEDFX.el || (SPEEDFX.el = $("speedfx")); if (!el || !me) return;
+  var want = me.boostT > 0 ? .75 : clamp((me.v / (me.P || BASE_P).vmax - .9) * 3, 0, .3);
+  SPEEDFX.v += (want - SPEEDFX.v) * Math.min(1, dt * 6);
+  el.style.opacity = SPEEDFX.v.toFixed(3);
+}
+// stuck against a wall, or driving the wrong way for ages: put the kart back on the road facing forward
+function recover(me, dt, T){
+  me.stuckT = Math.abs(me.v) < 2 && me.spinT <= 0 ? (me.stuckT || 0) + dt : 0;
+  if (me.stuckT < 3 && me.wrong < 6) return;
+  var loc = T.locate(me.x, me.z, me.idx), a = T.at(loc.s), lat = clamp(loc.lat, -T.W / 2 + 2, T.W / 2 - 2);
+  me.x = a.x + a.nx * lat; me.z = a.z + a.nz * lat; me.h = a.h; me.yaw = Math.atan2(a.tx, a.tz); me.v = 6; me.drift = 0; me.driftT = 0; me.stuckT = 0; me.wrong = 0;
+  R.camPos = null; R.camYaw = me.yaw; hudCenter('<div class="banner">BACK ON TRACK</div>');
+}
 function onFinish(k){
   if (!k.isMe) return;
   var p = placeOf(k);
@@ -1264,6 +1333,11 @@ function hud(rt){
   var me = G.me; if (!me) return;
   var st = standings(), p = st.indexOf(me) + 1, T = G.T;
   var pl = $("hPlace"); pl.innerHTML = p + "<sup>" + suffix(p) + "</sup>"; pl.className = "place" + (p === 1 ? " p1" : "");
+  if (G.status === "race" && G.lastPlace && p !== G.lastPlace && me.fin == null){
+    var dEl = $("hDelta"), up = p < G.lastPlace; dEl.textContent = (up ? "▲" : "▼") + Math.abs(G.lastPlace - p); dEl.className = "pdelta " + (up ? "up" : "down");
+    void dEl.offsetWidth; dEl.classList.add("show"); pl.classList.add(up ? "bumpup" : "bumpdown");
+  }
+  G.lastPlace = p;
   var lap = clamp(Math.floor(me.sT / T.L) + 1, 1, G.laps);
   $("hLap").textContent = me.fin != null ? "FINISHED" : "LAP " + lap + "/" + G.laps;
   $("hTime").textContent = fmtT(me.fin != null ? me.fin : Math.max(0, rt * 1000));
@@ -1272,7 +1346,7 @@ function hud(rt){
   if (me.rollT > 0){ it.textContent = ITEMS[ITEM_KEYS[Math.floor(R.t * 14) % 4]].icon; it.className = "item rolling"; $("hItemName").textContent = "…"; }
   else if (me.item){ it.textContent = ITEMS[me.item].icon; it.className = "item ready"; $("hItemName").textContent = ITEMS[me.item].name + (IS_TOUCH ? "" : " · SHIFT"); }
   else { it.textContent = ""; it.className = "item"; $("hItemName").innerHTML = "&nbsp;"; }
-  var dm = $("hDrift"); dm.classList.toggle("on", !!me.drift); dm.firstChild.style.width = Math.min(100, me.driftT / 1.8 * 100) + "%";
+  var dm = $("hDrift"); dm.classList.toggle("on", !!me.drift); dm.firstChild.style.width = Math.min(100, me.driftT / DRIFT_T[2] * 100) + "%"; dm.dataset.tier = driftTier(me.driftT);
   if (me.wrong > 1.2 && me.fin == null && !G.wrongShown){ G.wrongShown = true; hudCenter('<div class="banner warn">WRONG WAY</div>'); }
   if (me.wrong === 0) G.wrongShown = false;
   hudBoard(false, st);
@@ -1647,8 +1721,8 @@ UI.closePause = function(){ G.paused = false; if (G.status !== "menu") $("menu")
 UI.how = function(){
   show(topBar() + '<button type="button" class="back" id="back">← Back</button><div class="panel"><h2>How to play</h2><div class="howto">' +
     '<div><b>Drive</b><span class="kbd">W</span>/<span class="kbd">↑</span> gas · <span class="kbd">S</span>/<span class="kbd">↓</span> brake · <span class="kbd">A D</span>/<span class="kbd">← →</span> steer. On a phone the kart accelerates by itself; use the arrows, BRAKE and DRIFT.</div>' +
-    '<div><b>Drift</b>Hold <span class="kbd">SPACE</span> while turning to hop into a drift. Hold it until the sparks go <span style="color:#3DE0FF">blue</span>, then <span style="color:#FF8A1F">orange</span>, and let go for a boost.</div>' +
-    '<div><b>Rocket start</b>Hold the gas as the last red light comes on for a boost off the line.</div>' +
+    '<div><b>Drift</b>Hold <span class="kbd">SPACE</span> while turning to hop into a drift. Hold it until the sparks go <span style="color:#3DE0FF">blue</span>, <span style="color:#FF8A1F">orange</span>, then <span style="color:#C86BFF">purple</span>, and let go: the longer you hold, the bigger the boost.</div>' +
+    '<div><b>Rocket start</b>Hit the gas (on a phone, tap the screen) as the last red light comes on for a boost off the line. Too early and you get nothing.</div>' +
     '<div><b>Items</b>Drive through the ? boxes. Use with <span class="kbd">SHIFT</span> or <span class="kbd">E</span>.<br>⚡ Nitro: a big boost · 🍌 Banana Peel: drop it behind you · 📉 Margin Call: homes in on the kart ahead · 🪂 Golden Parachute: blocks one hit</div>' +
     '<div><b>Boost pads</b>Orange chevrons on the road give a free boost. Grass slows you down.</div>' +
     '<div><b>Prizes</b>Free races pay small prizes, up to ' + fmtN(UI.info.daily_cap) + ' coins a day. Entry-fee races pay the pot out by finishing order and have no cap.</div>' +
@@ -3061,7 +3135,7 @@ api("info", {}).then(function(d){
   BOOT.done();
 }).catch(function(e){ if (e && e.message === "login") return; BOOT.fail(); show(topBar() + '<p class="err" style="text-align:center;margin-top:30vh">Couldn\'t reach the server. Refresh to try again.</p>'); });
 document.addEventListener("visibilitychange", function(){ if (document.hidden && G.mode === "solo" && G.status === "race" && !G.paused){ G.paused = true; UI.pauseMenu(); } });
-window.__kart = {G: G, R: R, UI: UI, TRACKS: TRACKS, startSolo: startSolo, useItem: useItem, standings: standings, thumb: thumb, buildKart: buildKart, GR: GR, grShow: grShow, animateDriver: animateDriver, setAuto: function(v){ G.autopilot = !!v; }, buildWorld: buildWorld};
+window.__kart = {G: G, R: R, UI: UI, TRACKS: TRACKS, startSolo: startSolo, useItem: useItem, standings: standings, thumb: thumb, buildKart: buildKart, GR: GR, grShow: grShow, animateDriver: animateDriver, setAuto: function(v){ G.autopilot = !!v; }, buildWorld: buildWorld, stepKart: stepKart, newKart: newKart, botInput: botInput, kartParams: kartParams};
 })();
 </script>
 </body>
